@@ -1,0 +1,640 @@
+{% extends "base.html" %}
+
+{% block title %}Crear Cluster - Video {{ video_id }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <a href="/video/{{ video_id }}" class="back-link">&larr; Cancelar y volver</a>
+    <h1>Crear Nuevo Cluster</h1>
+</div>
+
+<div class="frames-manager">
+    <!-- Cluster Info Section -->
+    <section class="section frames-section cluster-info-section">
+        <div class="cluster-info-form">
+            <div class="form-group">
+                <label for="clusterName">Nombre del cluster (opcional):</label>
+                <input type="text" id="clusterName" placeholder="Ej: Persona principal, Invitado, etc." maxlength="128">
+            </div>
+            <div class="form-group">
+                <label for="clusterDescription">Notas/Comentarios (opcional):</label>
+                <textarea id="clusterDescription" rows="2" maxlength="2000"
+                          placeholder="Ej: Canal invitado del video, aparece en la intro, usa camiseta roja..."></textarea>
+            </div>
+        </div>
+    </section>
+
+    <!-- Reference Frames Section -->
+    <section class="section frames-section references-section">
+        <div class="section-header">
+            <div class="section-title-row">
+                <h2>
+                    <span class="section-icon">&#9889;</span>
+                    Imagenes de Referencia para IA
+                    <span class="reference-counter" id="refCounter">(0/{{ max_refs }})</span>
+                </h2>
+                <button class="info-btn" onclick="showInfoModal('references')" title="Informacion">&#9432;</button>
+            </div>
+            <div class="section-actions">
+                <button class="btn btn-secondary btn-small" onclick="clearReferences()" id="btnClearRefs" disabled>
+                    &#10060; Quitar todas
+                </button>
+            </div>
+        </div>
+
+        <p class="section-description">
+            Arrastra frames aqui o seleccionalos abajo y usa "Anadir a referencias". Los primeros 10 seran usados por la IA.
+        </p>
+
+        <div class="frames-grid reference-frames-grid" id="referenceFramesGrid">
+            <p class="empty-message">Selecciona frames de abajo para anadir como referencias</p>
+        </div>
+
+        <p class="section-hint">
+            <span class="hint-icon">&#128161;</span>
+            Max 14 refs. Algunas IAs usan menos (1-8 segun modelo). Por defecto: top 14 por calidad.
+        </p>
+    </section>
+
+    <!-- Library Frames Section (All video frames) -->
+    <section class="section frames-section library-section">
+        <div class="section-header">
+            <div class="section-title-row">
+                <h2>
+                    <span class="section-icon">&#128193;</span>
+                    Frames Disponibles
+                    <span id="framesCount" class="reference-counter">(--)</span>
+                </h2>
+                <button class="info-btn" onclick="showInfoModal('library')" title="Informacion">&#9432;</button>
+            </div>
+            <div class="section-actions">
+                <span class="selection-info" id="librarySelectionInfo">0 seleccionados</span>
+            </div>
+        </div>
+
+        <div class="library-toolbar">
+            <div class="toolbar-left">
+                <label class="checkbox-wrapper">
+                    <input type="checkbox" id="selectAllLibrary" onchange="toggleSelectAll()">
+                    <span>Seleccionar todos</span>
+                </label>
+                <div class="filter-group">
+                    <label for="frameFilter">Mostrar:</label>
+                    <select id="frameFilter" onchange="applyFilter()">
+                        <option value="all">Todos los frames</option>
+                        <option value="unassigned">Solo sin asignar</option>
+                        <option value="with_face">Con cara detectada</option>
+                    </select>
+                </div>
+            </div>
+            <div class="toolbar-actions">
+                <button class="btn btn-secondary btn-small" id="btnAddToRefs" onclick="addSelectedToReferences()" disabled>
+                    &#9889; Anadir a referencias
+                </button>
+                <button class="btn btn-primary btn-small" id="btnAddToCluster" onclick="addSelectedToCluster()" disabled>
+                    &#10133; Anadir al cluster
+                </button>
+            </div>
+        </div>
+
+        <div class="frames-grid library-frames-grid" id="libraryFramesGrid">
+            <div class="loading">Cargando frames...</div>
+        </div>
+    </section>
+
+    <!-- Action Buttons -->
+    <section class="section action-buttons-section">
+        <div class="action-buttons-container">
+            <a href="/video/{{ video_id }}" class="btn btn-secondary btn-large">
+                &#10060; Cancelar
+            </a>
+            <button class="btn btn-primary btn-large" id="btnCreateCluster" onclick="createCluster()" disabled>
+                &#10003; Crear Cluster (<span id="clusterFrameCount">0</span> frames)
+            </button>
+        </div>
+    </section>
+</div>
+
+<!-- Info Modal: References -->
+<div id="infoModalReferences" class="modal-overlay">
+    <div class="modal-dialog modal-info modal-wide">
+        <div class="modal-header">
+            <span class="modal-icon">&#9432;</span>
+            <span class="modal-title">Imagenes de Referencia</span>
+        </div>
+        <div class="modal-body">
+            <p>Estas imagenes se envian al generador de IA para que pueda recrear el rostro con precision en los thumbnails.</p>
+            <ul class="info-list">
+                <li>Puedes seleccionar hasta {{ max_refs }} imagenes como referencias.</li>
+                <li>Si no seleccionas ninguna, se usaran automaticamente las de mayor calidad del cluster.</li>
+                <li>Elige imagenes donde la cara se vea claramente y con buena iluminacion.</li>
+            </ul>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="closeModal('infoModalReferences')">Entendido</button>
+        </div>
+    </div>
+</div>
+
+<!-- Info Modal: Library -->
+<div id="infoModalLibrary" class="modal-overlay">
+    <div class="modal-dialog modal-info modal-wide">
+        <div class="modal-header">
+            <span class="modal-icon">&#9432;</span>
+            <span class="modal-title">Frames Disponibles</span>
+        </div>
+        <div class="modal-body">
+            <p>Todos los frames extraidos del video, ordenados por calidad (mejor primero).</p>
+            <h4>Acciones disponibles:</h4>
+            <ul class="info-list">
+                <li><strong>&#9889; Anadir a referencias:</strong> Marca los frames seleccionados como imagenes de referencia para la IA (max {{ max_refs }}).</li>
+                <li><strong>&#10133; Anadir al cluster:</strong> Incluye los frames seleccionados en el nuevo cluster.</li>
+            </ul>
+            <div class="info-box info-box-hint">
+                <strong>&#128161;</strong> Los frames con borde verde ya estan anadidos al cluster. Los frames con icono de persona (&#128100;) ya pertenecen a otro cluster, pero puedes anadirlos igualmente: se creara una copia, sin afectar al cluster original.
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="closeModal('infoModalLibrary')">Entendido</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const videoId = {{ video_id }};
+    const MAX_REFS = {{ max_refs }};
+
+    // =========================================================================
+    // STATE
+    // =========================================================================
+    let allFrames = [];                    // All frames from API
+    let filteredFrames = [];               // Frames after filter applied
+    let framesByFilename = new Map();      // filename → frame object (fast lookup)
+
+    let selectedFrames = new Set();        // filenames selected in library
+    let clusterFrames = new Set();         // filenames added to the cluster
+    let referenceFrames = new Set();       // filenames marked as references
+
+    // =========================================================================
+    // INITIALIZATION
+    // =========================================================================
+
+    document.addEventListener('DOMContentLoaded', () => {
+        loadAllFrames();
+        setupEventListeners();
+    });
+
+    function setupEventListeners() {
+        // Event delegation for library grid
+        document.getElementById('libraryFramesGrid')
+            .addEventListener('click', handleLibraryGridClick);
+
+        // Event delegation for reference grid
+        document.getElementById('referenceFramesGrid')
+            .addEventListener('click', handleReferenceGridClick);
+    }
+
+    // =========================================================================
+    // EVENT HANDLERS (delegated)
+    // =========================================================================
+
+    function handleLibraryGridClick(e) {
+        const card = e.target.closest('.library-frame-card');
+        if (!card) return;
+
+        const filename = card.dataset.filename;
+        if (!filename) return;
+
+        // Prevent double-toggle if clicking checkbox directly
+        if (e.target.tagName === 'INPUT') {
+            e.stopPropagation();
+        }
+
+        toggleFrameSelection(filename);
+    }
+
+    function handleReferenceGridClick(e) {
+        const removeBtn = e.target.closest('.frame-remove-btn');
+        if (removeBtn) {
+            const card = removeBtn.closest('.reference-frame-card');
+            const filename = card?.dataset.filename;
+            if (filename) {
+                removeFromReferences(filename);
+            }
+        }
+    }
+
+    async function loadAllFrames() {
+        try {
+            const response = await fetch(`/api/analysis/${videoId}/frames/all?include_assigned=true`);
+            if (!response.ok) throw new Error('Error loading frames');
+
+            const data = await response.json();
+            allFrames = data.frames;
+
+            // Build lookup map for O(1) access by filename
+            framesByFilename.clear();
+            allFrames.forEach(frame => {
+                framesByFilename.set(frame.filename, frame);
+            });
+
+            applyFilter();
+            updateCounters();
+
+        } catch (error) {
+            console.error('Error loading frames:', error);
+            document.getElementById('libraryFramesGrid').innerHTML =
+                `<div class="error">Error cargando frames: ${error.message}</div>`;
+        }
+    }
+
+    // =========================================================================
+    // FILTERING
+    // =========================================================================
+
+    function applyFilter() {
+        const filter = document.getElementById('frameFilter').value;
+
+        switch (filter) {
+            case 'unassigned':
+                filteredFrames = allFrames.filter(f => !f.cluster_id);
+                break;
+            case 'with_face':
+                filteredFrames = allFrames.filter(f => f.quality_score > 0);
+                break;
+            default:
+                filteredFrames = [...allFrames];
+        }
+
+        renderLibraryFrames();
+        updateCounters();
+    }
+
+    // =========================================================================
+    // RENDERING
+    // =========================================================================
+
+    function renderReferenceFrames() {
+        const grid = document.getElementById('referenceFramesGrid');
+
+        if (referenceFrames.size === 0) {
+            grid.innerHTML = '<p class="empty-message">Selecciona frames de abajo para anadir como referencias</p>';
+            return;
+        }
+
+        const html = Array.from(referenceFrames)
+            .map(filename => {
+                const frame = framesByFilename.get(filename);
+                if (!frame) return '';
+                return createReferenceFrameCard(frame);
+            })
+            .join('');
+
+        grid.innerHTML = html;
+    }
+
+    function renderLibraryFrames() {
+        const grid = document.getElementById('libraryFramesGrid');
+
+        if (filteredFrames.length === 0) {
+            grid.innerHTML = '<p class="empty-message">No hay frames disponibles con el filtro actual.</p>';
+            return;
+        }
+
+        grid.innerHTML = filteredFrames.map(frame => createLibraryFrameCard(frame)).join('');
+    }
+
+    function createReferenceFrameCard(frame) {
+        const qualityScore = (frame.quality_score || 0) / 10;
+        const qualityClass = getQualityClass(frame.quality_score);
+        const expressionIcon = getExpressionIcon(frame.expression);
+
+        return `
+            <div class="frame-card reference-frame-card" data-filename="${frame.filename}">
+                <button class="frame-remove-btn" title="Quitar de referencias">
+                    &times;
+                </button>
+                <img src="/api/analysis/${videoId}/frames/${encodeURIComponent(frame.filename)}/image"
+                     alt="${frame.filename}"
+                     loading="lazy"
+                     onerror="this.src='/static/img/placeholder.svg'">
+                <div class="frame-info">
+                    <div class="quality-bar ${qualityClass}">
+                        <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
+                    </div>
+                    <div class="frame-meta">
+                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
+                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function createLibraryFrameCard(frame) {
+        const qualityScore = (frame.quality_score || 0) / 10;
+        const qualityClass = getQualityClass(frame.quality_score);
+        const expressionIcon = getExpressionIcon(frame.expression);
+        const isSelected = selectedFrames.has(frame.filename);
+        const isInCluster = clusterFrames.has(frame.filename);
+        const isInOtherCluster = frame.cluster_id !== null;
+        const sceneInfo = extractSceneInfo(frame.filename);
+
+        let statusClass = '';
+        let statusIcon = '';
+        if (isInCluster) {
+            statusClass = 'in-cluster';
+            statusIcon = '<span class="frame-status-icon" title="Anadido al cluster">&#10003;</span>';
+        } else if (isInOtherCluster) {
+            statusClass = 'in-other-cluster';
+            statusIcon = `<span class="frame-status-icon" title="Ya en Persona ${frame.cluster_index + 1}">&#128100;</span>`;
+        }
+
+        return `
+            <div class="frame-card library-frame-card ${isSelected ? 'selected' : ''} ${statusClass}"
+                 data-filename="${frame.filename}">
+                <div class="frame-checkbox">
+                    <input type="checkbox" ${isSelected ? 'checked' : ''}>
+                </div>
+                ${statusIcon}
+                <img src="/api/analysis/${videoId}/frames/${encodeURIComponent(frame.filename)}/image"
+                     alt="${frame.filename}"
+                     loading="lazy"
+                     onerror="this.src='/static/img/placeholder.svg'">
+                <div class="frame-info">
+                    <div class="quality-bar ${qualityClass}">
+                        <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
+                    </div>
+                    <div class="frame-meta">
+                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
+                        <span class="scene-info" title="Escena y frame">${sceneInfo}</span>
+                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // =========================================================================
+    // SELECTION
+    // =========================================================================
+
+    function toggleFrameSelection(filename) {
+        if (selectedFrames.has(filename)) {
+            selectedFrames.delete(filename);
+        } else {
+            selectedFrames.add(filename);
+        }
+
+        // Selective DOM update instead of full re-render
+        updateFrameCardState(filename);
+        updateCounters();
+    }
+
+    function updateFrameCardState(filename) {
+        const card = document.querySelector(
+            `.library-frame-card[data-filename="${CSS.escape(filename)}"]`
+        );
+        if (!card) return;
+
+        const isSelected = selectedFrames.has(filename);
+        const isInCluster = clusterFrames.has(filename);
+
+        // Update selected state
+        card.classList.toggle('selected', isSelected);
+
+        // Update checkbox
+        const checkbox = card.querySelector('input[type="checkbox"]');
+        if (checkbox) checkbox.checked = isSelected;
+
+        // Update cluster status
+        card.classList.toggle('in-cluster', isInCluster);
+
+        // Update status icon if needed
+        if (isInCluster && !card.querySelector('.frame-status-icon')) {
+            const icon = document.createElement('span');
+            icon.className = 'frame-status-icon';
+            icon.title = 'Anadido al cluster';
+            icon.innerHTML = '&#10003;';
+            card.insertBefore(icon, card.querySelector('img'));
+        }
+    }
+
+    function toggleSelectAll() {
+        const selectAllCb = document.getElementById('selectAllLibrary');
+        if (selectAllCb.checked) {
+            filteredFrames.forEach(f => selectedFrames.add(f.filename));
+        } else {
+            selectedFrames.clear();
+        }
+        renderLibraryFrames();
+        updateCounters();
+    }
+
+    // =========================================================================
+    // ACTIONS
+    // =========================================================================
+
+    function addSelectedToCluster() {
+        if (selectedFrames.size === 0) return;
+
+        const filenames = Array.from(selectedFrames);
+        filenames.forEach(filename => {
+            clusterFrames.add(filename);
+        });
+
+        selectedFrames.clear();
+
+        // Update visual state for affected frames
+        filenames.forEach(filename => updateFrameCardState(filename));
+        updateCounters();
+        ThumbnailApp.showToast('Frames anadidos al cluster', 'success');
+    }
+
+    function addSelectedToReferences() {
+        if (selectedFrames.size === 0) return;
+
+        let added = 0;
+        const filenames = Array.from(selectedFrames);
+
+        filenames.forEach(filename => {
+            if (referenceFrames.size < MAX_REFS && !referenceFrames.has(filename)) {
+                referenceFrames.add(filename);
+                // Also add to cluster if not already
+                clusterFrames.add(filename);
+                added++;
+            }
+        });
+
+        selectedFrames.clear();
+
+        // Update visual state for affected frames
+        filenames.forEach(filename => updateFrameCardState(filename));
+        renderReferenceFrames();
+        updateCounters();
+
+        if (added > 0) {
+            ThumbnailApp.showToast(`${added} frame(s) anadido(s) a referencias`, 'success');
+        } else {
+            ThumbnailApp.showToast(`Maximo ${MAX_REFS} referencias alcanzado`, 'warning');
+        }
+    }
+
+    function removeFromReferences(filename) {
+        referenceFrames.delete(filename);
+        renderReferenceFrames();
+        updateCounters();
+    }
+
+    function clearReferences() {
+        referenceFrames.clear();
+        renderReferenceFrames();
+        updateCounters();
+    }
+
+    // Helper function to convert filenames to paths for API calls
+    function filenamesToPaths(filenames) {
+        return Array.from(filenames)
+            .map(filename => framesByFilename.get(filename)?.path)
+            .filter(Boolean);
+    }
+
+    async function createCluster() {
+        if (clusterFrames.size === 0) {
+            ThumbnailApp.showToast('Selecciona al menos un frame para el cluster', 'error');
+            return;
+        }
+
+        const clusterName = document.getElementById('clusterName').value.trim() || null;
+        const clusterDescription = document.getElementById('clusterDescription').value.trim() || null;
+
+        // Convert filenames to paths for the API
+        const framePaths = filenamesToPaths(clusterFrames);
+        const refPaths = referenceFrames.size > 0 ? filenamesToPaths(referenceFrames) : null;
+
+        if (framePaths.length === 0) {
+            ThumbnailApp.showToast('Error: no se encontraron los frames seleccionados', 'error');
+            return;
+        }
+
+        // Disable button while creating
+        const btn = document.getElementById('btnCreateCluster');
+        btn.disabled = true;
+        btn.innerHTML = '&#8987; Creando...';
+
+        try {
+            const response = await fetch(`/api/analysis/${videoId}/clusters/create`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    frame_paths: framePaths,
+                    label: clusterName,
+                    description: clusterDescription,
+                    reference_frame_paths: refPaths
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Error creating cluster');
+            }
+
+            const data = await response.json();
+            ThumbnailApp.showToast(`Cluster creado con ${data.cluster.num_frames} frames`, 'success');
+
+            // Redirect back to video detail page
+            setTimeout(() => {
+                window.location.href = `/video/${videoId}`;
+            }, 1000);
+
+        } catch (error) {
+            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+            btn.disabled = false;
+            btn.innerHTML = `&#10003; Crear Cluster (<span id="clusterFrameCount">${clusterFrames.size}</span> frames)`;
+        }
+    }
+
+    // =========================================================================
+    // COUNTERS & UI UPDATES
+    // =========================================================================
+
+    function updateCounters() {
+        // Frames count
+        document.getElementById('framesCount').textContent = `(${filteredFrames.length})`;
+
+        // Reference counter
+        document.getElementById('refCounter').textContent = `(${referenceFrames.size}/${MAX_REFS})`;
+
+        // Selection info
+        const selCount = selectedFrames.size;
+        document.getElementById('librarySelectionInfo').textContent =
+            `${selCount} seleccionado${selCount !== 1 ? 's' : ''}`;
+
+        // Button states
+        const btnAddToRefs = document.getElementById('btnAddToRefs');
+        const btnAddToCluster = document.getElementById('btnAddToCluster');
+        const btnClearRefs = document.getElementById('btnClearRefs');
+        const btnCreateCluster = document.getElementById('btnCreateCluster');
+
+        btnAddToRefs.disabled = selCount === 0 || referenceFrames.size >= MAX_REFS;
+        btnAddToCluster.disabled = selCount === 0;
+        btnClearRefs.disabled = referenceFrames.size === 0;
+        btnCreateCluster.disabled = clusterFrames.size === 0;
+
+        // Update create button text
+        document.getElementById('clusterFrameCount').textContent = clusterFrames.size;
+
+        // Select all checkbox state
+        const selectAllCb = document.getElementById('selectAllLibrary');
+        selectAllCb.checked = selCount === filteredFrames.length && selCount > 0;
+        selectAllCb.indeterminate = selCount > 0 && selCount < filteredFrames.length;
+    }
+
+    // =========================================================================
+    // HELPERS
+    // =========================================================================
+
+    function extractSceneInfo(filename) {
+        if (!filename) return '';
+        const match = filename.match(/scene_(\d+)_frame_(\d+)/);
+        if (match) {
+            return `S${parseInt(match[1])}:F${parseInt(match[2])}`;
+        }
+        return '';
+    }
+
+    function getQualityClass(score) {
+        if (score >= 90) return 'quality-excellent';
+        if (score >= 75) return 'quality-good';
+        if (score >= 60) return 'quality-fair';
+        if (score >= 40) return 'quality-poor';
+        return 'quality-bad';
+    }
+
+    function getExpressionIcon(expression) {
+        const icons = {
+            'smiling': '&#128522;',
+            'neutral': '&#128528;',
+            'mouth_closed': '&#128566;',
+            'mouth_open': '&#128558;'
+        };
+        return icons[expression] || '&#128528;';
+    }
+
+    // =========================================================================
+    // MODALS
+    // =========================================================================
+
+    function showInfoModal(type) {
+        const modalId = type === 'references' ? 'infoModalReferences' : 'infoModalLibrary';
+        document.getElementById(modalId).classList.add('visible');
+    }
+
+    function closeModal(modalId) {
+        document.getElementById(modalId).classList.remove('visible');
+    }
+</script>
+{% endblock %}

@@ -1,0 +1,71 @@
+# Output directory
+output/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+database/*.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Claude Code config
+.claude/
+
+# SQLite WAL files
+*.db-shm
+*.db-wal
+
+# Claude Code config (personal settings)
+CLAUDE.md
+
+# Additional security patterns
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+secrets.*
+credentials.*
+
+# Documentation (screenshots pending)
+docs/
+
+# Development scripts and tests (internal use only)
+scripts/
+tests/
+
+# Windows batch files (local dev only)
+*.bat
+
+# One-time migration scripts
+migrate_*.py
+
+# Internal architecture docs
+ARCHITECTURE.md

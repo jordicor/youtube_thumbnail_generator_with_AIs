@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block title %}Results - Thumbnail Generator{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <a href="/" class="back-link">&larr; Volver a videos</a>
+    <h1>Thumbnails Generados</h1>
+</div>
+
+<div id="jobInfo" class="job-info">
+    <div class="loading">Cargando informacion del trabajo...</div>
+</div>
+
+<div id="actionsBar" class="actions-bar" style="display: none;">
+    <a id="downloadAllBtn" href="#" class="btn btn-primary">
+        Descargar todos (ZIP)
+    </a>
+    <button id="regenerateBtn" class="btn btn-secondary" onclick="regenerate()">
+        Regenerar
+    </button>
+</div>
+
+<div id="thumbnailsGrid" class="thumbnails-grid">
+    <div class="loading">Cargando thumbnails...</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const jobId = {{ job_id }};
+
+    document.addEventListener('DOMContentLoaded', () => {
+        loadJobInfo();
+        loadThumbnails();
+        setupDownloadButton();
+    });
+
+    function setupDownloadButton() {
+        const downloadBtn = document.getElementById('downloadAllBtn');
+        downloadBtn.href = `/api/thumbnails/job/${jobId}/download-all`;
+    }
+
+    async function loadJobInfo() {
+        try {
+            const response = await fetch(`/api/generation/jobs/${jobId}/status`);
+            const data = await response.json();
+
+            const infoDiv = document.getElementById('jobInfo');
+            infoDiv.innerHTML = `
+                <p><strong>Estado:</strong> ${escapeHtml(data.status)}</p>
+                <p><strong>Progreso:</strong> ${escapeHtml(data.progress)}%</p>
+                <p><strong>Thumbnails:</strong> ${data.thumbnails_generated}/${data.total_thumbnails}</p>
+            `;
+        } catch (error) {
+            document.getElementById('jobInfo').innerHTML =
+                `<div class="error">Error cargando informacion: ${escapeHtml(error.message)}</div>`;
+        }
+    }
+
+    async function loadThumbnails() {
+        const grid = document.getElementById('thumbnailsGrid');
+        const actionsBar = document.getElementById('actionsBar');
+
+        try {
+            const response = await fetch(`/api/generation/jobs/${jobId}/thumbnails`);
+            const thumbnails = await response.json();
+
+            if (thumbnails.length === 0) {
+                grid.innerHTML = '<p>No hay thumbnails generados aun</p>';
+                actionsBar.style.display = 'none';
+                return;
+            }
+
+            // Show actions bar when there are thumbnails
+            actionsBar.style.display = 'flex';
+            grid.innerHTML = '';
+
+            for (const thumb of thumbnails) {
+                const card = document.createElement('div');
+                card.className = 'thumbnail-card';
+                card.innerHTML = `
+                    <img src="/api/thumbnails/${thumb.id}" alt="Thumbnail ${thumb.prompt_index}">
+                    <div class="thumbnail-info">
+                        <h4>${escapeHtml(thumb.suggested_title) || 'Thumbnail ' + thumb.prompt_index}</h4>
+                        <p>${escapeHtml(thumb.text_overlay) || ''}</p>
+                        <div class="thumbnail-actions">
+                            <a href="/api/thumbnails/${thumb.id}" download class="btn btn-primary btn-small">
+                                Descargar
+                            </a>
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(card);
+            }
+        } catch (error) {
+            grid.innerHTML = `<div class="error">Error cargando thumbnails: ${escapeHtml(error.message)}</div>`;
+            actionsBar.style.display = 'none';
+        }
+    }
+
+    function regenerate() {
+        // Go back to video detail page to regenerate
+        window.history.back();
+    }
+</script>
+{% endblock %}

@@ -1,0 +1,100 @@
+# YouTube Thumbnail Generator - Dependencies
+# ==========================================
+# Install with: pip install -r requirements.txt
+# Or run: setup_environment.bat (creates fresh conda env)
+
+# Core dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+requests>=2.31.0
+tqdm>=4.66.0
+
+# Scene detection
+scenedetect[opencv]>=0.6.2
+
+# Face detection and recognition
+# InsightFace - Best accuracy (99.86% on LFW)
+insightface>=0.7.3
+onnxruntime-gpu>=1.19.0  # GPU support for RTX 4090
+
+# Transcription (local Whisper - uses GPU)
+openai-whisper>=20231117
+
+# LLM APIs for prompt generation
+anthropic>=0.18.0          # Claude API (best for prompts)
+openai>=1.12.0             # OpenAI/GPT API
+google-generativeai>=0.4.0 # Gemini API (legacy)
+google-genai>=0.8.0        # Google GenAI SDK (for Imagen/Nano Banana)
+
+# Image generation (optional alternatives)
+replicate>=0.25.0          # For FLUX/SDXL models
+
+# FastAPI Web Interface
+fastapi>=0.109.0           # Web framework
+uvicorn[standard]>=0.27.0  # ASGI server
+python-multipart>=0.0.6    # File uploads
+jinja2>=3.1.2              # HTML templating
+aiofiles>=23.2.1           # Async file operations
+aiohttp>=3.9.0             # Async HTTP client (required for Gran Sabio LLM client)
+
+# Database
+aiosqlite>=0.19.0          # Async SQLite
+
+# Job Queue (Redis)
+redis>=5.0.0               # Redis client (async support included)
+arq>=0.26.0                # Async job queue for Redis
+
+# Environment management
+python-dotenv>=1.0.0       # Load .env files
+
+# Face clustering (Phase 1)
+scikit-learn>=1.3.0        # DBSCAN clustering
+
+# =============================================================================
+# INSTALLATION NOTES
+# =============================================================================
+#
+# 1. RECOMMENDED: Use setup_environment.bat to create a clean conda environment
+#    This avoids DLL conflicts with other ML libraries
+#
+# 2. FFmpeg is REQUIRED for audio extraction:
+#    Windows: winget install FFmpeg
+#    Or download from: https://ffmpeg.org/download.html
+#
+# 3. GPU Support (RTX 4090):
+#    DeepFace will use TensorFlow with CUDA automatically
+#    Whisper will use PyTorch with CUDA automatically
+#
+# 4. Model downloads (automatic on first use):
+#    - DeepFace models: ~500MB
+#    - Whisper turbo: ~800MB
+#    - Total: ~1.3GB
+#
+# 5. API Keys needed (set in .env file, see .env.example):
+#    - ELEVENLABS_API_KEY (for transcription via API)
+#    - GEMINI_API_KEY (for Nano Banana Pro image generation)
+#    - ANTHROPIC_API_KEY (for Claude prompt generation)
+#    - OPENAI_API_KEY (optional, for DALL-E fallback)
+#    - POE_API_KEY (optional, for FLUX models via Poe)
+#
+# 6. Gran Sabio LLM (required for web interface prompt generation):
+#    - Clone from: https://github.com/jordicor/Gran_Sabio_LLM
+#    - Configure in .env:
+#      GRANSABIO_CLIENT_PATH=/path/to/Gran_Sabio_LLM/client
+#      GRANSABIO_LLM_URL=http://localhost:8000
+#
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+#
+# If you get DLL errors:
+#   1. Run setup_environment.bat to create fresh environment
+#   2. Make sure no other conda envs are active
+#   3. Ensure CUDA drivers are up to date
+#
+# If DeepFace fails to load:
+#   Face detection will still work with OpenCV fallback
+#   (just won't match against reference face)
+#
+# =============================================================================

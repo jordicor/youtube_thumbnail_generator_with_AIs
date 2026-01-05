@@ -1,0 +1,240 @@
+"""
+Thumbnails API Routes
+
+Endpoints for serving and managing generated thumbnails.
+"""
+
+import io
+import zipfile
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
+from pathlib import Path
+from typing import Optional
+from datetime import datetime
+
+from database.db import get_db
+
+
+router = APIRouter()
+
+
+@router.get("/{thumbnail_id}")
+async def get_thumbnail(thumbnail_id: int):
+    """
+    Get a specific thumbnail image.
+    """
+    async with get_db() as db:
+        query = "SELECT filepath FROM thumbnails WHERE id = ?"
+        async with db.execute(query, [thumbnail_id]) as cursor:
+            row = await cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    filepath = row[0]
+    if not Path(filepath).exists():
+        raise HTTPException(status_code=404, detail="Thumbnail file not found")
+
+    return FileResponse(filepath, media_type="image/png")
+
+
+@router.get("/{thumbnail_id}/info")
+async def get_thumbnail_info(thumbnail_id: int):
+    """
+    Get thumbnail metadata.
+    """
+    async with get_db() as db:
+        query = """
+            SELECT t.*, j.video_id
+            FROM thumbnails t
+            JOIN generation_jobs j ON t.job_id = j.id
+            WHERE t.id = ?
+        """
+        async with db.execute(query, [thumbnail_id]) as cursor:
+            row = await cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    columns = [description[0] for description in cursor.description]
+    thumbnail = dict(zip(columns, row))
+
+    return thumbnail
+
+
+@router.delete("/{thumbnail_id}")
+async def delete_thumbnail(thumbnail_id: int):
+    """
+    Delete a specific thumbnail.
+    """
+    async with get_db() as db:
+        # Get filepath first
+        query = "SELECT filepath FROM thumbnails WHERE id = ?"
+        async with db.execute(query, [thumbnail_id]) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+        filepath = Path(row[0])
+
+        # Delete from database
+        await db.execute("DELETE FROM thumbnails WHERE id = ?", [thumbnail_id])
+        await db.commit()
+
+        # Delete file if exists
+        if filepath.exists():
+            filepath.unlink()
+
+    return {"deleted": True, "thumbnail_id": thumbnail_id}
+
+
+@router.get("/video/{video_id}")
+async def get_video_thumbnails(video_id: int, limit: int = 50):
+    """
+    Get all thumbnails for a video.
+    """
+    async with get_db() as db:
+        query = """
+            SELECT t.id, t.filepath, t.prompt_index, t.variation_index,
+                   t.suggested_title, t.text_overlay, t.created_at
+            FROM thumbnails t
+            JOIN generation_jobs j ON t.job_id = j.id
+            WHERE j.video_id = ?
+            ORDER BY t.created_at DESC
+            LIMIT ?
+        """
+        async with db.execute(query, [video_id, limit]) as cursor:
+            rows = await cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            thumbnails = [dict(zip(columns, row)) for row in rows]
+
+    return {"video_id": video_id, "thumbnails": thumbnails}
+
+
+@router.get("/job/{job_id}/download-all")
+async def download_all_thumbnails(job_id: int):
+    """
+    Download all thumbnails for a job as a ZIP file.
+    """
+    async with get_db() as db:
+        # Get job info for filename
+        query = """
+            SELECT j.id, v.filename
+            FROM generation_jobs j
+            JOIN videos v ON j.video_id = v.id
+            WHERE j.id = ?
+        """
+        async with db.execute(query, [job_id]) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        video_filename = row[1]
+
+        # Get all thumbnails for this job
+        query = """
+            SELECT filepath, suggested_title, prompt_index, variation_index
+            FROM thumbnails
+            WHERE job_id = ?
+            ORDER BY prompt_index, variation_index
+        """
+        async with db.execute(query, [job_id]) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No thumbnails found for this job")
+
+    # Create ZIP in memory
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for filepath, title, prompt_idx, var_idx in rows:
+            file_path = Path(filepath)
+            if file_path.exists():
+                # Create a clean filename
+                safe_title = (title or f"thumbnail_{prompt_idx}").replace('/', '_').replace('\\', '_')[:50]
+                if var_idx > 0:
+                    filename = f"{prompt_idx + 1:02d}_{safe_title}_v{var_idx + 1}{file_path.suffix}"
+                else:
+                    filename = f"{prompt_idx + 1:02d}_{safe_title}{file_path.suffix}"
+
+                zip_file.write(file_path, filename)
+
+    zip_buffer.seek(0)
+
+    # Create download filename
+    video_name = Path(video_filename).stem[:30]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    download_name = f"thumbnails_{video_name}_{timestamp}.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name}"'
+        }
+    )
+
+
+@router.get("/video/{video_id}/download-all")
+async def download_all_video_thumbnails(video_id: int):
+    """
+    Download all thumbnails for a video as a ZIP file.
+    """
+    async with get_db() as db:
+        # Get video info for filename
+        query = "SELECT filename FROM videos WHERE id = ?"
+        async with db.execute(query, [video_id]) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Video not found")
+
+        video_filename = row[0]
+
+        # Get all thumbnails for this video
+        query = """
+            SELECT t.filepath, t.suggested_title, t.prompt_index, t.variation_index, j.id as job_id
+            FROM thumbnails t
+            JOIN generation_jobs j ON t.job_id = j.id
+            WHERE j.video_id = ?
+            ORDER BY j.created_at DESC, t.prompt_index, t.variation_index
+        """
+        async with db.execute(query, [video_id]) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No thumbnails found for this video")
+
+    # Create ZIP in memory
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for filepath, title, prompt_idx, var_idx, job_id in rows:
+            file_path = Path(filepath)
+            if file_path.exists():
+                # Create a clean filename with job prefix
+                safe_title = (title or f"thumbnail_{prompt_idx}").replace('/', '_').replace('\\', '_')[:50]
+                if var_idx > 0:
+                    filename = f"job{job_id}/{prompt_idx + 1:02d}_{safe_title}_v{var_idx + 1}{file_path.suffix}"
+                else:
+                    filename = f"job{job_id}/{prompt_idx + 1:02d}_{safe_title}{file_path.suffix}"
+
+                zip_file.write(file_path, filename)
+
+    zip_buffer.seek(0)
+
+    # Create download filename
+    video_name = Path(video_filename).stem[:30]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    download_name = f"all_thumbnails_{video_name}_{timestamp}.zip"
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{download_name}"'
+        }
+    )

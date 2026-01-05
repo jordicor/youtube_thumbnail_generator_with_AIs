@@ -1,0 +1,1488 @@
+{% extends "base.html" %}
+
+{% block title %}Videos - Thumbnail Generator{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Mis Videos</h1>
+    <div class="actions">
+        <button id="scanBtn" class="btn btn-secondary" disabled>
+            Escanear directorio
+        </button>
+    </div>
+</div>
+
+<!-- Directory info bar -->
+<div class="directory-info-bar" id="directoryInfoBar" style="display: none;">
+    <div class="info-left">
+        <span class="info-stats" id="directoryStats">0 videos</span>
+        <span class="info-time" id="directoryTime">Ultimo escaneo: Nunca</span>
+    </div>
+    <div class="info-right">
+        <div class="filter-container">
+            <label for="statusFilter">Filtro:</label>
+            <select id="statusFilter" class="status-filter">
+                <option value="all">Todos</option>
+                <option value="pending">Pendientes</option>
+                <option value="analyzed">Analizados</option>
+                <option value="error">Errores</option>
+                <option value="hidden">Ocultos</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<!-- Selection bar -->
+<div class="selection-bar" id="selectionBar">
+    <div class="selection-bar-left">
+        <label class="checkbox-wrapper">
+            <input type="checkbox" id="selectAllCheckbox">
+            <span>Seleccionar todos</span>
+        </label>
+        <span class="selection-count" id="selectionCount">0 seleccionados</span>
+    </div>
+    <div class="selection-bar-right">
+        <button id="analyzeSelectedBtn" class="btn btn-primary" disabled>
+            Analizar Seleccionados
+        </button>
+        <button id="hideSelectedBtn" class="btn btn-secondary" disabled>
+            Ocultar Seleccionados
+        </button>
+    </div>
+    <!-- Gmail-style selection banner -->
+    <div class="selection-banner" id="selectionBanner">
+        <span id="selectionBannerText"></span>
+        <button class="selection-banner-action" id="selectionBannerBtn"></button>
+    </div>
+</div>
+
+<!-- Video list -->
+<div class="video-grid" id="videoGrid">
+    <div class="empty-state">
+        <p>Selecciona un directorio para ver tus videos.</p>
+        <p>Usa el selector de arriba para elegir o añadir un directorio.</p>
+    </div>
+</div>
+
+<!-- Pagination -->
+<div class="pagination-container" id="paginationContainer" style="display: none;">
+    <div class="pagination-info">
+        <span id="paginationInfo">Mostrando 1-50 de 100 vídeos</span>
+    </div>
+    <div class="pagination-controls">
+        <button class="pagination-btn" id="firstPageBtn" title="Primera página">«</button>
+        <button class="pagination-btn" id="prevPageBtn" title="Página anterior">‹</button>
+        <div class="pagination-numbers" id="paginationNumbers"></div>
+        <button class="pagination-btn" id="nextPageBtn" title="Página siguiente">›</button>
+        <button class="pagination-btn" id="lastPageBtn" title="Última página">»</button>
+    </div>
+</div>
+
+<!-- Video card template -->
+<template id="videoCardTemplate">
+    <div class="video-card" data-id="">
+        <div class="video-thumbnail">
+            <label class="card-checkbox" onclick="event.stopPropagation()">
+                <input type="checkbox" class="video-checkbox">
+            </label>
+            <img src="" alt="" onerror="this.src='/static/img/placeholder.svg'">
+            <span class="video-status"></span>
+            <!-- Analysis overlay -->
+            <div class="video-analysis-overlay">
+                <div class="overlay-spinner"></div>
+                <span class="overlay-text">Analizando...</span>
+                <span class="overlay-step"></span>
+            </div>
+        </div>
+        <div class="video-info">
+            <h3 class="video-name"></h3>
+            <p class="video-meta"></p>
+        </div>
+        <div class="video-actions">
+            <button class="btn btn-primary btn-analyze">Analizar</button>
+            <button class="btn btn-secondary btn-view">Ver</button>
+            <button class="btn btn-warning btn-reanalyze" title="Eliminar analisis y volver a procesar">Re-analizar</button>
+            <button class="btn btn-secondary btn-hide" title="Ocultar video de la lista">Ocultar</button>
+            <button class="btn btn-success btn-show" title="Volver a mostrar en la lista">Mostrar</button>
+        </div>
+    </div>
+</template>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // State
+    let directories = [];
+    let currentDirectoryId = null;
+    let currentDirectory = null;
+    let currentStatusFilter = 'all';
+
+    // Pagination state
+    let currentPage = 1;
+    const PAGE_SIZE = 50;
+    let totalFilteredVideos = 0;
+    let allVideosSelected = false;  // Gmail-style global selection
+
+    // DOM Elements
+    const directorySelector = document.getElementById('directorySelector');
+    const directoryCurrent = document.getElementById('directoryCurrent');
+    const directoryName = document.getElementById('directoryName');
+    const directoryDropdown = document.getElementById('directoryDropdown');
+    const directoryList = document.getElementById('directoryList');
+    const newDirectoryPath = document.getElementById('newDirectoryPath');
+    const addDirectoryBtn = document.getElementById('addDirectoryBtn');
+    const scanBtn = document.getElementById('scanBtn');
+    const videoGrid = document.getElementById('videoGrid');
+    const directoryInfoBar = document.getElementById('directoryInfoBar');
+    const directoryStats = document.getElementById('directoryStats');
+    const directoryTime = document.getElementById('directoryTime');
+    const statusFilter = document.getElementById('statusFilter');
+
+    // Selection elements
+    const selectionBar = document.getElementById('selectionBar');
+    const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+    const selectionCount = document.getElementById('selectionCount');
+    const analyzeSelectedBtn = document.getElementById('analyzeSelectedBtn');
+    const hideSelectedBtn = document.getElementById('hideSelectedBtn');
+
+    // Selection banner elements (Gmail-style)
+    const selectionBanner = document.getElementById('selectionBanner');
+    const selectionBannerText = document.getElementById('selectionBannerText');
+    const selectionBannerBtn = document.getElementById('selectionBannerBtn');
+
+    // Pagination elements
+    const paginationContainer = document.getElementById('paginationContainer');
+    const paginationInfo = document.getElementById('paginationInfo');
+    const paginationNumbers = document.getElementById('paginationNumbers');
+    const firstPageBtn = document.getElementById('firstPageBtn');
+    const prevPageBtn = document.getElementById('prevPageBtn');
+    const nextPageBtn = document.getElementById('nextPageBtn');
+    const lastPageBtn = document.getElementById('lastPageBtn');
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+        loadDirectories();
+        setupDirectorySelector();
+        setupScan();
+        setupAddDirectory();
+        setupSelection();
+        setupStatusFilter();
+        setupPagination();
+
+        // Load saved directory from localStorage
+        const savedDirId = localStorage.getItem('activeDirectoryId');
+        if (savedDirId) {
+            currentDirectoryId = parseInt(savedDirId);
+        }
+
+        // Load saved filter from localStorage
+        const savedFilter = localStorage.getItem('videoStatusFilter');
+        if (savedFilter) {
+            currentStatusFilter = savedFilter;
+            statusFilter.value = savedFilter;
+        }
+    });
+
+    // ========================================================================
+    // DIRECTORY SELECTOR
+    // ========================================================================
+
+    function setupDirectorySelector() {
+        // Toggle dropdown
+        directoryCurrent.addEventListener('click', (e) => {
+            e.stopPropagation();
+            directorySelector.classList.toggle('open');
+        });
+
+        // Close on outside click
+        document.addEventListener('click', (e) => {
+            if (!directorySelector.contains(e.target)) {
+                directorySelector.classList.remove('open');
+            }
+        });
+    }
+
+    async function loadDirectories() {
+        try {
+            const response = await fetch('/api/directories');
+            const data = await response.json();
+            directories = data.directories;
+            renderDirectoryList();
+
+            // If we have a saved directory ID, select it
+            if (currentDirectoryId) {
+                const dir = directories.find(d => d.id === currentDirectoryId);
+                if (dir) {
+                    selectDirectory(dir);
+                } else {
+                    // Saved directory no longer exists
+                    localStorage.removeItem('activeDirectoryId');
+                    currentDirectoryId = null;
+                }
+            }
+        } catch (error) {
+            console.error('Error loading directories:', error);
+            ThumbnailApp.showToast('Error cargando directorios', 'error');
+        }
+    }
+
+    function renderDirectoryList() {
+        if (directories.length === 0) {
+            directoryList.innerHTML = `
+                <div class="directory-empty">
+                    <p>No hay directorios guardados.</p>
+                    <p>Añade uno abajo.</p>
+                </div>
+            `;
+            return;
+        }
+
+        directoryList.innerHTML = directories.map(dir => `
+            <div class="directory-item ${dir.id === currentDirectoryId ? 'active' : ''}"
+                 data-id="${dir.id}">
+                <div class="directory-item-info">
+                    <div class="directory-item-name">${escapeHtml(dir.name || dir.path.split(/[/\\]/).pop())}</div>
+                    <div class="directory-item-path">${escapeHtml(dir.path)}</div>
+                </div>
+                <div class="directory-item-meta">
+                    <div class="directory-item-count">${dir.video_count} videos</div>
+                    <div class="directory-item-time">${dir.time_ago}</div>
+                </div>
+                <button class="directory-item-delete" data-id="${dir.id}" title="Eliminar">×</button>
+            </div>
+        `).join('');
+
+        // Add click handlers
+        directoryList.querySelectorAll('.directory-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                if (e.target.classList.contains('directory-item-delete')) {
+                    return; // Handle delete separately
+                }
+                const dirId = parseInt(item.dataset.id);
+                const dir = directories.find(d => d.id === dirId);
+                if (dir) {
+                    selectDirectory(dir);
+                    directorySelector.classList.remove('open');
+                }
+            });
+        });
+
+        // Delete handlers
+        directoryList.querySelectorAll('.directory-item-delete').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const dirId = parseInt(btn.dataset.id);
+                const confirmed = await ThumbnailApp.showModal({
+                    title: 'Eliminar Directorio',
+                    message: '¿Eliminar este directorio de la lista?<br><br>Los videos permaneceran en la base de datos.',
+                    type: 'warning',
+                    confirmText: 'Eliminar',
+                    cancelText: 'Cancelar'
+                });
+                if (confirmed) {
+                    await deleteDirectory(dirId);
+                }
+            });
+        });
+    }
+
+    function selectDirectory(dir) {
+        currentDirectoryId = dir.id;
+        currentDirectory = dir;
+        localStorage.setItem('activeDirectoryId', dir.id);
+
+        // Update UI
+        directoryName.textContent = dir.name || dir.path.split(/[/\\]/).pop();
+        scanBtn.disabled = false;
+
+        // Mark as active in list
+        directoryList.querySelectorAll('.directory-item').forEach(item => {
+            item.classList.toggle('active', parseInt(item.dataset.id) === dir.id);
+        });
+
+        // Show info bar
+        updateDirectoryInfoBar(dir);
+
+        // Load videos for this directory
+        loadVideosForDirectory(dir.id);
+    }
+
+    function updateDirectoryInfoBar(dir) {
+        directoryInfoBar.style.display = 'flex';
+        // Stats will be updated by updateFilteredStats after videos load
+        directoryTime.textContent = `Ultimo escaneo: ${dir.time_ago}`;
+    }
+
+    async function deleteDirectory(dirId) {
+        try {
+            const response = await fetch(`/api/directories/${dirId}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) {
+                throw new Error('Error deleting directory');
+            }
+
+            // If we deleted the current directory, clear selection
+            if (currentDirectoryId === dirId) {
+                currentDirectoryId = null;
+                currentDirectory = null;
+                localStorage.removeItem('activeDirectoryId');
+                directoryName.textContent = 'Seleccionar directorio...';
+                scanBtn.disabled = true;
+                directoryInfoBar.style.display = 'none';
+                showEmptyState();
+            }
+
+            await loadDirectories();
+            ThumbnailApp.showToast('Directorio eliminado', 'success');
+        } catch (error) {
+            console.error('Error deleting directory:', error);
+            ThumbnailApp.showToast('Error eliminando directorio', 'error');
+        }
+    }
+
+    // ========================================================================
+    // ADD DIRECTORY
+    // ========================================================================
+
+    function setupAddDirectory() {
+        addDirectoryBtn.addEventListener('click', addDirectory);
+        newDirectoryPath.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                addDirectory();
+            }
+        });
+    }
+
+    async function addDirectory() {
+        const path = newDirectoryPath.value.trim();
+        if (!path) {
+            ThumbnailApp.showToast('Introduce una ruta de directorio', 'error');
+            return;
+        }
+
+        addDirectoryBtn.disabled = true;
+        addDirectoryBtn.textContent = 'Añadiendo...';
+
+        try {
+            const response = await fetch('/api/directories', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Error adding directory');
+            }
+
+            const newDir = await response.json();
+            newDirectoryPath.value = '';
+
+            await loadDirectories();
+
+            // Auto-select the new directory and scan it
+            selectDirectory(newDir);
+            directorySelector.classList.remove('open');
+
+            // Auto-scan since it's new
+            await scanDirectory();
+
+            ThumbnailApp.showToast('Directorio añadido', 'success');
+        } catch (error) {
+            console.error('Error adding directory:', error);
+            ThumbnailApp.showToast(error.message, 'error');
+        } finally {
+            addDirectoryBtn.disabled = false;
+            addDirectoryBtn.textContent = 'Añadir';
+        }
+    }
+
+    // ========================================================================
+    // VIDEOS
+    // ========================================================================
+
+    async function loadVideosForDirectory(directoryId, filter = null, page = 1) {
+        videoGrid.innerHTML = '<div class="loading">Cargando videos...</div>';
+        showSelectionBar(false);
+        hidePagination();
+
+        // Use provided filter or current global filter
+        const activeFilter = filter !== null ? filter : currentStatusFilter;
+
+        // Calculate pagination offset
+        const skip = (page - 1) * PAGE_SIZE;
+
+        try {
+            let url = `/api/directories/${directoryId}/videos?skip=${skip}&limit=${PAGE_SIZE}`;
+            if (activeFilter && activeFilter !== 'all') {
+                url += `&status=${activeFilter}`;
+            }
+            const response = await fetch(url);
+            const data = await response.json();
+
+            // Update directory info
+            currentDirectory = data.directory;
+            updateDirectoryInfoBar(data.directory);
+
+            // Store total for pagination
+            totalFilteredVideos = data.total;
+            currentPage = page;
+
+            if (data.videos.length === 0) {
+                let emptyMessage = '';
+                if (activeFilter === 'pending') {
+                    emptyMessage = `
+                        <div class="empty-state">
+                            <p>No hay videos pendientes de analizar.</p>
+                            <p>Cambia el filtro para ver otros videos.</p>
+                        </div>
+                    `;
+                } else if (activeFilter === 'analyzed') {
+                    emptyMessage = `
+                        <div class="empty-state">
+                            <p>No hay videos analizados.</p>
+                            <p>Analiza algunos videos o cambia el filtro.</p>
+                        </div>
+                    `;
+                } else if (activeFilter === 'error') {
+                    emptyMessage = `
+                        <div class="empty-state">
+                            <p>No hay videos con errores.</p>
+                        </div>
+                    `;
+                } else if (activeFilter === 'hidden') {
+                    emptyMessage = `
+                        <div class="empty-state">
+                            <p>No hay videos ocultos.</p>
+                            <p>Los videos que ocultes apareceran aqui.</p>
+                        </div>
+                    `;
+                } else {
+                    emptyMessage = `
+                        <div class="empty-state">
+                            <p>No hay videos en este directorio.</p>
+                            <p>Haz clic en "Escanear directorio" para buscar videos.</p>
+                        </div>
+                    `;
+                }
+                videoGrid.innerHTML = emptyMessage;
+                showSelectionBar(false);
+                // Still update stats for empty state (data.total is 0 here)
+                updateFilteredStats(data.total, data.directory.video_count, data.directory.hidden_count, activeFilter);
+                return;
+            }
+
+            videoGrid.innerHTML = '';
+            for (const video of data.videos) {
+                const card = createVideoCard(video);
+                videoGrid.appendChild(card);
+            }
+
+            // Update stats to show filtered count (use data.total for accurate count, not data.videos.length which is limited by pagination)
+            updateFilteredStats(data.total, data.directory.video_count, data.directory.hidden_count, activeFilter);
+
+            // Show selection bar when there are videos
+            showSelectionBar(true);
+
+            // If global selection is active, mark all checkboxes on this page
+            if (allVideosSelected) {
+                const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
+                checkboxes.forEach(cb => {
+                    cb.checked = true;
+                    updateCardSelection(cb);
+                });
+                selectAllCheckbox.checked = true;
+            }
+
+            updateSelectionUI();
+            updateSelectionBanner();
+
+            // Show pagination if needed
+            if (totalFilteredVideos > PAGE_SIZE) {
+                renderPagination();
+            }
+        } catch (error) {
+            console.error('Error loading videos:', error);
+            videoGrid.innerHTML = `<div class="error">Error cargando videos: ${escapeHtml(error.message)}</div>`;
+            showSelectionBar(false);
+        }
+    }
+
+    function showEmptyState() {
+        videoGrid.innerHTML = `
+            <div class="empty-state">
+                <p>Selecciona un directorio para ver tus videos.</p>
+                <p>Usa el selector de arriba para elegir o añadir un directorio.</p>
+            </div>
+        `;
+    }
+
+    function createVideoCard(video) {
+        const template = document.getElementById('videoCardTemplate');
+        const card = template.content.cloneNode(true).querySelector('.video-card');
+
+        card.dataset.id = video.id;
+        card.dataset.status = video.status;
+        card.querySelector('.video-name').textContent = video.filename;
+        card.querySelector('.video-status').textContent = getStatusLabel(video.status);
+        card.querySelector('.video-status').className = `video-status status-${video.status}`;
+
+        const duration = video.duration_seconds
+            ? `${Math.floor(video.duration_seconds / 60)}:${String(Math.floor(video.duration_seconds % 60)).padStart(2, '0')}`
+            : 'N/A';
+        card.querySelector('.video-meta').textContent = `Duracion: ${duration}`;
+
+        // Thumbnail
+        const img = card.querySelector('img');
+        img.src = `/api/videos/${video.id}/thumbnail`;
+
+        // Checkbox for selection
+        const checkbox = card.querySelector('.video-checkbox');
+        checkbox.addEventListener('change', () => {
+            updateCardSelection(checkbox);
+            // If unchecking, reset global selection
+            if (!checkbox.checked && allVideosSelected) {
+                allVideosSelected = false;
+            }
+            updateSelectionUI();
+            updateSelectionBanner();
+        });
+
+        // Actions
+        const analyzeBtn = card.querySelector('.btn-analyze');
+        const viewBtn = card.querySelector('.btn-view');
+        const reanalyzeBtn = card.querySelector('.btn-reanalyze');
+        const hideBtn = card.querySelector('.btn-hide');
+        const showBtn = card.querySelector('.btn-show');
+
+        // Determine if we're in hidden view
+        const isHiddenView = currentStatusFilter === 'hidden';
+
+        // Show/Hide buttons based on view
+        if (isHiddenView) {
+            hideBtn.classList.add('hidden');
+            showBtn.addEventListener('click', () => showVideo(video.id));
+        } else {
+            showBtn.classList.add('hidden');
+            hideBtn.addEventListener('click', () => hideVideo(video.id));
+        }
+
+        // Re-analyze button - only for analyzed/completed videos
+        if (video.status === 'analyzed' || video.status === 'completed') {
+            reanalyzeBtn.addEventListener('click', () => reanalyzeVideo(video.id));
+        } else {
+            reanalyzeBtn.classList.add('hidden');
+        }
+
+        // Analyze/View buttons based on status
+        if (video.status === 'analyzed' || video.status === 'completed') {
+            analyzeBtn.classList.add('hidden');
+            viewBtn.addEventListener('click', () => {
+                window.location.href = `/video/${video.id}`;
+            });
+        } else if (video.status === 'analyzing') {
+            analyzeBtn.textContent = 'Analizando...';
+            analyzeBtn.disabled = true;
+            viewBtn.classList.add('hidden');
+
+            // Activate the overlay for already analyzing videos
+            const overlay = card.querySelector('.video-analysis-overlay');
+            if (overlay) {
+                card.classList.add('analyzing');
+                overlay.classList.add('active');
+            }
+
+            // Register as active and start monitoring
+            activeAnalyses.add(video.id);
+            pollVideoStatus(video.id);
+        } else {
+            viewBtn.classList.add('hidden');
+            analyzeBtn.addEventListener('click', () => startAnalysis(video.id));
+        }
+
+        return card;
+    }
+
+    function getStatusLabel(status) {
+        const labels = {
+            'pending': 'Pendiente',
+            'analyzing': 'Analizando...',
+            'analyzing_scenes': 'Detectando escenas...',
+            'analyzing_faces': 'Analizando caras...',
+            'clustering': 'Agrupando caras...',
+            'transcribing': 'Transcribiendo audio...',
+            'analyzed': 'Analizado',
+            'generating': 'Generando...',
+            'completed': 'Completado',
+            'error': 'Error'
+        };
+        return labels[status] || status;
+    }
+
+    // ========================================================================
+    // STATUS FILTER
+    // ========================================================================
+
+    function setupStatusFilter() {
+        statusFilter.addEventListener('change', () => {
+            currentStatusFilter = statusFilter.value;
+            localStorage.setItem('videoStatusFilter', currentStatusFilter);
+
+            // Reset pagination and selection when filter changes
+            currentPage = 1;
+            allVideosSelected = false;
+
+            if (currentDirectoryId) {
+                loadVideosForDirectory(currentDirectoryId, null, 1);
+            }
+        });
+    }
+
+    function updateFilteredStats(filteredCount, totalCount, hiddenCount, filter) {
+        let statsText = '';
+
+        if (filter === 'all' || !filter) {
+            // "Todos" view: show total videos and hidden count if any
+            statsText = `${totalCount} video${totalCount !== 1 ? 's' : ''}`;
+            if (hiddenCount > 0) {
+                statsText += ` (${hiddenCount} oculto${hiddenCount !== 1 ? 's' : ''})`;
+            }
+        } else if (filter === 'pending') {
+            statsText = `Pendientes: ${filteredCount}`;
+        } else if (filter === 'analyzed') {
+            statsText = `Analizados: ${filteredCount}`;
+        } else if (filter === 'error') {
+            statsText = `Errores: ${filteredCount}`;
+        } else if (filter === 'hidden') {
+            statsText = `Ocultos: ${filteredCount}`;
+        }
+
+        directoryStats.textContent = statsText;
+    }
+
+    // ========================================================================
+    // PAGINATION
+    // ========================================================================
+
+    function setupPagination() {
+        firstPageBtn.addEventListener('click', () => goToPage(1));
+        prevPageBtn.addEventListener('click', () => goToPage(currentPage - 1));
+        nextPageBtn.addEventListener('click', () => goToPage(currentPage + 1));
+        lastPageBtn.addEventListener('click', () => goToPage(getTotalPages()));
+    }
+
+    function getTotalPages() {
+        return Math.ceil(totalFilteredVideos / PAGE_SIZE);
+    }
+
+    function goToPage(page) {
+        const totalPages = getTotalPages();
+        if (page < 1 || page > totalPages) return;
+
+        // Reset page-level selection when changing pages
+        // but keep allVideosSelected if set
+        if (!allVideosSelected) {
+            clearSelection();
+        }
+
+        currentPage = page;
+        loadVideosForDirectory(currentDirectoryId, null, page);
+
+        // Scroll to top of video grid
+        videoGrid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function renderPagination() {
+        const totalPages = getTotalPages();
+
+        // Calculate display range
+        const startItem = (currentPage - 1) * PAGE_SIZE + 1;
+        const endItem = Math.min(currentPage * PAGE_SIZE, totalFilteredVideos);
+
+        // Update info text
+        paginationInfo.textContent = `Mostrando ${startItem}-${endItem} de ${totalFilteredVideos} vídeos`;
+
+        // Update button states
+        firstPageBtn.disabled = currentPage === 1;
+        prevPageBtn.disabled = currentPage === 1;
+        nextPageBtn.disabled = currentPage === totalPages;
+        lastPageBtn.disabled = currentPage === totalPages;
+
+        // Render page numbers
+        renderPageNumbers(totalPages);
+
+        // Show pagination container
+        paginationContainer.style.display = 'flex';
+    }
+
+    function renderPageNumbers(totalPages) {
+        paginationNumbers.innerHTML = '';
+
+        // Determine which page numbers to show
+        let pagesToShow = [];
+
+        if (totalPages <= 7) {
+            // Show all pages
+            for (let i = 1; i <= totalPages; i++) {
+                pagesToShow.push(i);
+            }
+        } else {
+            // Show smart pagination with ellipsis
+            if (currentPage <= 4) {
+                pagesToShow = [1, 2, 3, 4, 5, '...', totalPages];
+            } else if (currentPage >= totalPages - 3) {
+                pagesToShow = [1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+            } else {
+                pagesToShow = [1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages];
+            }
+        }
+
+        // Create buttons
+        pagesToShow.forEach(page => {
+            if (page === '...') {
+                const ellipsis = document.createElement('span');
+                ellipsis.className = 'pagination-ellipsis';
+                ellipsis.textContent = '...';
+                paginationNumbers.appendChild(ellipsis);
+            } else {
+                const btn = document.createElement('button');
+                btn.className = `pagination-btn pagination-number ${page === currentPage ? 'active' : ''}`;
+                btn.textContent = page;
+                btn.addEventListener('click', () => goToPage(page));
+                paginationNumbers.appendChild(btn);
+            }
+        });
+    }
+
+    function hidePagination() {
+        paginationContainer.style.display = 'none';
+    }
+
+    // ========================================================================
+    // SCANNING
+    // ========================================================================
+
+    function setupScan() {
+        scanBtn.addEventListener('click', scanDirectory);
+    }
+
+    async function scanDirectory() {
+        if (!currentDirectoryId) {
+            ThumbnailApp.showToast('Selecciona un directorio primero', 'error');
+            return;
+        }
+
+        scanBtn.disabled = true;
+        scanBtn.textContent = 'Escaneando...';
+
+        try {
+            const response = await fetch(`/api/directories/${currentDirectoryId}/scan`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Error scanning');
+            }
+
+            const data = await response.json();
+
+            ThumbnailApp.showToast(
+                `Escaneo completado: ${data.new} nuevos, ${data.existing} existentes`,
+                'success'
+            );
+
+            // Reload directories to update counts
+            await loadDirectories();
+
+            // Reload videos
+            await loadVideosForDirectory(currentDirectoryId);
+
+        } catch (error) {
+            console.error('Error scanning:', error);
+            ThumbnailApp.showToast('Error escaneando: ' + error.message, 'error');
+        } finally {
+            scanBtn.disabled = false;
+            scanBtn.textContent = 'Escanear directorio';
+        }
+    }
+
+    // ========================================================================
+    // ANALYSIS
+    // ========================================================================
+
+    // Queue an analysis - doesn't block the UI
+    async function startAnalysis(videoId) {
+        // Check if already analyzing or queued
+        if (activeAnalyses.has(videoId)) {
+            ThumbnailApp.showToast('Este video ya se esta analizando', 'info');
+            return;
+        }
+
+        if (analysisQueue.some(item => item.videoId === videoId)) {
+            ThumbnailApp.showToast('Este video ya esta en la cola', 'info');
+            return;
+        }
+
+        // If we have capacity, execute immediately
+        if (activeAnalyses.size < MAX_CONCURRENT_ANALYSES) {
+            await executeAnalysis(videoId);
+        } else {
+            // Add to queue
+            analysisQueue.push({ videoId });
+            updateVideoCardOverlay(videoId, 'queued');
+            ThumbnailApp.showToast('Video añadido a la cola de analisis', 'info');
+        }
+    }
+
+    // Active SSE connections
+    const activeConnections = {};
+
+    // ========================================================================
+    // ANALYSIS QUEUE SYSTEM
+    // ========================================================================
+
+    const MAX_CONCURRENT_ANALYSES = 2;
+    const analysisQueue = [];
+    const activeAnalyses = new Set();
+
+    // Update the visual overlay on a video card
+    function updateVideoCardOverlay(videoId, state, stepText = '') {
+        const card = document.querySelector(`.video-card[data-id="${videoId}"]`);
+        if (!card) return;
+
+        const overlay = card.querySelector('.video-analysis-overlay');
+        const overlayText = overlay?.querySelector('.overlay-text');
+        const overlayStep = overlay?.querySelector('.overlay-step');
+
+        if (!overlay) return;
+
+        // Remove all state classes first
+        card.classList.remove('analyzing', 'queued');
+        overlay.classList.remove('active', 'queued');
+
+        switch (state) {
+            case 'analyzing':
+                card.classList.add('analyzing');
+                overlay.classList.add('active');
+                if (overlayText) overlayText.textContent = 'Analizando...';
+                if (overlayStep) overlayStep.textContent = stepText;
+                break;
+
+            case 'queued':
+                card.classList.add('queued');
+                overlay.classList.add('active', 'queued');
+                if (overlayText) overlayText.textContent = 'En cola...';
+                if (overlayStep) overlayStep.textContent = `Posición: ${getQueuePosition(videoId)}`;
+                break;
+
+            case 'progress':
+                card.classList.add('analyzing');
+                overlay.classList.add('active');
+                if (overlayText) overlayText.textContent = 'Analizando...';
+                if (overlayStep) overlayStep.textContent = stepText;
+                break;
+
+            case 'complete':
+            case 'error':
+            default:
+                // Overlay hidden, classes removed
+                break;
+        }
+
+        // Also update the status badge
+        const statusEl = card.querySelector('.video-status');
+        if (statusEl && state === 'analyzing') {
+            statusEl.textContent = 'Analizando...';
+            statusEl.className = 'video-status status-analyzing';
+        }
+    }
+
+    // Get position in queue for a video
+    function getQueuePosition(videoId) {
+        const index = analysisQueue.findIndex(item => item.videoId === videoId);
+        return index >= 0 ? index + 1 : 0;
+    }
+
+    // Update queue position displays for all queued videos
+    function updateQueuePositions() {
+        analysisQueue.forEach((item, index) => {
+            const card = document.querySelector(`.video-card[data-id="${item.videoId}"]`);
+            if (card) {
+                const overlayStep = card.querySelector('.overlay-step');
+                if (overlayStep) {
+                    overlayStep.textContent = `Posición: ${index + 1}`;
+                }
+            }
+        });
+    }
+
+    // Process the next item in the queue
+    async function processAnalysisQueue() {
+        while (activeAnalyses.size < MAX_CONCURRENT_ANALYSES && analysisQueue.length > 0) {
+            const nextItem = analysisQueue.shift();
+            if (nextItem) {
+                updateQueuePositions();
+                await executeAnalysis(nextItem.videoId);
+            }
+        }
+    }
+
+    // Actually execute the analysis API call
+    async function executeAnalysis(videoId) {
+        activeAnalyses.add(videoId);
+        updateVideoCardOverlay(videoId, 'analyzing');
+
+        try {
+            const response = await fetch(`/api/analysis/${videoId}/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Error starting analysis');
+            }
+
+            // Start listening for progress updates via SSE
+            startAnalysisSSE(videoId);
+
+        } catch (error) {
+            activeAnalyses.delete(videoId);
+            updateVideoCardOverlay(videoId, 'error');
+            ThumbnailApp.showToast('Error iniciando analisis: ' + error.message, 'error');
+            // Try to refresh just this card to show error state
+            await refreshSingleVideo(videoId);
+            // Process next in queue
+            processAnalysisQueue();
+        }
+    }
+
+    // Refresh a single video card without reloading the entire grid
+    async function refreshSingleVideo(videoId) {
+        try {
+            const response = await fetch(`/api/videos/${videoId}`);
+            if (!response.ok) {
+                throw new Error('Error fetching video');
+            }
+            const video = await response.json();
+
+            const existingCard = document.querySelector(`.video-card[data-id="${videoId}"]`);
+            if (existingCard) {
+                // Create new card with updated data
+                const newCard = createVideoCard(video);
+                existingCard.replaceWith(newCard);
+            }
+        } catch (error) {
+            console.error(`Error refreshing video ${videoId}:`, error);
+        }
+    }
+
+    function startAnalysisSSE(videoId) {
+        if (activeConnections[videoId]) {
+            activeConnections[videoId].close();
+        }
+
+        activeConnections[videoId] = ThumbnailApp.createSSEConnection(
+            `/api/events/analysis/${videoId}`,
+            {
+                progress: (data) => {
+                    // Update the overlay with progress info
+                    updateVideoCardOverlay(videoId, 'progress', data.current_step || '');
+                },
+                complete: (data) => {
+                    delete activeConnections[videoId];
+                    activeAnalyses.delete(videoId);
+
+                    // Update just this card
+                    updateVideoCardOverlay(videoId, 'complete');
+                    refreshSingleVideo(videoId);
+
+                    ThumbnailApp.showToast('Analisis completado', 'success');
+
+                    // Process next in queue
+                    processAnalysisQueue();
+                },
+                error: (data) => {
+                    delete activeConnections[videoId];
+                    activeAnalyses.delete(videoId);
+
+                    // Update just this card
+                    updateVideoCardOverlay(videoId, 'error');
+                    refreshSingleVideo(videoId);
+
+                    ThumbnailApp.showToast('Error: ' + (data.error_message || data.error), 'error');
+
+                    // Process next in queue
+                    processAnalysisQueue();
+                }
+            }
+        );
+    }
+
+    async function pollVideoStatus(videoId) {
+        if (ThumbnailApp.isSSESupported()) {
+            startAnalysisSSE(videoId);
+            return;
+        }
+
+        // Fallback polling when SSE not supported
+        const interval = setInterval(async () => {
+            try {
+                const response = await fetch(`/api/analysis/${videoId}/status`);
+                const data = await response.json();
+
+                // Update progress overlay
+                if (data.status === 'analyzing' && data.current_step) {
+                    updateVideoCardOverlay(videoId, 'progress', data.current_step);
+                }
+
+                if (data.status === 'analyzed' || data.status === 'completed' || data.status === 'error') {
+                    clearInterval(interval);
+                    activeAnalyses.delete(videoId);
+                    updateVideoCardOverlay(videoId, data.status === 'error' ? 'error' : 'complete');
+                    await refreshSingleVideo(videoId);
+
+                    if (data.status !== 'error') {
+                        ThumbnailApp.showToast('Analisis completado', 'success');
+                    }
+
+                    // Process next in queue
+                    processAnalysisQueue();
+                }
+            } catch (error) {
+                clearInterval(interval);
+                activeAnalyses.delete(videoId);
+                processAnalysisQueue();
+            }
+        }, 3000);
+    }
+
+    // ========================================================================
+    // HIDE/SHOW/REANALYZE VIDEO
+    // ========================================================================
+
+    async function hideVideo(videoId) {
+        const confirmed = await ThumbnailApp.showModal({
+            title: 'Ocultar Video',
+            message: '¿Quieres ocultar este video?<br><br>No aparecera en la lista principal, pero podras verlo en el filtro "Ocultos".',
+            type: 'warning',
+            confirmText: 'Ocultar',
+            cancelText: 'Cancelar'
+        });
+
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/videos/${videoId}/hide`, {
+                method: 'PATCH'
+            });
+
+            if (!response.ok) {
+                throw new Error('Error hiding video');
+            }
+
+            ThumbnailApp.showToast('Video ocultado', 'success');
+
+            if (currentDirectoryId) {
+                await loadVideosForDirectory(currentDirectoryId);
+                await loadDirectories();
+            }
+        } catch (error) {
+            ThumbnailApp.showToast('Error ocultando video: ' + error.message, 'error');
+        }
+    }
+
+    async function showVideo(videoId) {
+        try {
+            const response = await fetch(`/api/videos/${videoId}/show`, {
+                method: 'PATCH'
+            });
+
+            if (!response.ok) {
+                throw new Error('Error showing video');
+            }
+
+            ThumbnailApp.showToast('Video restaurado', 'success');
+
+            if (currentDirectoryId) {
+                await loadVideosForDirectory(currentDirectoryId);
+                await loadDirectories();
+            }
+        } catch (error) {
+            ThumbnailApp.showToast('Error restaurando video: ' + error.message, 'error');
+        }
+    }
+
+    async function reanalyzeVideo(videoId) {
+        const confirmed = await ThumbnailApp.showModal({
+            title: 'Re-analizar Video',
+            message: '¿Quieres volver a analizar este video?<br><br><strong>Se eliminaran:</strong> clusters detectados, frames extraidos, trabajos de generacion y thumbnails.<br><br><strong>No se eliminara:</strong> el archivo de video original.',
+            type: 'danger',
+            confirmText: 'Re-analizar',
+            cancelText: 'Cancelar'
+        });
+
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/videos/${videoId}/reanalyze`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error('Error reanalyzing video');
+            }
+
+            // Refresh the card to show pending state, then queue for analysis
+            await refreshSingleVideo(videoId);
+            await startAnalysis(videoId);
+
+            ThumbnailApp.showToast('Re-analisis iniciado', 'success');
+        } catch (error) {
+            ThumbnailApp.showToast('Error re-analizando video: ' + error.message, 'error');
+        }
+    }
+
+    // ========================================================================
+    // SELECTION SYSTEM
+    // ========================================================================
+
+    function setupSelection() {
+        // Select all checkbox
+        selectAllCheckbox.addEventListener('change', () => {
+            const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = selectAllCheckbox.checked;
+                updateCardSelection(cb);
+            });
+
+            // Reset global selection when manually toggling
+            if (!selectAllCheckbox.checked) {
+                allVideosSelected = false;
+            }
+
+            updateSelectionUI();
+            updateSelectionBanner();
+        });
+
+        // Selection banner button (Gmail-style select all / clear all)
+        selectionBannerBtn.addEventListener('click', () => {
+            if (allVideosSelected) {
+                // Clear all selection
+                clearSelection();
+                allVideosSelected = false;
+            } else {
+                // Select all videos globally
+                allVideosSelected = true;
+                // Also check all visible checkboxes
+                const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
+                checkboxes.forEach(cb => {
+                    cb.checked = true;
+                    updateCardSelection(cb);
+                });
+                selectAllCheckbox.checked = true;
+                selectAllCheckbox.indeterminate = false;
+            }
+            updateSelectionUI();
+            updateSelectionBanner();
+        });
+
+        // Analyze selected button
+        analyzeSelectedBtn.addEventListener('click', analyzeSelected);
+
+        // Hide selected button
+        hideSelectedBtn.addEventListener('click', hideSelected);
+    }
+
+    function getSelectedVideoIds() {
+        const checkboxes = videoGrid.querySelectorAll('.video-checkbox:checked');
+        return Array.from(checkboxes).map(cb => {
+            const card = cb.closest('.video-card');
+            return parseInt(card.dataset.id);
+        });
+    }
+
+    function updateSelectionUI() {
+        const selectedIds = getSelectedVideoIds();
+        const totalCheckboxes = videoGrid.querySelectorAll('.video-checkbox').length;
+        const count = selectedIds.length;
+
+        // Determine effective count (page selection vs global selection)
+        const effectiveCount = allVideosSelected ? totalFilteredVideos : count;
+
+        // Update count text
+        if (allVideosSelected) {
+            selectionCount.textContent = `${totalFilteredVideos} seleccionado${totalFilteredVideos !== 1 ? 's' : ''} (todos)`;
+        } else {
+            selectionCount.textContent = count === 0
+                ? '0 seleccionados'
+                : `${count} seleccionado${count !== 1 ? 's' : ''}`;
+        }
+        selectionCount.classList.toggle('has-selection', effectiveCount > 0);
+
+        // Update buttons state
+        analyzeSelectedBtn.disabled = effectiveCount === 0;
+        hideSelectedBtn.disabled = effectiveCount === 0;
+
+        // Update select all checkbox state
+        if (totalCheckboxes > 0) {
+            selectAllCheckbox.checked = count === totalCheckboxes || allVideosSelected;
+            selectAllCheckbox.indeterminate = count > 0 && count < totalCheckboxes && !allVideosSelected;
+        }
+    }
+
+    function updateSelectionBanner() {
+        const selectedIds = getSelectedVideoIds();
+        const totalCheckboxes = videoGrid.querySelectorAll('.video-checkbox').length;
+        const pageIsFullySelected = selectedIds.length === totalCheckboxes && totalCheckboxes > 0;
+        const hasMorePages = totalFilteredVideos > PAGE_SIZE;
+
+        // Only show banner if:
+        // 1. All items on page are selected AND there are more pages
+        // 2. OR allVideosSelected is true
+        if (allVideosSelected) {
+            // Show "all selected" state
+            selectionBanner.classList.add('visible');
+            selectionBannerText.textContent = `Todos los ${totalFilteredVideos} vídeos están seleccionados.`;
+            selectionBannerBtn.textContent = 'Limpiar selección';
+        } else if (pageIsFullySelected && hasMorePages) {
+            // Show "select all" option
+            selectionBanner.classList.add('visible');
+            const pageCount = Math.min(PAGE_SIZE, totalCheckboxes);
+            selectionBannerText.textContent = `Los ${pageCount} vídeos de esta página están seleccionados.`;
+            selectionBannerBtn.textContent = `Seleccionar los ${totalFilteredVideos} vídeos`;
+        } else {
+            // Hide banner
+            selectionBanner.classList.remove('visible');
+        }
+    }
+
+    // Get all video IDs for the current filter (for global selection actions)
+    async function getAllFilteredVideoIds() {
+        if (!currentDirectoryId) return [];
+
+        try {
+            // Fetch all video IDs without pagination limit
+            let url = `/api/directories/${currentDirectoryId}/videos?skip=0&limit=${totalFilteredVideos}`;
+            if (currentStatusFilter && currentStatusFilter !== 'all') {
+                url += `&status=${currentStatusFilter}`;
+            }
+
+            const response = await fetch(url);
+            const data = await response.json();
+            return data.videos.map(v => v.id);
+        } catch (error) {
+            console.error('Error fetching all video IDs:', error);
+            return [];
+        }
+    }
+
+    function updateCardSelection(checkbox) {
+        const card = checkbox.closest('.video-card');
+        card.classList.toggle('selected', checkbox.checked);
+    }
+
+    function showSelectionBar(show) {
+        selectionBar.classList.toggle('visible', show);
+        if (!show) {
+            selectAllCheckbox.checked = false;
+            selectAllCheckbox.indeterminate = false;
+            allVideosSelected = false;
+            selectionBanner.classList.remove('visible');
+        }
+    }
+
+    async function analyzeSelected() {
+        let selectedIds;
+
+        // If all videos are selected globally, fetch all IDs
+        if (allVideosSelected) {
+            selectedIds = await getAllFilteredVideoIds();
+            if (selectedIds.length === 0) {
+                ThumbnailApp.showToast('No hay videos para analizar', 'info');
+                return;
+            }
+        } else {
+            selectedIds = getSelectedVideoIds();
+            if (selectedIds.length === 0) return;
+        }
+
+        // For global selection, we need to fetch video statuses from API
+        // For page selection, we can check the DOM
+        let pendingIds = [];
+        let analyzedIds = [];
+
+        if (allVideosSelected) {
+            // Fetch all videos to get their statuses
+            try {
+                let url = `/api/directories/${currentDirectoryId}/videos?skip=0&limit=${totalFilteredVideos}`;
+                if (currentStatusFilter && currentStatusFilter !== 'all') {
+                    url += `&status=${currentStatusFilter}`;
+                }
+                const response = await fetch(url);
+                const data = await response.json();
+
+                data.videos.forEach(video => {
+                    if (video.status === 'pending') {
+                        pendingIds.push(video.id);
+                    } else if (video.status === 'analyzed' || video.status === 'completed') {
+                        analyzedIds.push(video.id);
+                    }
+                });
+            } catch (error) {
+                console.error('Error fetching video statuses:', error);
+                ThumbnailApp.showToast('Error obteniendo estado de videos', 'error');
+                return;
+            }
+        } else {
+            // Check DOM for page selection
+            selectedIds.forEach(id => {
+                const card = videoGrid.querySelector(`.video-card[data-id="${id}"]`);
+                const status = card?.dataset.status;
+                if (status === 'pending') {
+                    pendingIds.push(id);
+                } else if (status === 'analyzed' || status === 'completed') {
+                    analyzedIds.push(id);
+                }
+            });
+        }
+
+        // If nothing to analyze
+        if (pendingIds.length === 0 && analyzedIds.length === 0) {
+            ThumbnailApp.showToast('No hay videos para analizar en la seleccion', 'info');
+            return;
+        }
+
+        // If there are already analyzed videos
+        if (analyzedIds.length > 0) {
+            const confirmed = await ThumbnailApp.showModal({
+                title: 'Videos ya analizados',
+                message: `<strong>${analyzedIds.length}</strong> video${analyzedIds.length !== 1 ? 's' : ''} de los seleccionados ya ${analyzedIds.length !== 1 ? 'han' : 'ha'} sido analizado${analyzedIds.length !== 1 ? 's' : ''}.<br><br>¿Quieres volver a analizarlos?<br><br><small>Se eliminaran los datos del analisis anterior.</small>`,
+                type: 'warning',
+                confirmText: 'Si, re-analizar todos',
+                cancelText: 'Cancelar'
+            });
+
+            if (!confirmed) return;
+
+            // Re-analyze videos that were already analyzed
+            // First reset them, then queue them for analysis
+            for (const videoId of analyzedIds) {
+                try {
+                    await fetch(`/api/videos/${videoId}/reanalyze`, { method: 'POST' });
+                    // After reset, refresh the card and queue for analysis
+                    await refreshSingleVideo(videoId);
+                    await startAnalysis(videoId);
+                } catch (error) {
+                    console.error(`Error reanalyzing video ${videoId}:`, error);
+                }
+            }
+        } else {
+            // Only pending videos - show normal modal
+            const confirmed = await ThumbnailApp.showModal({
+                title: 'Analizar Videos',
+                message: `¿Quieres analizar <strong>${pendingIds.length}</strong> video${pendingIds.length !== 1 ? 's' : ''}?<br><br>Este proceso puede tardar varios minutos.`,
+                type: 'info',
+                confirmText: 'Analizar',
+                cancelText: 'Cancelar'
+            });
+
+            if (!confirmed) return;
+        }
+
+        // Start analysis for pending videos
+        for (const videoId of pendingIds) {
+            try {
+                await startAnalysis(videoId);
+            } catch (error) {
+                console.error(`Error starting analysis for video ${videoId}:`, error);
+            }
+        }
+
+        const totalStarted = pendingIds.length + analyzedIds.length;
+        ThumbnailApp.showToast(`Analisis iniciado para ${totalStarted} video${totalStarted !== 1 ? 's' : ''}`, 'success');
+
+        // Clear selection (no need to reload the grid - overlays show progress)
+        clearSelection();
+    }
+
+    async function hideSelected() {
+        let selectedIds;
+
+        // If all videos are selected globally, fetch all IDs
+        if (allVideosSelected) {
+            selectedIds = await getAllFilteredVideoIds();
+            if (selectedIds.length === 0) {
+                ThumbnailApp.showToast('No hay videos para ocultar', 'info');
+                return;
+            }
+        } else {
+            selectedIds = getSelectedVideoIds();
+            if (selectedIds.length === 0) return;
+        }
+
+        const confirmed = await ThumbnailApp.showModal({
+            title: 'Ocultar Videos',
+            message: `¿Quieres ocultar <strong>${selectedIds.length}</strong> video${selectedIds.length !== 1 ? 's' : ''}?<br><br>No apareceran en la lista principal, pero podras verlos en el filtro "Ocultos".`,
+            type: 'warning',
+            confirmText: 'Ocultar',
+            cancelText: 'Cancelar'
+        });
+
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch('/api/videos/bulk/hide', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ video_ids: selectedIds })
+            });
+
+            if (!response.ok) {
+                throw new Error('Error hiding videos');
+            }
+
+            const data = await response.json();
+            ThumbnailApp.showToast(`${data.count} video${data.count !== 1 ? 's' : ''} ocultado${data.count !== 1 ? 's' : ''}`, 'success');
+
+            // Clear selection and reload from page 1 (list has changed)
+            clearSelection();
+            currentPage = 1;
+            if (currentDirectoryId) {
+                await loadVideosForDirectory(currentDirectoryId, null, 1);
+                await loadDirectories();
+            }
+        } catch (error) {
+            ThumbnailApp.showToast('Error ocultando videos: ' + error.message, 'error');
+        }
+    }
+
+    function clearSelection() {
+        const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
+        checkboxes.forEach(cb => {
+            cb.checked = false;
+            updateCardSelection(cb);
+        });
+        selectAllCheckbox.checked = false;
+        selectAllCheckbox.indeterminate = false;
+        allVideosSelected = false;
+        selectionBanner.classList.remove('visible');
+        updateSelectionUI();
+    }
+
+    // ========================================================================
+    // UTILITIES
+    // ========================================================================
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+</script>
+{% endblock %}

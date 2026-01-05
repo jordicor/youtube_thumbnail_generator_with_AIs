@@ -1,0 +1,1070 @@
+{% extends "base.html" %}
+
+{% block title %}Gestionar Frames - Persona {{ cluster_index + 1 }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <a href="/video/{{ video_id }}" class="back-link">&larr; Volver a clusters</a>
+    <h1 id="pageTitle"><span id="clusterDisplayName">Persona {{ cluster_index + 1 }}</span> &middot; <span id="frameCount">--</span> frames</h1>
+</div>
+
+<!-- Cluster Info Section -->
+<section class="section cluster-info-section">
+    <div class="section-header">
+        <div class="section-title-row">
+            <h2>
+                <span class="section-icon">&#9998;</span>
+                Informacion del Cluster
+            </h2>
+        </div>
+    </div>
+    <div class="cluster-info-form">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="clusterLabel">Nombre: <span class="info-tooltip" data-tooltip="Un nombre descriptivo para identificar facilmente a esta persona. Se mostrara en la lista de clusters y al seleccionar referencia.">&#9432;</span></label>
+                <input type="text" id="clusterLabel" placeholder="Ej: Presentador, Invitado, Personaje del sketch..." maxlength="128">
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="clusterDescription">Notas/Comentarios: <span class="info-tooltip" data-tooltip="Informacion adicional para la IA al generar prompts. Util si hay varias personas para describir cada una, o para indicar detalles especificos del personaje.">&#9432;</span></label>
+            <textarea id="clusterDescription" rows="2" maxlength="2000"
+                      placeholder="Ej: Persona con gafas es el personaje comico. Pelo largo es la presentadora. Usa camiseta roja en este video..."></textarea>
+        </div>
+        <div class="form-actions">
+            <button class="btn btn-save btn-small" id="btnSaveClusterInfo" onclick="saveClusterInfo()" disabled>
+                &#10003; Guardar cambios
+            </button>
+            <span class="save-status" id="saveStatus"></span>
+        </div>
+    </div>
+</section>
+
+<div class="frames-manager">
+    <!-- Reference Frames Section -->
+    <section class="section frames-section references-section">
+        <div class="section-header">
+            <div class="section-title-row">
+                <h2>
+                    <span class="section-icon">&#9889;</span>
+                    Imagenes de Referencia para IA
+                    <span class="reference-counter" id="refCounter">(--/{{ max_refs }})</span>
+                    <span class="custom-badge hidden" id="customBadge" title="Has personalizado las referencias">Personalizado</span>
+                </h2>
+                <button class="info-btn" onclick="showInfoModal('references')" title="Informacion">&#9432;</button>
+            </div>
+            <div class="section-actions">
+                <button class="btn btn-secondary btn-small" onclick="showResetModal()" id="btnReset">
+                    &#8634; Por defecto
+                </button>
+            </div>
+        </div>
+
+        <p class="section-description">
+            Estas imagenes se envian al generador de IA para recrear el rostro con precision.
+        </p>
+
+        <div class="frames-grid reference-frames-grid" id="referenceFramesGrid">
+            <div class="loading">Cargando referencias...</div>
+        </div>
+
+        <p class="section-hint">
+            <span class="hint-icon">&#128161;</span>
+            Max 14 refs. Algunas IAs usan menos (1-8 segun modelo).
+        </p>
+    </section>
+
+    <!-- Library Frames Section -->
+    <section class="section frames-section library-section">
+        <div class="section-header">
+            <div class="section-title-row">
+                <h2>
+                    <span class="section-icon">&#128193;</span>
+                    Biblioteca de Frames
+                </h2>
+                <button class="info-btn" onclick="showInfoModal('library')" title="Informacion">&#9432;</button>
+            </div>
+            <div class="section-actions">
+                <span class="selection-info" id="librarySelectionInfo">0 seleccionados</span>
+            </div>
+        </div>
+
+        <div class="library-toolbar">
+            <div class="toolbar-left">
+                <label class="checkbox-wrapper">
+                    <input type="checkbox" id="selectAllLibrary" onchange="toggleSelectAll()">
+                    <span>Seleccionar todos</span>
+                </label>
+                <div class="filter-group">
+                    <label for="frameSource">Mostrar:</label>
+                    <select id="frameSource" onchange="changeFrameSource()">
+                        <option value="cluster">Frames del cluster</option>
+                        <option value="all">Todos los frames</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="groupByMode">Agrupar por:</label>
+                    <select id="groupByMode" onchange="changeGroupByMode()">
+                        <option value="none" selected>Cara (unificado)</option>
+                        <option value="scene">Cara + Escena</option>
+                    </select>
+                </div>
+            </div>
+            <div class="toolbar-actions">
+                <button class="btn btn-secondary btn-small" id="btnAddToRefs" onclick="addSelectedToReferences()" disabled>
+                    &#10133; Anadir a referencias
+                </button>
+                <button class="btn btn-primary btn-small hidden" id="btnAddToCluster" onclick="addSelectedToCluster()" disabled>
+                    &#10133; Anadir al cluster
+                </button>
+                <button class="btn btn-danger btn-small" id="btnDeleteFrames" onclick="showDeleteModal()" disabled>
+                    &#128465; Eliminar (<span id="deleteCount">0</span>)
+                </button>
+            </div>
+        </div>
+
+        <div class="frames-grid library-frames-grid" id="libraryFramesGrid">
+            <div class="loading">Cargando frames...</div>
+        </div>
+    </section>
+</div>
+
+<!-- Info Modal: References -->
+<div id="infoModalReferences" class="modal-overlay">
+    <div class="modal-dialog modal-info modal-wide">
+        <div class="modal-header">
+            <span class="modal-icon">&#9432;</span>
+            <span class="modal-title">Imagenes de Referencia</span>
+        </div>
+        <div class="modal-body">
+            <p>Estas imagenes se envian al generador de IA para que pueda recrear el rostro con precision en los thumbnails.</p>
+            <ul class="info-list">
+                <li>Cuantas mas imagenes de calidad incluyas (hasta {{ max_refs }}), mejor sera el parecido facial.</li>
+                <li>Por defecto se seleccionan automaticamente las de mayor calidad.</li>
+                <li>Puedes personalizar cuales enviar desde la biblioteca de abajo.</li>
+            </ul>
+            <div class="info-box">
+                <strong>&#8634; Por defecto:</strong> Descarta tu seleccion manual y vuelve a usar las mejores imagenes segun su puntuacion de calidad.
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="closeModal('infoModalReferences')">Entendido</button>
+        </div>
+    </div>
+</div>
+
+<!-- Info Modal: Library -->
+<div id="infoModalLibrary" class="modal-overlay">
+    <div class="modal-dialog modal-info modal-wide">
+        <div class="modal-header">
+            <span class="modal-icon">&#9432;</span>
+            <span class="modal-title">Biblioteca de Frames</span>
+        </div>
+        <div class="modal-body">
+            <p>Frames disponibles ordenados por calidad (mejor primero).</p>
+            <h4>Modos de visualizacion:</h4>
+            <ul class="info-list">
+                <li><strong>Frames del cluster:</strong> Muestra solo los frames que ya pertenecen a este cluster.</li>
+                <li><strong>Todos los frames:</strong> Muestra todos los frames del video para poder anadir nuevos al cluster.</li>
+            </ul>
+            <h4>Acciones disponibles:</h4>
+            <ul class="info-list">
+                <li><strong>&#10133; Anadir a referencias:</strong> Marca los frames como imagenes de referencia para la IA (max {{ max_refs }}).</li>
+                <li><strong>&#10133; Anadir al cluster:</strong> (En modo "Todos los frames") Incluye frames externos en este cluster.</li>
+                <li><strong>&#128465; Eliminar:</strong> (En modo "Frames del cluster") Borra permanentemente los frames seleccionados.</li>
+            </ul>
+            <div class="info-box info-box-hint">
+                <strong>&#128161;</strong> Los frames con icono de persona (&#128100;) ya pertenecen a otro cluster, pero puedes anadirlos igualmente: se creara una copia, sin afectar al cluster original.
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-primary" onclick="closeModal('infoModalLibrary')">Entendido</button>
+        </div>
+    </div>
+</div>
+
+<!-- Reset Confirmation Modal -->
+<div id="resetModal" class="modal-overlay">
+    <div class="modal-dialog modal-info">
+        <div class="modal-header">
+            <span class="modal-icon">&#8634;</span>
+            <span class="modal-title">Restablecer referencias</span>
+        </div>
+        <div class="modal-body">
+            <p>Se descartara tu seleccion manual y se volveran a usar los {{ max_refs }} frames de mayor calidad como referencias.</p>
+            <div class="info-box info-box-hint">
+                <strong>&#128161;</strong> Los frames no se eliminan, solo cambia cuales se envian a la IA al generar thumbnails.
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-cancel" onclick="closeModal('resetModal')">Cancelar</button>
+            <button class="btn btn-confirm" onclick="confirmReset()">&#8634; Restablecer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div id="deleteModal" class="modal-overlay">
+    <div class="modal-dialog modal-danger">
+        <div class="modal-header">
+            <span class="modal-icon">&#128465;</span>
+            <span class="modal-title">Eliminar <span id="deleteModalCount">0</span> frames</span>
+        </div>
+        <div class="modal-body">
+            <p>Esta accion eliminara permanentemente:</p>
+            <ul class="delete-effects-list">
+                <li><span class="icon">&#128193;</span> Los archivos de imagen del disco</li>
+                <li><span class="icon">&#128451;</span> Los registros de la base de datos</li>
+                <li><span class="icon">&#9889;</span> Si alguno era referencia, se quitara de ahi</li>
+            </ul>
+            <div class="info-box info-box-warning">
+                <strong>&#9888; Esta accion no se puede deshacer</strong>
+            </div>
+            <div class="info-box info-box-hint">
+                <strong>&#128161;</strong> Solo se eliminan los frames de imagen seleccionados, NO el archivo de video original.
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-cancel" onclick="closeModal('deleteModal')">Cancelar</button>
+            <button class="btn btn-confirm" onclick="confirmDelete()">&#128465; Eliminar (<span id="deleteModalCountBtn">0</span>)</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const videoId = {{ video_id }};
+    const clusterIndex = {{ cluster_index }};
+    const MAX_REFS = {{ max_refs }};
+
+    // =========================================================================
+    // STATE
+    // =========================================================================
+    let referenceFrames = [];           // From DB (marked as AI references)
+    let libraryFrames = [];             // From DB (all other frames in cluster)
+    let allVideoFrames = [];            // All frames from disk (for "all" mode)
+    let allFramesByFilename = new Map(); // filename → frame object (fast lookup)
+    let clusterFilenames = new Set();   // Filenames of frames in current cluster
+    let selectedLibraryIds = new Set(); // Track by frame ID (cluster mode)
+    let selectedFilenames = new Set();  // Track by filename (all mode)
+    let isCustomSelection = false;
+    let currentSource = 'cluster';      // 'cluster' or 'all'
+    let groupByMode = 'none';           // 'none' or 'scene' (grouping mode)
+
+    // Cluster info state
+    let clusterInfo = { label: null, description: null };
+    let originalClusterInfo = { label: null, description: null };
+
+    // =========================================================================
+    // INITIALIZATION
+    // =========================================================================
+
+    document.addEventListener('DOMContentLoaded', () => {
+        loadClusterInfo();
+        loadFrames();
+        setupEventListeners();
+        setupClusterInfoListeners();
+    });
+
+    function setupClusterInfoListeners() {
+        const labelInput = document.getElementById('clusterLabel');
+        const descInput = document.getElementById('clusterDescription');
+
+        labelInput.addEventListener('input', checkClusterInfoChanged);
+        descInput.addEventListener('input', checkClusterInfoChanged);
+    }
+
+    function checkClusterInfoChanged() {
+        const labelInput = document.getElementById('clusterLabel');
+        const descInput = document.getElementById('clusterDescription');
+        const saveBtn = document.getElementById('btnSaveClusterInfo');
+
+        const currentLabel = labelInput.value.trim();
+        const currentDesc = descInput.value.trim();
+
+        const hasChanges = currentLabel !== (originalClusterInfo.label || '') ||
+                          currentDesc !== (originalClusterInfo.description || '');
+
+        saveBtn.disabled = !hasChanges;
+    }
+
+    async function loadClusterInfo() {
+        try {
+            const response = await fetch(`/api/analysis/${videoId}/clusters`);
+            if (!response.ok) throw new Error('Error loading cluster info');
+
+            const data = await response.json();
+            const cluster = data.clusters.find(c => c.cluster_index === clusterIndex);
+
+            if (cluster) {
+                clusterInfo = {
+                    label: cluster.label || null,
+                    description: cluster.description || null
+                };
+                originalClusterInfo = { ...clusterInfo };
+
+                // Update UI
+                document.getElementById('clusterLabel').value = cluster.label || '';
+                document.getElementById('clusterDescription').value = cluster.description || '';
+
+                // Update page title
+                const displayName = cluster.label || 'Persona ' + (clusterIndex + 1);
+                document.getElementById('clusterDisplayName').textContent = displayName;
+                document.title = `Gestionar Frames - ${displayName}`;
+            }
+        } catch (error) {
+            console.error('Error loading cluster info:', error);
+        }
+    }
+
+    async function saveClusterInfo() {
+        const labelInput = document.getElementById('clusterLabel');
+        const descInput = document.getElementById('clusterDescription');
+        const saveBtn = document.getElementById('btnSaveClusterInfo');
+        const saveStatus = document.getElementById('saveStatus');
+
+        const newLabel = labelInput.value.trim() || null;
+        const newDesc = descInput.value.trim() || null;
+
+        saveBtn.disabled = true;
+        saveStatus.textContent = 'Guardando...';
+        saveStatus.className = 'save-status saving';
+
+        try {
+            const response = await fetch(`/api/analysis/${videoId}/clusters/${clusterIndex}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    label: newLabel,
+                    description: newDesc
+                })
+            });
+
+            if (!response.ok) throw new Error('Error saving cluster info');
+
+            // Update state
+            originalClusterInfo = { label: newLabel, description: newDesc };
+            clusterInfo = { ...originalClusterInfo };
+
+            // Update page title
+            const displayName = newLabel || 'Persona ' + (clusterIndex + 1);
+            document.getElementById('clusterDisplayName').textContent = displayName;
+            document.title = `Gestionar Frames - ${displayName}`;
+
+            saveStatus.innerHTML = '&#10003; Guardado';
+            saveStatus.className = 'save-status saved';
+
+            setTimeout(() => {
+                saveStatus.textContent = '';
+                saveStatus.className = 'save-status';
+            }, 2000);
+
+        } catch (error) {
+            saveStatus.textContent = 'Error al guardar';
+            saveStatus.className = 'save-status error';
+            saveBtn.disabled = false;
+            console.error('Error saving cluster info:', error);
+        }
+    }
+
+    function setupEventListeners() {
+        // Event delegation for library grid (handles both cluster and all modes)
+        document.getElementById('libraryFramesGrid')
+            .addEventListener('click', handleLibraryGridClick);
+    }
+
+    async function loadFrames() {
+        try {
+            // Load ALL frames from DB (now contains all frames, not just 20)
+            const response = await fetch(`/api/analysis/${videoId}/clusters/${clusterIndex}/frames/all`);
+            if (!response.ok) throw new Error('Error loading frames');
+
+            const data = await response.json();
+
+            referenceFrames = data.reference_frames;
+            libraryFrames = data.library_frames;
+            isCustomSelection = data.is_custom_selection;
+
+            // Build set of cluster filenames for comparison (extract from path)
+            clusterFilenames.clear();
+            referenceFrames.forEach(f => {
+                const filename = f.frame_path.split(/[/\\]/).pop();
+                clusterFilenames.add(filename);
+            });
+            libraryFrames.forEach(f => {
+                const filename = f.frame_path.split(/[/\\]/).pop();
+                clusterFilenames.add(filename);
+            });
+
+            renderReferenceFrames();
+            renderLibraryFrames();
+            updateCounters();
+
+        } catch (error) {
+            console.error('Error loading frames:', error);
+            document.getElementById('referenceFramesGrid').innerHTML =
+                `<div class="error">Error cargando frames: ${error.message}</div>`;
+            document.getElementById('libraryFramesGrid').innerHTML =
+                `<div class="error">Error cargando biblioteca: ${error.message}</div>`;
+        }
+    }
+
+    async function loadAllVideoFrames() {
+        try {
+            const response = await fetch(`/api/analysis/${videoId}/frames/all?include_assigned=true`);
+            if (!response.ok) throw new Error('Error loading all frames');
+
+            const data = await response.json();
+            allVideoFrames = data.frames;
+
+            // Build lookup map for O(1) access by filename
+            allFramesByFilename.clear();
+            allVideoFrames.forEach(frame => {
+                allFramesByFilename.set(frame.filename, frame);
+            });
+
+        } catch (error) {
+            console.error('Error loading all frames:', error);
+            allVideoFrames = [];
+        }
+    }
+
+    async function changeFrameSource() {
+        const source = document.getElementById('frameSource').value;
+        currentSource = source;
+
+        // Clear selections when changing source
+        selectedLibraryIds.clear();
+        selectedFilenames.clear();
+
+        if (source === 'all') {
+            // Load all video frames if not already loaded
+            if (allVideoFrames.length === 0) {
+                document.getElementById('libraryFramesGrid').innerHTML = '<div class="loading">Cargando todos los frames...</div>';
+                await loadAllVideoFrames();
+            }
+            renderAllFrames();
+        } else {
+            renderLibraryFrames();
+        }
+
+        updateCounters();
+    }
+
+    function changeGroupByMode() {
+        groupByMode = document.getElementById('groupByMode').value;
+
+        // Re-render current view with new grouping mode
+        if (currentSource === 'all') {
+            renderAllFrames();
+        } else {
+            renderLibraryFrames();
+        }
+    }
+
+    // =========================================================================
+    // SCENE GROUPING FUNCTIONS
+    // =========================================================================
+
+    function extractSceneNumber(framePath) {
+        // Extract scene number from path like ".../scene_000_frame_000007.jpg"
+        if (!framePath) return null;
+        const filename = framePath.split(/[/\\]/).pop();
+        const match = filename.match(/scene_(\d+)/);
+        return match ? parseInt(match[1]) : null;
+    }
+
+    function groupFramesByScene(frames, getPath) {
+        // Group frames by scene number
+        const grouped = {};
+        frames.forEach(frame => {
+            const path = getPath ? getPath(frame) : frame.frame_path;
+            const sceneNum = extractSceneNumber(path);
+            const key = sceneNum !== null ? sceneNum : 'unknown';
+
+            if (!grouped[key]) {
+                grouped[key] = [];
+            }
+            grouped[key].push(frame);
+        });
+        return grouped;
+    }
+
+    function renderGroupedFrames(grouped, createCardFn) {
+        // Sort scene keys numerically
+        const sortedKeys = Object.keys(grouped).sort((a, b) => {
+            if (a === 'unknown') return 1;
+            if (b === 'unknown') return -1;
+            return parseInt(a) - parseInt(b);
+        });
+
+        let html = '';
+        sortedKeys.forEach(sceneKey => {
+            const frames = grouped[sceneKey];
+            const sceneLabel = sceneKey === 'unknown' ? 'Sin escena' : `Escena ${sceneKey}`;
+            const frameCount = frames.length;
+
+            html += `
+                <div class="scene-group">
+                    <div class="scene-group-header">
+                        <span class="scene-group-title">${sceneLabel}</span>
+                        <span class="scene-group-count">${frameCount} frame${frameCount !== 1 ? 's' : ''}</span>
+                    </div>
+                    <div class="scene-group-frames">
+                        ${frames.map(frame => createCardFn(frame)).join('')}
+                    </div>
+                </div>
+            `;
+        });
+
+        return html;
+    }
+
+    // =========================================================================
+    // EVENT HANDLERS (delegated)
+    // =========================================================================
+
+    function handleLibraryGridClick(e) {
+        const card = e.target.closest('.library-frame-card');
+        if (!card) return;
+
+        // Prevent double-toggle if clicking checkbox directly
+        if (e.target.tagName === 'INPUT') {
+            e.stopPropagation();
+        }
+
+        if (currentSource === 'cluster') {
+            // Cluster mode: use frame ID
+            const frameId = card.dataset.frameId;
+            if (frameId) {
+                toggleFrameSelection(parseInt(frameId));
+            }
+        } else {
+            // All frames mode: use filename
+            const filename = card.dataset.filename;
+            if (filename) {
+                toggleAllFrameSelection(filename);
+            }
+        }
+    }
+
+    // =========================================================================
+    // RENDERING
+    // =========================================================================
+
+    function renderReferenceFrames() {
+        const grid = document.getElementById('referenceFramesGrid');
+
+        if (referenceFrames.length === 0) {
+            grid.innerHTML = '<p class="empty-message">No hay referencias seleccionadas. Anade frames desde la biblioteca.</p>';
+            return;
+        }
+
+        grid.innerHTML = referenceFrames.map(frame => createReferenceFrameCard(frame)).join('');
+    }
+
+    function renderLibraryFrames() {
+        const grid = document.getElementById('libraryFramesGrid');
+
+        if (libraryFrames.length === 0) {
+            grid.innerHTML = '<p class="empty-message">No hay mas frames disponibles.</p>';
+            return;
+        }
+
+        if (groupByMode === 'scene') {
+            // Group by scene
+            const grouped = groupFramesByScene(libraryFrames, f => f.frame_path);
+            grid.innerHTML = renderGroupedFrames(grouped, createLibraryFrameCard);
+        } else {
+            // Flat list (original behavior)
+            grid.innerHTML = libraryFrames.map(frame => createLibraryFrameCard(frame)).join('');
+        }
+    }
+
+    function renderAllFrames() {
+        const grid = document.getElementById('libraryFramesGrid');
+
+        // Filter out frames already in this cluster
+        const availableFrames = allVideoFrames.filter(f => !clusterFilenames.has(f.filename));
+
+        if (availableFrames.length === 0) {
+            grid.innerHTML = '<p class="empty-message">No hay frames adicionales disponibles.</p>';
+            return;
+        }
+
+        if (groupByMode === 'scene') {
+            // Group by scene (use filename for allVideoFrames)
+            const grouped = groupFramesByScene(availableFrames, f => f.filename);
+            grid.innerHTML = renderGroupedFrames(grouped, createAllFrameCard);
+        } else {
+            // Flat list (original behavior)
+            grid.innerHTML = availableFrames.map(frame => createAllFrameCard(frame)).join('');
+        }
+    }
+
+    function createAllFrameCard(frame) {
+        const qualityScore = (frame.quality_score || 0) / 10;
+        const qualityClass = getQualityClass(frame.quality_score);
+        const expressionIcon = getExpressionIcon(frame.expression);
+        const isSelected = selectedFilenames.has(frame.filename);
+        const sceneInfo = extractSceneInfo(frame.filename);
+        const isInOtherCluster = frame.cluster_id !== null;
+
+        let statusIcon = '';
+        let statusClass = '';
+        if (isInOtherCluster) {
+            statusClass = 'in-other-cluster';
+            statusIcon = `<span class="frame-status-icon" title="Ya en Persona ${frame.cluster_index + 1}">&#128100;</span>`;
+        }
+
+        return `
+            <div class="frame-card library-frame-card ${isSelected ? 'selected' : ''} ${statusClass}"
+                 data-filename="${frame.filename}">
+                <div class="frame-checkbox">
+                    <input type="checkbox" ${isSelected ? 'checked' : ''}>
+                </div>
+                ${statusIcon}
+                <img src="/api/analysis/${videoId}/frames/${encodeURIComponent(frame.filename)}/image"
+                     alt="${frame.filename}"
+                     loading="lazy"
+                     onerror="this.src='/static/img/placeholder.svg'">
+                <div class="frame-info">
+                    <div class="quality-bar ${qualityClass}">
+                        <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
+                    </div>
+                    <div class="frame-meta">
+                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
+                        <span class="scene-info" title="Escena y frame">${sceneInfo}</span>
+                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function createReferenceFrameCard(frame) {
+        const qualityScore = (frame.quality_score || 0) / 10;
+        const qualityClass = getQualityClass(frame.quality_score);
+        const expressionIcon = getExpressionIcon(frame.expression);
+
+        return `
+            <div class="frame-card reference-frame-card" data-frame-id="${frame.id}">
+                <button class="frame-remove-btn" onclick="removeFromReferences(${frame.id})" title="Quitar de referencias">
+                    &times;
+                </button>
+                <img src="/api/analysis/${videoId}/clusters/${clusterIndex}/frames/${frame.id}/image"
+                     alt="Frame ${frame.id}"
+                     loading="lazy"
+                     onerror="this.src='/static/img/placeholder.svg'">
+                <div class="frame-info">
+                    <div class="quality-bar ${qualityClass}">
+                        <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
+                    </div>
+                    <div class="frame-meta">
+                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
+                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function createLibraryFrameCard(frame) {
+        const qualityScore = (frame.quality_score || 0) / 10;
+        const qualityClass = getQualityClass(frame.quality_score);
+        const expressionIcon = getExpressionIcon(frame.expression);
+        const isSelected = selectedLibraryIds.has(frame.id);
+        const sceneInfo = extractSceneInfo(frame.frame_path);
+
+        return `
+            <div class="frame-card library-frame-card ${isSelected ? 'selected' : ''}"
+                 data-frame-id="${frame.id}">
+                <div class="frame-checkbox">
+                    <input type="checkbox" ${isSelected ? 'checked' : ''}>
+                </div>
+                <img src="/api/analysis/${videoId}/clusters/${clusterIndex}/frames/${frame.id}/image"
+                     alt="Frame ${frame.id}"
+                     loading="lazy"
+                     onerror="this.src='/static/img/placeholder.svg'">
+                <div class="frame-info">
+                    <div class="quality-bar ${qualityClass}">
+                        <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
+                    </div>
+                    <div class="frame-meta">
+                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
+                        <span class="scene-info" title="Escena y frame">${sceneInfo}</span>
+                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function extractSceneInfo(framePath) {
+        // Extract scene and frame number from path like ".../scene_000_frame_000007.jpg"
+        if (!framePath) return '';
+        const filename = framePath.split(/[/\\]/).pop();
+        const match = filename.match(/scene_(\d+)_frame_(\d+)/);
+        if (match) {
+            return `S${parseInt(match[1])}:F${parseInt(match[2])}`;
+        }
+        return '';
+    }
+
+    function getQualityClass(score) {
+        if (score >= 90) return 'quality-excellent';
+        if (score >= 75) return 'quality-good';
+        if (score >= 60) return 'quality-fair';
+        if (score >= 40) return 'quality-poor';
+        return 'quality-bad';
+    }
+
+    function getExpressionIcon(expression) {
+        const icons = {
+            'smiling': '&#128522;',      // 😊
+            'neutral': '&#128528;',       // 😐
+            'mouth_closed': '&#128566;',  // 😶
+            'mouth_open': '&#128558;'     // 😮
+        };
+        return icons[expression] || '&#128528;';
+    }
+
+    function updateCounters() {
+        // Frame count in title
+        const total = referenceFrames.length + libraryFrames.length;
+        document.getElementById('frameCount').textContent = total;
+
+        // Reference counter
+        document.getElementById('refCounter').textContent = `(${referenceFrames.length}/${MAX_REFS})`;
+
+        // Custom badge
+        const customBadge = document.getElementById('customBadge');
+        if (isCustomSelection) {
+            customBadge.classList.remove('hidden');
+        } else {
+            customBadge.classList.add('hidden');
+        }
+
+        // Get selection count based on current source
+        const selCount = currentSource === 'cluster' ? selectedLibraryIds.size : selectedFilenames.size;
+
+        // Library selection info
+        document.getElementById('librarySelectionInfo').textContent =
+            `${selCount} seleccionado${selCount !== 1 ? 's' : ''}`;
+
+        // Button states
+        const btnAddToRefs = document.getElementById('btnAddToRefs');
+        const btnAddToCluster = document.getElementById('btnAddToCluster');
+        const btnDeleteFrames = document.getElementById('btnDeleteFrames');
+        const isFull = referenceFrames.length >= MAX_REFS;
+
+        if (currentSource === 'cluster') {
+            // Cluster mode: show add to refs, delete; hide add to cluster
+            btnAddToRefs.classList.remove('hidden');
+            btnAddToRefs.disabled = selCount === 0 || isFull;
+            btnAddToCluster.classList.add('hidden');
+            btnDeleteFrames.classList.remove('hidden');
+            btnDeleteFrames.disabled = selCount === 0;
+            document.getElementById('deleteCount').textContent = selCount;
+        } else {
+            // All frames mode: show add to cluster; hide add to refs, delete
+            btnAddToRefs.classList.add('hidden');
+            btnAddToCluster.classList.remove('hidden');
+            btnAddToCluster.disabled = selCount === 0;
+            btnDeleteFrames.classList.add('hidden');
+        }
+
+        // Dynamic tooltip for disabled button
+        if (isFull) {
+            btnAddToRefs.title = 'Maximo alcanzado. Quita referencias de la seccion superior para añadir nuevas.';
+        } else if (selCount === 0) {
+            btnAddToRefs.title = 'Selecciona frames de la biblioteca';
+        } else {
+            btnAddToRefs.title = '';
+        }
+
+        // Select all checkbox state
+        const selectAllCb = document.getElementById('selectAllLibrary');
+        if (currentSource === 'cluster') {
+            selectAllCb.checked = selCount === libraryFrames.length && selCount > 0;
+            selectAllCb.indeterminate = selCount > 0 && selCount < libraryFrames.length;
+        } else {
+            const availableCount = allVideoFrames.filter(f => !clusterFilenames.has(f.filename)).length;
+            selectAllCb.checked = selCount === availableCount && selCount > 0;
+            selectAllCb.indeterminate = selCount > 0 && selCount < availableCount;
+        }
+    }
+
+    // =========================================================================
+    // SELECTION
+    // =========================================================================
+
+    function toggleFrameSelection(frameId) {
+        if (selectedLibraryIds.has(frameId)) {
+            selectedLibraryIds.delete(frameId);
+        } else {
+            selectedLibraryIds.add(frameId);
+        }
+
+        // Selective DOM update instead of full re-render
+        updateClusterFrameCardState(frameId);
+        updateCounters();
+    }
+
+    function updateClusterFrameCardState(frameId) {
+        const card = document.querySelector(`.library-frame-card[data-frame-id="${frameId}"]`);
+        if (!card) return;
+
+        const isSelected = selectedLibraryIds.has(frameId);
+        card.classList.toggle('selected', isSelected);
+
+        const checkbox = card.querySelector('input[type="checkbox"]');
+        if (checkbox) checkbox.checked = isSelected;
+    }
+
+    function toggleAllFrameSelection(filename) {
+        if (selectedFilenames.has(filename)) {
+            selectedFilenames.delete(filename);
+        } else {
+            selectedFilenames.add(filename);
+        }
+
+        // Selective DOM update instead of full re-render
+        updateAllFrameCardState(filename);
+        updateCounters();
+    }
+
+    function updateAllFrameCardState(filename) {
+        const card = document.querySelector(
+            `.library-frame-card[data-filename="${CSS.escape(filename)}"]`
+        );
+        if (!card) return;
+
+        const isSelected = selectedFilenames.has(filename);
+        card.classList.toggle('selected', isSelected);
+
+        const checkbox = card.querySelector('input[type="checkbox"]');
+        if (checkbox) checkbox.checked = isSelected;
+    }
+
+    function toggleSelectAll() {
+        const selectAllCb = document.getElementById('selectAllLibrary');
+
+        if (currentSource === 'cluster') {
+            if (selectAllCb.checked) {
+                libraryFrames.forEach(f => selectedLibraryIds.add(f.id));
+            } else {
+                selectedLibraryIds.clear();
+            }
+            renderLibraryFrames();
+        } else {
+            const availableFrames = allVideoFrames.filter(f => !clusterFilenames.has(f.filename));
+            if (selectAllCb.checked) {
+                availableFrames.forEach(f => selectedFilenames.add(f.filename));
+            } else {
+                selectedFilenames.clear();
+            }
+            renderAllFrames();
+        }
+
+        updateCounters();
+    }
+
+    // =========================================================================
+    // ACTIONS
+    // =========================================================================
+
+    async function removeFromReferences(frameId) {
+        try {
+            const response = await fetch(
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/${frameId}`,
+                { method: 'DELETE' }
+            );
+
+            if (!response.ok) throw new Error('Error removing reference');
+
+            ThumbnailApp.showToast('Referencia eliminada', 'success');
+            loadFrames();
+
+        } catch (error) {
+            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        }
+    }
+
+    async function addSelectedToReferences() {
+        if (selectedLibraryIds.size === 0) return;
+
+        const frameIds = Array.from(selectedLibraryIds);
+
+        try {
+            const response = await fetch(
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/add`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frame_ids: frameIds })
+                }
+            );
+
+            if (!response.ok) throw new Error('Error adding references');
+
+            const data = await response.json();
+
+            if (data.added > 0) {
+                ThumbnailApp.showToast(`${data.added} frame${data.added > 1 ? 's' : ''} anadido${data.added > 1 ? 's' : ''} a referencias`, 'success');
+            }
+            if (data.skipped > 0) {
+                ThumbnailApp.showToast(`${data.skipped} frame${data.skipped > 1 ? 's' : ''} omitido${data.skipped > 1 ? 's' : ''} (maximo ${MAX_REFS})`, 'warning');
+            }
+
+            selectedLibraryIds.clear();
+            loadFrames();
+
+        } catch (error) {
+            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        }
+    }
+
+    // Helper function to convert filenames to paths for API calls
+    function filenamesToPaths(filenames) {
+        return Array.from(filenames)
+            .map(filename => allFramesByFilename.get(filename)?.path)
+            .filter(Boolean);
+    }
+
+    async function addSelectedToCluster() {
+        if (selectedFilenames.size === 0) return;
+
+        // Convert filenames to paths for the API
+        const framePaths = filenamesToPaths(selectedFilenames);
+
+        if (framePaths.length === 0) {
+            ThumbnailApp.showToast('Error: no se encontraron los frames seleccionados', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/add`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frame_paths: framePaths })
+                }
+            );
+
+            if (!response.ok) throw new Error('Error adding frames to cluster');
+
+            const data = await response.json();
+
+            if (data.added > 0) {
+                ThumbnailApp.showToast(`${data.added} frame${data.added > 1 ? 's' : ''} anadido${data.added > 1 ? 's' : ''} al cluster`, 'success');
+            }
+            if (data.skipped > 0) {
+                ThumbnailApp.showToast(`${data.skipped} frame${data.skipped > 1 ? 's' : ''} ya estaba${data.skipped > 1 ? 'n' : ''} en el cluster`, 'info');
+            }
+
+            // Clear selection and reload
+            selectedFilenames.clear();
+
+            // Reload frames to update cluster filenames
+            await loadFrames();
+
+            // Re-render all frames view
+            if (currentSource === 'all') {
+                renderAllFrames();
+            }
+
+            // Update page title with new frame count
+            const newTotal = referenceFrames.length + libraryFrames.length;
+            document.getElementById('frameCount').textContent = newTotal;
+
+            updateCounters();
+
+        } catch (error) {
+            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        }
+    }
+
+    // =========================================================================
+    // MODALS
+    // =========================================================================
+
+    function showInfoModal(type) {
+        const modalId = type === 'references' ? 'infoModalReferences' : 'infoModalLibrary';
+        document.getElementById(modalId).classList.add('visible');
+    }
+
+    function showResetModal() {
+        document.getElementById('resetModal').classList.add('visible');
+    }
+
+    function showDeleteModal() {
+        if (selectedLibraryIds.size === 0) return;
+
+        document.getElementById('deleteModalCount').textContent = selectedLibraryIds.size;
+        document.getElementById('deleteModalCountBtn').textContent = selectedLibraryIds.size;
+        document.getElementById('deleteModal').classList.add('visible');
+    }
+
+    function closeModal(modalId) {
+        document.getElementById(modalId).classList.remove('visible');
+    }
+
+    async function confirmReset() {
+        closeModal('resetModal');
+
+        try {
+            const response = await fetch(
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/reset`,
+                { method: 'POST' }
+            );
+
+            if (!response.ok) throw new Error('Error resetting references');
+
+            ThumbnailApp.showToast('Referencias restablecidas a las mejores por calidad', 'success');
+            loadFrames();
+
+        } catch (error) {
+            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        }
+    }
+
+    async function confirmDelete() {
+        closeModal('deleteModal');
+
+        if (selectedLibraryIds.size === 0) return;
+
+        const frameIds = Array.from(selectedLibraryIds);
+
+        try {
+            const response = await fetch(
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames`,
+                {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ frame_ids: frameIds })
+                }
+            );
+
+            if (!response.ok) throw new Error('Error deleting frames');
+
+            const data = await response.json();
+
+            ThumbnailApp.showToast(`${data.deleted} frame${data.deleted > 1 ? 's' : ''} eliminado${data.deleted > 1 ? 's' : ''}`, 'success');
+
+            if (data.errors && data.errors.length > 0) {
+                console.warn('Delete errors:', data.errors);
+            }
+
+            selectedLibraryIds.clear();
+            loadFrames();
+
+        } catch (error) {
+            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        }
+    }
+
+</script>
+{% endblock %}
