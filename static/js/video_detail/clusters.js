@@ -51,7 +51,7 @@ export async function load() {
     const select = document.getElementById('clusterSelect');
 
     try {
-        const response = await fetch(`/api/analysis/${state.videoId}/clusters?type=${state.currentClusterType}`);
+        const response = await fetch(`/api/analysis/${state.videoId}/clusters?view_mode=${state.currentClusterType}`);
         const data = await response.json();
 
         state.clusters = data.clusters;
@@ -84,7 +84,7 @@ export async function load() {
                     <button class="cluster-reference-btn" onclick="event.stopPropagation(); VideoDetail.setClusterAsReference(${cluster.cluster_index})" title="Usar como referencia para IA">
                         &#9734;
                     </button>
-                    <a href="/video/${state.videoId}/cluster/${cluster.cluster_index}/frames" class="cluster-frames-btn" onclick="event.stopPropagation()" title="Gestionar frames">
+                    <a href="/video/${state.videoId}/cluster/${cluster.cluster_index}/frames?view_mode=${state.currentClusterType}" class="cluster-frames-btn" onclick="event.stopPropagation()" title="Gestionar frames">
                         &#9881;
                     </a>
                     <button class="cluster-delete-btn" onclick="event.stopPropagation(); VideoDetail.showDeleteModal(${cluster.cluster_index}, ${cluster.num_frames})" title="Eliminar cluster">
@@ -355,7 +355,7 @@ export async function confirmDelete() {
     try {
         const sortedIndices = [...indicesToDelete].sort((a, b) => b - a);
         for (const idx of sortedIndices) {
-            const response = await fetch(`/api/analysis/${state.videoId}/clusters/${idx}`, {
+            const response = await fetch(`/api/analysis/${state.videoId}/clusters/${idx}?view_mode=${state.currentClusterType}`, {
                 method: 'DELETE'
             });
             if (!response.ok) {
@@ -424,7 +424,8 @@ export async function confirmMerge() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 cluster_indices: selected,
-                target_index: targetIndex
+                target_index: targetIndex,
+                view_mode: state.currentClusterType
             })
         });
 

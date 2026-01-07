@@ -4,7 +4,7 @@ FastAPI Main Application
 YouTube Thumbnail Generator Web Interface
 """
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -132,11 +132,22 @@ async def video_detail(request: Request, video_id: int):
 
 
 @app.get("/video/{video_id}/cluster/{cluster_index}/frames", response_class=HTMLResponse)
-async def cluster_frames(request: Request, video_id: int, cluster_index: int):
+async def cluster_frames(
+    request: Request,
+    video_id: int,
+    cluster_index: int,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
+):
     """Cluster frames management page."""
     return templates.TemplateResponse(
         "cluster_frames.html",
-        {"request": request, "video_id": video_id, "cluster_index": cluster_index, "max_refs": MAX_REFERENCE_FRAMES}
+        {
+            "request": request,
+            "video_id": video_id,
+            "cluster_index": cluster_index,
+            "max_refs": MAX_REFERENCE_FRAMES,
+            "view_mode": view_mode
+        }
     )
 
 

@@ -161,12 +161,12 @@ TRANSCRIPTION_LANGUAGE=en
 
 ### Gran Sabio LLM Setup (Required)
 
-The web interface uses [**Gran Sabio LLM**](https://github.com/jordicor/Gran_Sabio_LLM) for intelligent prompt generation. This is a multi-provider AI orchestration engine that handles all LLM calls with unified API key management.
+The web interface uses [**Gran Sabio LLM**](https://github.com/jordicor/GranSabio_LLM) for intelligent prompt generation. This is a multi-provider AI orchestration engine that handles all LLM calls with unified API key management.
 
 **1. Clone Gran Sabio LLM:**
 ```bash
-git clone https://github.com/jordicor/Gran_Sabio_LLM.git
-cd Gran_Sabio_LLM
+git clone https://github.com/jordicor/GranSabio_LLM.git
+cd GranSabio_LLM
 pip install -r requirements.txt
 ```
 
@@ -186,7 +186,7 @@ python main.py
 
 Add to your `.env`:
 ```bash
-GRANSABIO_CLIENT_PATH=C:/path/to/Gran_Sabio_LLM/client
+GRANSABIO_CLIENT_PATH=C:/path/to/GranSabio_LLM/client
 GRANSABIO_LLM_URL=http://localhost:8000
 ```
 

@@ -348,6 +348,97 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
     except Exception as e:
         print(f"Migration warning (cluster_type/parent): {e}")
 
+    # Migration 9: Architecture V2 - Create video_frames and cluster_frame_assignments tables
+    # This enables independent views where frames exist separately from cluster assignments.
+    # Data migration is handled by scripts/migrate_to_v2.py (run manually).
+    try:
+        # Check if video_frames table exists
+        async with db.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='video_frames'
+        """) as cursor:
+            video_frames_exists = await cursor.fetchone() is not None
+
+        if not video_frames_exists:
+            print("Migration: Creating video_frames table for Architecture V2...")
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS video_frames (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id INTEGER NOT NULL,
+                    frame_path TEXT NOT NULL,
+                    quality_score REAL,
+                    expression TEXT,
+                    scene_index INTEGER,
+                    face_embedding BLOB,
+                    similarity_to_centroid REAL,
+                    source_cluster_index INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_video_frames_video ON video_frames(video_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_video_frames_scene ON video_frames(video_id, scene_index)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_video_frames_quality ON video_frames(video_id, quality_score DESC)")
+            await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_video_frames_path ON video_frames(video_id, frame_path)")
+            await db.commit()
+            print("Migration: video_frames table created successfully")
+
+        # Check if cluster_frame_assignments table exists
+        async with db.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='cluster_frame_assignments'
+        """) as cursor:
+            assignments_exists = await cursor.fetchone() is not None
+
+        if not assignments_exists:
+            print("Migration: Creating cluster_frame_assignments table for Architecture V2...")
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS cluster_frame_assignments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id INTEGER NOT NULL,
+                    frame_id INTEGER NOT NULL,
+                    is_reference INTEGER DEFAULT 0,
+                    reference_order INTEGER,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE,
+                    FOREIGN KEY (frame_id) REFERENCES video_frames(id) ON DELETE CASCADE,
+                    UNIQUE(cluster_id, frame_id)
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_assignments_cluster ON cluster_frame_assignments(cluster_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_assignments_frame ON cluster_frame_assignments(frame_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_assignments_reference ON cluster_frame_assignments(cluster_id, is_reference)")
+            await db.commit()
+            print("Migration: cluster_frame_assignments table created successfully")
+
+        # Add view_mode and representative_frame_id columns to clusters
+        async with db.execute("PRAGMA table_info(clusters)") as cursor:
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+
+        if 'view_mode' not in column_names:
+            print("Migration: Adding view_mode column to clusters...")
+            await db.execute("ALTER TABLE clusters ADD COLUMN view_mode TEXT")
+            await db.commit()
+            # Copy existing cluster_type to view_mode
+            await db.execute("UPDATE clusters SET view_mode = cluster_type WHERE view_mode IS NULL")
+            await db.execute("UPDATE clusters SET view_mode = 'person' WHERE view_mode IS NULL")
+            await db.commit()
+            print("Migration: view_mode column added and populated")
+
+        if 'representative_frame_id' not in column_names:
+            print("Migration: Adding representative_frame_id column to clusters...")
+            await db.execute("ALTER TABLE clusters ADD COLUMN representative_frame_id INTEGER")
+            await db.commit()
+            print("Migration: representative_frame_id column added")
+
+        # Create index for view_mode queries
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_clusters_view_mode ON clusters(video_id, view_mode)")
+        await db.commit()
+
+    except Exception as e:
+        print(f"Migration warning (Architecture V2 tables): {e}")
+
 
 async def close_db() -> None:
     """Close database connection."""

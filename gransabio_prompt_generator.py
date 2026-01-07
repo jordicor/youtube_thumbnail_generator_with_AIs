@@ -8,18 +8,25 @@ AI provider selection, thinking mode support, and prompt history.
 
 import sys
 import json
+import time
 import logging
 from pathlib import Path
 from typing import Optional, List
 from dataclasses import dataclass
 
-from config import GRANSABIO_LLM_URL, GRANSABIO_CLIENT_PATH
+from config import (
+    GRANSABIO_LLM_URL,
+    GRANSABIO_CLIENT_PATH,
+    GRANSABIO_USERNAME,
+    GRANSABIO_IMAGE_DETAIL,
+    GRANSABIO_MAX_REF_IMAGES
+)
 
 logger = logging.getLogger(__name__)
 
 # Add Gran Sabio LLM client to path if configured
 # The client is a standalone HTTP client that only requires 'requests' and 'aiohttp'
-# Get it from: https://github.com/jordicor/Gran_Sabio_LLM (the 'client' folder)
+# Get it from: https://github.com/jordicor/GranSabio_LLM (the 'client' folder)
 if GRANSABIO_CLIENT_PATH:
     client_path = Path(GRANSABIO_CLIENT_PATH)
     if client_path.exists():
@@ -119,6 +126,53 @@ def get_gransabio_client():
     except Exception as e:
         _gransabio_available = False
         logger.warning(f"Could not connect to Gran Sabio LLM at {GRANSABIO_LLM_URL}: {e}")
+        return None
+
+
+def upload_image_to_gransabio(
+    image_base64: str,
+    filename: str = "reference_frame.jpg",
+    username: Optional[str] = None
+) -> Optional[str]:
+    """
+    Upload an image to Gran Sabio LLM and return the upload_id.
+
+    Gran Sabio requires images to be uploaded first, then referenced by upload_id
+    in the generate request. This two-step process allows the server to validate
+    and process images before they are used in generation.
+
+    Args:
+        image_base64: Base64-encoded image data (without data: prefix)
+        filename: Filename to use for the upload
+        username: User namespace for the attachment
+
+    Returns:
+        upload_id string or None on failure
+    """
+    client = get_gransabio_client()
+    if not client:
+        logger.warning("Gran Sabio client not available for image upload")
+        return None
+
+    # Use configured username if not specified
+    upload_username = username or GRANSABIO_USERNAME
+
+    try:
+        result = client.upload_attachment_base64(
+            username=upload_username,
+            content_base64=image_base64,
+            filename=filename,
+            content_type="image/jpeg"
+        )
+        upload_id = result.get("upload_id")
+        if upload_id:
+            logger.info(f"Image uploaded to Gran Sabio: {upload_id[:16]}...")
+            return upload_id
+        else:
+            logger.warning("Gran Sabio returned empty upload_id")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to upload image to Gran Sabio: {e}")
         return None
 
 
@@ -390,7 +444,8 @@ Generate exactly {num_concepts} concepts, each with exactly {num_variations} var
 def generate_with_gransabio(
     prompt: str,
     config: PromptGenerationConfig,
-    reference_image_base64: Optional[str] = None
+    reference_image_base64: Optional[str] = None,
+    reference_images_base64: Optional[List[str]] = None
 ) -> Optional[str]:
     """
     Generate response using Gran Sabio LLM Engine.
@@ -398,7 +453,8 @@ def generate_with_gransabio(
     Args:
         prompt: The prompt to send
         config: Generation configuration
-        reference_image_base64: Optional base64-encoded reference image for visual inspiration
+        reference_image_base64: Optional single base64-encoded reference image
+        reference_images_base64: Optional list of base64-encoded images (max 20)
 
     Returns:
         Generated response text or None on failure
@@ -413,9 +469,11 @@ def generate_with_gransabio(
         model = config.model or DEFAULT_MODELS.get(config.provider, "gpt-4o")
 
         # Build generation kwargs
+        # username is required when using images
         gen_kwargs = {
             "prompt": prompt,
             "generator_model": model,
+            "username": GRANSABIO_USERNAME,
             "qa_layers": [],  # Bypass QA for speed
             "json_output": True,
             "max_tokens": 16000,
@@ -441,14 +499,44 @@ def generate_with_gransabio(
                 gen_kwargs["reasoning_effort"] = effort
                 logger.info(f"Using OpenAI reasoning mode with effort: {effort}")
 
-        # Add reference image if provided
+        # Handle reference images - Gran Sabio requires upload first, then reference by upload_id
+        images_to_upload = []
+
+        # Single image (backward compatibility)
         if reference_image_base64:
-            gen_kwargs["images"] = [{
-                "type": "base64",
-                "data": reference_image_base64,
-                "media_type": "image/jpeg"
-            }]
-            logger.info("Including reference image in prompt generation for visual inspiration")
+            images_to_upload.append(reference_image_base64)
+
+        # Multiple images
+        if reference_images_base64:
+            images_to_upload.extend(reference_images_base64)
+
+        # Limit to configured max (default 5) or absolute max of 20 (Gran Sabio server limit)
+        max_images = min(GRANSABIO_MAX_REF_IMAGES, 20)
+        images_to_upload = images_to_upload[:max_images]
+
+        # Upload images and build references
+        if images_to_upload:
+            image_refs = []
+            timestamp = int(time.time())
+
+            for i, img_b64 in enumerate(images_to_upload):
+                upload_id = upload_image_to_gransabio(
+                    image_base64=img_b64,
+                    filename=f"ref_frame_{timestamp}_{i}.jpg",
+                    username=GRANSABIO_USERNAME
+                )
+                if upload_id:
+                    image_refs.append({
+                        "upload_id": upload_id,
+                        "username": GRANSABIO_USERNAME,
+                        "detail": GRANSABIO_IMAGE_DETAIL
+                    })
+
+            if image_refs:
+                gen_kwargs["images"] = image_refs
+                logger.info(f"Including {len(image_refs)} reference image(s) in prompt generation")
+            else:
+                logger.warning("Could not upload any reference images, proceeding without them")
 
         logger.info(f"Generating prompts with Gran Sabio LLM ({config.provider}/{model})...")
         result = client.generate(**gen_kwargs)
@@ -473,7 +561,8 @@ def generate_thumbnail_concepts_gransabio(
     config: Optional[PromptGenerationConfig] = None,
     thumbnail_style: str = "",
     selected_titles: Optional[List[str]] = None,
-    reference_image_base64: Optional[str] = None
+    reference_image_base64: Optional[str] = None,
+    reference_images_base64: Optional[List[str]] = None
 ) -> Optional[list]:
     """
     Generate thumbnail concepts using Gran Sabio LLM.
@@ -487,13 +576,17 @@ def generate_thumbnail_concepts_gransabio(
         config: Optional PromptGenerationConfig
         thumbnail_style: Style guidance string
         selected_titles: Optional list of user-selected titles to guide image generation
-        reference_image_base64: Optional base64-encoded reference image for visual inspiration
+        reference_image_base64: Optional single base64-encoded reference image
+        reference_images_base64: Optional list of base64-encoded images (max 20)
 
     Returns:
         List of concept dictionaries or None on failure
     """
     if config is None:
         config = PromptGenerationConfig()
+
+    # Determine if we have any reference images
+    has_reference = bool(reference_image_base64) or bool(reference_images_base64)
 
     # Build the prompt
     prompt = build_analysis_prompt(
@@ -507,11 +600,16 @@ def generate_thumbnail_concepts_gransabio(
         include_history=config.include_history,
         thumbnail_style=thumbnail_style,
         selected_titles=selected_titles,
-        has_reference_image=bool(reference_image_base64)
+        has_reference_image=has_reference
     )
 
-    # Generate with Gran Sabio LLM (passing reference image if provided)
-    response = generate_with_gransabio(prompt, config, reference_image_base64)
+    # Generate with Gran Sabio LLM (passing reference images if provided)
+    response = generate_with_gransabio(
+        prompt=prompt,
+        config=config,
+        reference_image_base64=reference_image_base64,
+        reference_images_base64=reference_images_base64
+    )
 
     if not response:
         return None

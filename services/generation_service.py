@@ -43,12 +43,20 @@ class GenerationService:
         self,
         video_id: int,
         cluster_index: int,
-        limit: int = 20
+        limit: int = 20,
+        view_mode: str = 'person'
     ) -> List[dict]:
-        """Get frames for a specific cluster."""
+        """
+        Get frames for a specific cluster.
+
+        V2 Architecture: Uses cluster_frame_assignments JOIN video_frames.
+        """
         # First get cluster ID
-        query = "SELECT id FROM clusters WHERE video_id = ? AND cluster_index = ?"
-        async with self.db.execute(query, [video_id, cluster_index]) as cursor:
+        query = """
+            SELECT id FROM clusters
+            WHERE video_id = ? AND cluster_index = ? AND view_mode = ?
+        """
+        async with self.db.execute(query, [video_id, cluster_index, view_mode]) as cursor:
             row = await cursor.fetchone()
             if not row:
                 return []
@@ -56,10 +64,11 @@ class GenerationService:
 
         # Get frames ordered by quality (best first)
         query = """
-            SELECT frame_path, quality_score, expression
-            FROM cluster_frames
-            WHERE cluster_id = ?
-            ORDER BY quality_score DESC
+            SELECT vf.frame_path, vf.quality_score, vf.expression
+            FROM video_frames vf
+            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
+            WHERE cfa.cluster_id = ?
+            ORDER BY vf.quality_score DESC
             LIMIT ?
         """
 
@@ -142,8 +151,9 @@ class GenerationService:
         prompt_include_history: bool = False,
         # Selected titles to guide image generation
         selected_titles: Optional[List[str]] = None,
-        # External reference image
+        # External reference image(s)
         reference_image_base64: Optional[str] = None,
+        reference_images_base64: Optional[List[str]] = None,
         reference_image_use_for_prompts: bool = False,
         reference_image_include_in_refs: bool = False
     ):
@@ -166,7 +176,8 @@ class GenerationService:
             prompt_include_history: Include previous prompts to avoid repetition
             selected_titles: User-selected titles to guide image generation
             reference_image_base64: External reference image as base64
-            reference_image_use_for_prompts: Use reference image for prompt analysis
+            reference_images_base64: List of external reference images as base64 (max 20)
+            reference_image_use_for_prompts: Use reference image(s) for prompt analysis
             reference_image_include_in_refs: Include reference image in generation refs
         """
         import sys
@@ -249,10 +260,14 @@ class GenerationService:
                 history_prompts=history_prompts
             )
 
-            # Prepare reference image for prompt generation if requested
+            # Prepare reference image(s) for prompt generation if requested
             ref_image_for_prompts = None
-            if reference_image_base64 and reference_image_use_for_prompts:
-                ref_image_for_prompts = reference_image_base64
+            ref_images_for_prompts = None
+            if reference_image_use_for_prompts:
+                if reference_image_base64:
+                    ref_image_for_prompts = reference_image_base64
+                if reference_images_base64:
+                    ref_images_for_prompts = reference_images_base64
 
             thumbnail_concepts = generate_thumbnail_concepts(
                 transcription=transcription,
@@ -263,7 +278,8 @@ class GenerationService:
                 cluster_description=cluster.get('description'),
                 prompt_config=prompt_config,
                 selected_titles=selected_titles,
-                reference_image_base64=ref_image_for_prompts
+                reference_image_base64=ref_image_for_prompts,
+                reference_images_base64=ref_images_for_prompts
             )
 
             if not thumbnail_concepts:
@@ -503,15 +519,18 @@ class GenerationService:
         """
         Get reference frames for AI generation.
 
-        Returns frames marked as references (is_reference=1), ordered by reference_order.
+        V2 Architecture: Uses cluster_frame_assignments JOIN video_frames.
+
+        Returns frames marked as references, ordered by reference_order.
         If no references are marked, falls back to top frames by quality_score.
         """
-        # Try to get marked references first
+        # Try to get explicitly marked references first
         query = """
-            SELECT frame_path, quality_score, expression
-            FROM cluster_frames
-            WHERE cluster_id = ? AND is_reference = 1
-            ORDER BY reference_order ASC
+            SELECT vf.frame_path, vf.quality_score, vf.expression
+            FROM video_frames vf
+            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
+            WHERE cfa.cluster_id = ? AND cfa.is_reference = 1
+            ORDER BY cfa.reference_order ASC
             LIMIT ?
         """
         async with self.db.execute(query, [cluster_id, limit]) as cursor:
@@ -522,10 +541,11 @@ class GenerationService:
 
         # Fallback: top frames by quality score
         query = """
-            SELECT frame_path, quality_score, expression
-            FROM cluster_frames
-            WHERE cluster_id = ?
-            ORDER BY quality_score DESC
+            SELECT vf.frame_path, vf.quality_score, vf.expression
+            FROM video_frames vf
+            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
+            WHERE cfa.cluster_id = ?
+            ORDER BY vf.quality_score DESC
             LIMIT ?
         """
         async with self.db.execute(query, [cluster_id, limit]) as cursor:

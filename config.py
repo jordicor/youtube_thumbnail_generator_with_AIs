@@ -61,12 +61,17 @@ POE_API_KEY = os.getenv("POE_API_KEY", "")
 # =============================================================================
 
 # Gran Sabio LLM server URL for advanced prompt generation
-# See: https://github.com/jordicor/Gran_Sabio_LLM
+# See: https://github.com/jordicor/GranSabio_LLM
 GRANSABIO_LLM_URL = os.getenv("GRANSABIO_LLM_URL", "http://localhost:8000")
 
 # Path to Gran Sabio LLM client directory (required for web interface)
 # Should point to the 'client' folder inside your Gran Sabio LLM installation
 GRANSABIO_CLIENT_PATH = os.getenv("GRANSABIO_CLIENT_PATH", "")
+
+# Gran Sabio Vision Settings (for sending reference images to LLM)
+GRANSABIO_USERNAME = os.getenv("GRANSABIO_USERNAME", "thumbnail_generator")
+GRANSABIO_IMAGE_DETAIL = os.getenv("GRANSABIO_IMAGE_DETAIL", "auto")  # low, high, auto
+GRANSABIO_MAX_REF_IMAGES = int(os.getenv("GRANSABIO_MAX_REF_IMAGES", "5"))  # Max frames to send to LLM
 
 # =============================================================================
 # VIDEO PROCESSING SETTINGS

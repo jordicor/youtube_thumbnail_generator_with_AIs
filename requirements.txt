@@ -79,9 +79,9 @@ scikit-learn>=1.3.0        # DBSCAN clustering
 #    - POE_API_KEY (optional, for FLUX models via Poe)
 #
 # 6. Gran Sabio LLM (required for web interface prompt generation):
-#    - Clone from: https://github.com/jordicor/Gran_Sabio_LLM
+#    - Clone from: https://github.com/jordicor/GranSabio_LLM
 #    - Configure in .env:
-#      GRANSABIO_CLIENT_PATH=/path/to/Gran_Sabio_LLM/client
+#      GRANSABIO_CLIENT_PATH=/path/to/GranSabio_LLM/client
 #      GRANSABIO_LLM_URL=http://localhost:8000
 #
 # =============================================================================

@@ -4,11 +4,11 @@ Analysis API Routes
 Endpoints for video analysis (scenes, faces, clustering).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pathlib import Path
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database.db import get_db
 from services.analysis_service import AnalysisService
@@ -42,6 +42,7 @@ class ClusterResponse(BaseModel):
 class MergeClustersRequest(BaseModel):
     cluster_indices: List[int]  # List of cluster indices to merge
     target_index: int  # Which cluster to keep as the main one
+    view_mode: str = Field(default='person', pattern='^(person|person_scene)$')
 
 
 class UpdateReferencesRequest(BaseModel):
@@ -65,6 +66,7 @@ class CreateClusterRequest(BaseModel):
     label: Optional[str] = None  # Optional cluster name
     description: Optional[str] = None  # Optional notes/comments
     reference_frame_paths: Optional[List[str]] = None  # Optional specific reference frames
+    view_mode: str = Field(default='person', pattern='^(person|person_scene)$')
 
 
 class UpdateClusterRequest(BaseModel):
@@ -156,53 +158,56 @@ async def get_analysis_status(video_id: int):
 
 
 @router.get("/{video_id}/clusters")
-async def get_clusters(video_id: int, type: str = "person"):
+async def get_clusters(
+    video_id: int,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
+):
     """
-    Get detected clusters for a video, filtered by type.
+    Get detected clusters for a video, filtered by view mode.
 
     Args:
         video_id: The video ID
-        type: Cluster type - 'person' (unified by face) or 'person_scene' (split by scene)
+        view_mode: View mode - 'person' (unified by face) or 'person_scene' (split by scene)
 
     Returns:
-        List of clusters with frame counts. For 'person' clusters, num_frames is
-        aggregated from child 'person_scene' clusters.
+        List of clusters with frame counts.
     """
-    # Validate type parameter
-    if type not in ("person", "person_scene"):
-        type = "person"
-
     async with get_db() as db:
         service = AnalysisService(db)
-        clusters = await service.get_clusters(video_id, cluster_type=type)
+        clusters = await service.get_clusters(video_id, view_mode=view_mode)
 
-    return {"video_id": video_id, "clusters": clusters, "cluster_type": type}
+    return {"video_id": video_id, "clusters": clusters, "view_mode": view_mode}
 
 
 @router.get("/{video_id}/clusters/{cluster_index}/frames")
 async def get_cluster_frames(
     video_id: int,
     cluster_index: int,
-    limit: int = 20
+    limit: int = 20,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
     """
     Get frames for a specific cluster.
     """
     async with get_db() as db:
         service = AnalysisService(db)
-        frames = await service.get_cluster_frames(video_id, cluster_index, limit)
+        frames = await service.get_cluster_frames(video_id, cluster_index, limit, view_mode=view_mode)
 
-    return {"cluster_index": cluster_index, "frames": frames}
+    return {"cluster_index": cluster_index, "frames": frames, "view_mode": view_mode}
 
 
 @router.get("/{video_id}/clusters/{cluster_index}/image")
-async def get_cluster_representative_image(video_id: int, cluster_index: int):
+async def get_cluster_representative_image(
+    video_id: int,
+    cluster_index: int,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
+):
     """
     Get representative image for a cluster.
     """
     async with get_db() as db:
         service = AnalysisService(db)
-        image_path = await service.get_cluster_representative(video_id, cluster_index)
+        image_path = await service.get_cluster_representative(video_id, cluster_index, view_mode=view_mode)
 
     if not image_path:
         raise HTTPException(status_code=404, detail="Cluster not found")
@@ -235,7 +240,11 @@ async def get_cluster_image_by_id(video_id: int, cluster_id: int):
 
 
 @router.delete("/{video_id}/clusters/{cluster_index}")
-async def delete_cluster(video_id: int, cluster_index: int):
+async def delete_cluster(
+    video_id: int,
+    cluster_index: int,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
+):
     """
     Delete a cluster and its associated frames.
     Remaining clusters will be reindexed to maintain consecutive indices.
@@ -249,12 +258,12 @@ async def delete_cluster(video_id: int, cluster_index: int):
             raise HTTPException(status_code=404, detail="Video not found")
 
         # Delete the cluster
-        success = await service.delete_cluster(video_id, cluster_index)
+        success = await service.delete_cluster(video_id, cluster_index, view_mode=view_mode)
 
         if not success:
             raise HTTPException(status_code=404, detail="Cluster not found")
 
-    return {"message": "Cluster deleted successfully", "video_id": video_id}
+    return {"message": "Cluster deleted successfully", "video_id": video_id, "view_mode": view_mode}
 
 
 @router.post("/{video_id}/clusters/merge")
@@ -284,7 +293,8 @@ async def merge_clusters(video_id: int, request: MergeClustersRequest):
         result = await service.merge_clusters(
             video_id,
             request.cluster_indices,
-            request.target_index
+            request.target_index,
+            view_mode=request.view_mode
         )
 
         if not result:
@@ -293,13 +303,14 @@ async def merge_clusters(video_id: int, request: MergeClustersRequest):
                 detail="Failed to merge clusters. Verify cluster indices exist."
             )
 
-        # Get updated clusters
-        clusters = await service.get_clusters(video_id)
+        # Get updated clusters for the same view_mode
+        clusters = await service.get_clusters(video_id, view_mode=request.view_mode)
 
     return {
         "message": "Clusters merged successfully",
         "video_id": video_id,
-        "clusters": clusters
+        "clusters": clusters,
+        "view_mode": request.view_mode
     }
 
 
@@ -308,7 +319,11 @@ async def merge_clusters(video_id: int, request: MergeClustersRequest):
 # ============================================================================
 
 @router.get("/{video_id}/clusters/{cluster_index}/frames/all")
-async def get_all_cluster_frames(video_id: int, cluster_index: int):
+async def get_all_cluster_frames(
+    video_id: int,
+    cluster_index: int,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
+):
     """
     Get all frames for a cluster, split into references and library.
 
@@ -322,7 +337,7 @@ async def get_all_cluster_frames(video_id: int, cluster_index: int):
     async with get_db() as db:
         service = AnalysisService(db)
 
-        result = await service.get_all_cluster_frames(video_id, cluster_index)
+        result = await service.get_all_cluster_frames(video_id, cluster_index, view_mode=view_mode)
 
         if result is None:
             raise HTTPException(status_code=404, detail="Cluster not found")
@@ -335,12 +350,11 @@ async def get_frame_image(video_id: int, cluster_index: int, frame_id: int):
     """
     Get the image for a specific frame.
 
-    Note: frame_id is unique (PRIMARY KEY), so we don't need to filter by cluster_id.
-    This allows 'person' clusters to serve images from their child 'person_scene' clusters.
+    V2 Architecture: frame_id refers to video_frames.id
     """
     async with get_db() as db:
-        # frame_id is unique, no need to verify cluster ownership
-        query = "SELECT frame_path FROM cluster_frames WHERE id = ?"
+        # frame_id is video_frames.id
+        query = "SELECT frame_path FROM video_frames WHERE id = ?"
         async with db.execute(query, [frame_id]) as cursor:
             row = await cursor.fetchone()
             if not row:
@@ -357,7 +371,8 @@ async def get_frame_image(video_id: int, cluster_index: int, frame_id: int):
 async def update_reference_frames(
     video_id: int,
     cluster_index: int,
-    request: UpdateReferencesRequest
+    request: UpdateReferencesRequest,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
     """
     Update which frames are marked as references for AI generation.
@@ -374,7 +389,7 @@ async def update_reference_frames(
             )
 
         success = await service.update_reference_frames(
-            video_id, cluster_index, request.frame_ids
+            video_id, cluster_index, request.frame_ids, view_mode=view_mode
         )
 
         if not success:
@@ -387,7 +402,8 @@ async def update_reference_frames(
 async def add_frames_to_references(
     video_id: int,
     cluster_index: int,
-    request: AddReferencesRequest
+    request: AddReferencesRequest,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
     """
     Add frames to references (up to max defined by MAX_REFERENCE_FRAMES).
@@ -396,7 +412,7 @@ async def add_frames_to_references(
         service = AnalysisService(db)
 
         result = await service.add_frames_to_references(
-            video_id, cluster_index, request.frame_ids
+            video_id, cluster_index, request.frame_ids, view_mode=view_mode
         )
 
         if result is None:
@@ -414,7 +430,8 @@ async def add_frames_to_references(
 async def remove_frame_from_references(
     video_id: int,
     cluster_index: int,
-    frame_id: int
+    frame_id: int,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
     """
     Remove a single frame from references.
@@ -423,7 +440,7 @@ async def remove_frame_from_references(
         service = AnalysisService(db)
 
         success = await service.remove_frame_from_references(
-            video_id, cluster_index, frame_id
+            video_id, cluster_index, frame_id, view_mode=view_mode
         )
 
         if not success:
@@ -433,7 +450,11 @@ async def remove_frame_from_references(
 
 
 @router.post("/{video_id}/clusters/{cluster_index}/frames/references/reset")
-async def reset_reference_frames(video_id: int, cluster_index: int):
+async def reset_reference_frames(
+    video_id: int,
+    cluster_index: int,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
+):
     """
     Reset reference frames to the top N by quality score (N = MAX_REFERENCE_FRAMES).
     Discards any custom selection.
@@ -441,7 +462,7 @@ async def reset_reference_frames(video_id: int, cluster_index: int):
     async with get_db() as db:
         service = AnalysisService(db)
 
-        success = await service.reset_reference_frames(video_id, cluster_index)
+        success = await service.reset_reference_frames(video_id, cluster_index, view_mode=view_mode)
 
         if not success:
             raise HTTPException(status_code=404, detail="Cluster not found")
@@ -453,7 +474,8 @@ async def reset_reference_frames(video_id: int, cluster_index: int):
 async def delete_cluster_frames(
     video_id: int,
     cluster_index: int,
-    request: DeleteFramesRequest
+    request: DeleteFramesRequest,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
     """
     Delete frames from a cluster permanently.
@@ -463,7 +485,7 @@ async def delete_cluster_frames(
         service = AnalysisService(db)
 
         result = await service.delete_cluster_frames(
-            video_id, cluster_index, request.frame_ids
+            video_id, cluster_index, request.frame_ids, view_mode=view_mode
         )
 
         if result is None:
@@ -646,7 +668,8 @@ async def create_manual_cluster(
             request.frame_paths,
             request.label,
             request.reference_frame_paths,
-            request.description
+            request.description,
+            view_mode=request.view_mode
         )
 
         if result is None:
@@ -654,7 +677,8 @@ async def create_manual_cluster(
 
     return {
         "message": "Cluster created successfully",
-        "cluster": result
+        "cluster": result,
+        "view_mode": request.view_mode
     }
 
 
@@ -662,7 +686,8 @@ async def create_manual_cluster(
 async def update_cluster(
     video_id: int,
     cluster_index: int,
-    request: UpdateClusterRequest
+    request: UpdateClusterRequest,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
     """
     Update cluster label and/or description.
@@ -679,7 +704,8 @@ async def update_cluster(
             video_id,
             cluster_index,
             request.label,
-            request.description
+            request.description,
+            view_mode=view_mode
         )
 
         if not success:
@@ -692,7 +718,8 @@ async def update_cluster(
 async def add_frames_to_cluster(
     video_id: int,
     cluster_index: int,
-    request: AddFramesToClusterRequest
+    request: AddFramesToClusterRequest,
+    view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
     """
     Add frames to an existing cluster.
@@ -704,7 +731,7 @@ async def add_frames_to_cluster(
         service = AnalysisService(db)
 
         result = await service.add_frames_to_cluster(
-            video_id, cluster_index, request.frame_paths
+            video_id, cluster_index, request.frame_paths, view_mode=view_mode
         )
 
         if result is None:

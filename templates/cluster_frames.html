@@ -237,6 +237,7 @@
     const videoId = {{ video_id }};
     const clusterIndex = {{ cluster_index }};
     const MAX_REFS = {{ max_refs }};
+    const viewMode = "{{ view_mode }}";
 
     // =========================================================================
     // STATE
@@ -291,7 +292,7 @@
 
     async function loadClusterInfo() {
         try {
-            const response = await fetch(`/api/analysis/${videoId}/clusters`);
+            const response = await fetch(`/api/analysis/${videoId}/clusters?view_mode=${viewMode}`);
             if (!response.ok) throw new Error('Error loading cluster info');
 
             const data = await response.json();
@@ -332,7 +333,7 @@
         saveStatus.className = 'save-status saving';
 
         try {
-            const response = await fetch(`/api/analysis/${videoId}/clusters/${clusterIndex}`, {
+            const response = await fetch(`/api/analysis/${videoId}/clusters/${clusterIndex}?view_mode=${viewMode}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -377,7 +378,7 @@
     async function loadFrames() {
         try {
             // Load ALL frames from DB (now contains all frames, not just 20)
-            const response = await fetch(`/api/analysis/${videoId}/clusters/${clusterIndex}/frames/all`);
+            const response = await fetch(`/api/analysis/${videoId}/clusters/${clusterIndex}/frames/all?view_mode=${viewMode}`);
             if (!response.ok) throw new Error('Error loading frames');
 
             const data = await response.json();
@@ -878,7 +879,7 @@
     async function removeFromReferences(frameId) {
         try {
             const response = await fetch(
-                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/${frameId}`,
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/${frameId}?view_mode=${viewMode}`,
                 { method: 'DELETE' }
             );
 
@@ -899,7 +900,7 @@
 
         try {
             const response = await fetch(
-                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/add`,
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/add?view_mode=${viewMode}`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -946,7 +947,7 @@
 
         try {
             const response = await fetch(
-                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/add`,
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/add?view_mode=${viewMode}`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1017,7 +1018,7 @@
 
         try {
             const response = await fetch(
-                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/reset`,
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames/references/reset?view_mode=${viewMode}`,
                 { method: 'POST' }
             );
 
@@ -1040,7 +1041,7 @@
 
         try {
             const response = await fetch(
-                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames`,
+                `/api/analysis/${videoId}/clusters/${clusterIndex}/frames?view_mode=${viewMode}`,
                 {
                     method: 'DELETE',
                     headers: { 'Content-Type': 'application/json' },

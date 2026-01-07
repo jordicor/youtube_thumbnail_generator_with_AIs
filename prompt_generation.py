@@ -795,7 +795,8 @@ def generate_thumbnail_concepts(
     cluster_description: Optional[str] = None,
     prompt_config: Optional["PromptGenerationConfig"] = None,
     selected_titles: Optional[list[str]] = None,
-    reference_image_base64: Optional[str] = None
+    reference_image_base64: Optional[str] = None,
+    reference_images_base64: Optional[list[str]] = None
 ) -> list[ThumbnailConcept]:
     """
     Generate thumbnail concepts with variations for A/B testing.
@@ -809,7 +810,8 @@ def generate_thumbnail_concepts(
         cluster_description: Optional user-provided context about the reference images
         prompt_config: Optional Gran Sabio LLM configuration for prompt generation
         selected_titles: Optional list of user-selected titles to guide image generation
-        reference_image_base64: Optional external reference image for visual inspiration
+        reference_image_base64: Optional single external reference image for visual inspiration
+        reference_images_base64: Optional list of reference images (max 20)
 
     Returns:
         List of ThumbnailConcept objects, each with variations
@@ -897,7 +899,8 @@ Use this information as you see fit when crafting your thumbnail concepts and im
         config=prompt_config,
         thumbnail_style=f"Style guidance:\n{THUMBNAIL_STYLE}",
         selected_titles=selected_titles,
-        reference_image_base64=reference_image_base64
+        reference_image_base64=reference_image_base64,
+        reference_images_base64=reference_images_base64
     )
 
     if data:
