@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="{{ get_language() }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}YouTube Thumbnail Generator{% endblock %}</title>
+    <title>{% block title %}{{ t('common.app_name') }}{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
     {% block head %}{% endblock %}
 </head>
@@ -11,12 +11,12 @@
     <header class="header">
         <div class="container">
             <a href="/" class="logo">
-                <span class="logo-text">Thumbnail Generator</span>
+                <span class="logo-text">{{ t('common.app_title') }}</span>
             </a>
             <div class="directory-selector" id="directorySelector">
                 <div class="directory-current" id="directoryCurrent">
                     <span class="directory-icon">📁</span>
-                    <span class="directory-name" id="directoryName">Seleccionar directorio...</span>
+                    <span class="directory-name" id="directoryName">{{ t('header.select_directory') }}</span>
                     <span class="directory-arrow">▼</span>
                 </div>
                 <div class="directory-dropdown" id="directoryDropdown">
@@ -24,14 +24,21 @@
                         <!-- Directories will be loaded here -->
                     </div>
                     <div class="directory-add">
-                        <input type="text" id="newDirectoryPath" placeholder="Ruta del directorio...">
-                        <button class="btn btn-small btn-primary" id="addDirectoryBtn">Añadir</button>
+                        <input type="text" id="newDirectoryPath" placeholder="{{ t('header.directory_placeholder') }}">
+                        <button class="btn btn-small btn-primary" id="addDirectoryBtn">{{ t('header.add_directory') }}</button>
                     </div>
                 </div>
             </div>
+            <div class="language-selector">
+                {% for lang in SUPPORTED_LANGUAGES %}
+                <button class="lang-btn{% if get_language() == lang %} active{% endif %}" data-lang="{{ lang }}">
+                    {{ t('language.' ~ lang) }}
+                </button>
+                {% endfor %}
+            </div>
             <nav class="nav">
-                <a href="/" class="nav-link">Videos</a>
-                <a href="/api/docs" class="nav-link" target="_blank">API Docs</a>
+                <a href="/" class="nav-link">{{ t('nav.videos') }}</a>
+                <a href="/api/docs" class="nav-link" target="_blank">{{ t('nav.api_docs') }}</a>
             </nav>
         </div>
     </header>
@@ -44,10 +51,12 @@
 
     <footer class="footer">
         <div class="container">
-            <p>YouTube Thumbnail Generator v2.0 - FastAPI Backend</p>
+            <p>{{ t('footer.version') }}</p>
         </div>
     </footer>
 
+    <!-- i18n must load first -->
+    <script src="/static/js/i18n.js"></script>
     <script src="/static/js/app.js"></script>
     <script>
         // Global utility function to escape HTML and prevent XSS

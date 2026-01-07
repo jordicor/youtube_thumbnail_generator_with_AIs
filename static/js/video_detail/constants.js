@@ -71,21 +71,28 @@ export const SHORT_MODEL_NAMES = {
 };
 
 // Fallback models if API fails to load
-export const FALLBACK_PROMPT_MODELS = {
-    anthropic: [
-        { value: "", label: "Por defecto" },
-        { value: "claude-sonnet-4-5", label: "Claude Sonnet 4.5" }
-    ],
-    openai: [
-        { value: "", label: "Por defecto" },
-        { value: "gpt-5.2", label: "GPT-5.2" }
-    ],
-    google: [
-        { value: "", label: "Por defecto" },
-        { value: "gemini-3-flash-preview", label: "Gemini 3 Flash" }
-    ],
-    xai: [
-        { value: "", label: "Por defecto" },
-        { value: "grok-4-1-fast-non-reasoning", label: "Grok 4.1 Fast" }
-    ]
-};
+// Using function to defer translation lookup until i18n is initialized
+export function getFallbackPromptModels() {
+    const defaultLabel = typeof t === 'function' ? t('generation.config.default') : 'Default';
+    return {
+        anthropic: [
+            { value: "", label: defaultLabel },
+            { value: "claude-sonnet-4-5", label: "Claude Sonnet 4.5" }
+        ],
+        openai: [
+            { value: "", label: defaultLabel },
+            { value: "gpt-5.2", label: "GPT-5.2" }
+        ],
+        google: [
+            { value: "", label: defaultLabel },
+            { value: "gemini-3-flash-preview", label: "Gemini 3 Flash" }
+        ],
+        xai: [
+            { value: "", label: defaultLabel },
+            { value: "grok-4-1-fast-non-reasoning", label: "Grok 4.1 Fast" }
+        ]
+    };
+}
+
+// Legacy export for backward compatibility (deprecated)
+export const FALLBACK_PROMPT_MODELS = null;

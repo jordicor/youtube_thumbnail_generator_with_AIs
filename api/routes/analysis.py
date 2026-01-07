@@ -14,6 +14,7 @@ from database.db import get_db
 from services.analysis_service import AnalysisService
 from config import MAX_REFERENCE_FRAMES
 from job_queue.queue import enqueue_analysis
+from i18n.i18n import translate as t
 
 
 router = APIRouter()
@@ -106,12 +107,12 @@ async def start_analysis(
         # Verify video exists
         video = await service.get_video(video_id)
         if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         # Check if already analyzing (any analysis-related status)
         analysis_in_progress_states = {'analyzing', 'analyzing_scenes', 'analyzing_faces', 'clustering', 'transcribing'}
         if video['status'] in analysis_in_progress_states:
-            raise HTTPException(status_code=400, detail="Analysis already in progress")
+            raise HTTPException(status_code=400, detail=t('api.errors.analysis_in_progress'))
 
         # Update status
         await service.update_video_status(video_id, 'analyzing')
@@ -131,13 +132,13 @@ async def start_analysis(
         # Failed to enqueue - revert status
         async with get_db() as db:
             service = AnalysisService(db)
-            await service.update_video_status(video_id, 'pending', 'Failed to enqueue analysis job')
-        raise HTTPException(status_code=500, detail="Failed to enqueue analysis job")
+            await service.update_video_status(video_id, 'pending', t('api.errors.failed_enqueue_analysis'))
+        raise HTTPException(status_code=500, detail=t('api.errors.failed_enqueue_analysis'))
 
     return {
         "video_id": video_id,
         "status": "analyzing",
-        "message": "Analysis started",
+        "message": t('api.messages.analysis_started'),
         "job_id": job_id
     }
 
@@ -152,7 +153,7 @@ async def get_analysis_status(video_id: int):
         status = await service.get_analysis_status(video_id)
 
     if not status:
-        raise HTTPException(status_code=404, detail="Video not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     return AnalysisStatusResponse(**status)
 
@@ -210,10 +211,10 @@ async def get_cluster_representative_image(
         image_path = await service.get_cluster_representative(video_id, cluster_index, view_mode=view_mode)
 
     if not image_path:
-        raise HTTPException(status_code=404, detail="Cluster not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     if not Path(image_path).exists():
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.image_not_found'))
 
     return FileResponse(image_path, media_type="image/jpeg")
 
@@ -231,10 +232,10 @@ async def get_cluster_image_by_id(video_id: int, cluster_id: int):
         image_path = await service.get_cluster_representative_by_id(cluster_id)
 
     if not image_path:
-        raise HTTPException(status_code=404, detail="Cluster not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     if not Path(image_path).exists():
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.image_not_found'))
 
     return FileResponse(image_path, media_type="image/jpeg")
 
@@ -255,15 +256,15 @@ async def delete_cluster(
         # Verify video exists
         video = await service.get_video(video_id)
         if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         # Delete the cluster
         success = await service.delete_cluster(video_id, cluster_index, view_mode=view_mode)
 
         if not success:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
-    return {"message": "Cluster deleted successfully", "video_id": video_id, "view_mode": view_mode}
+    return {"message": t('api.messages.cluster_deleted'), "video_id": video_id, "view_mode": view_mode}
 
 
 @router.post("/{video_id}/clusters/merge")
@@ -280,13 +281,13 @@ async def merge_clusters(video_id: int, request: MergeClustersRequest):
         # Verify video exists
         video = await service.get_video(video_id)
         if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         # Validate request
         if len(request.cluster_indices) < 2:
             raise HTTPException(
                 status_code=400,
-                detail="At least 2 clusters are required for merging"
+                detail=t('api.errors.min_clusters_required')
             )
 
         # Merge the clusters
@@ -300,14 +301,14 @@ async def merge_clusters(video_id: int, request: MergeClustersRequest):
         if not result:
             raise HTTPException(
                 status_code=400,
-                detail="Failed to merge clusters. Verify cluster indices exist."
+                detail=t('api.errors.failed_merge_clusters')
             )
 
         # Get updated clusters for the same view_mode
         clusters = await service.get_clusters(video_id, view_mode=request.view_mode)
 
     return {
-        "message": "Clusters merged successfully",
+        "message": t('api.messages.clusters_merged'),
         "video_id": video_id,
         "clusters": clusters,
         "view_mode": request.view_mode
@@ -340,7 +341,7 @@ async def get_all_cluster_frames(
         result = await service.get_all_cluster_frames(video_id, cluster_index, view_mode=view_mode)
 
         if result is None:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     return result
 
@@ -358,11 +359,11 @@ async def get_frame_image(video_id: int, cluster_index: int, frame_id: int):
         async with db.execute(query, [frame_id]) as cursor:
             row = await cursor.fetchone()
             if not row:
-                raise HTTPException(status_code=404, detail="Frame not found")
+                raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))
             frame_path = row[0]
 
     if not Path(frame_path).exists():
-        raise HTTPException(status_code=404, detail="Frame image not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))
 
     return FileResponse(frame_path, media_type="image/jpeg")
 
@@ -385,7 +386,7 @@ async def update_reference_frames(
         if len(request.frame_ids) > MAX_REFERENCE_FRAMES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Maximum {MAX_REFERENCE_FRAMES} reference frames allowed"
+                detail=t('api.errors.max_references', max=MAX_REFERENCE_FRAMES)
             )
 
         success = await service.update_reference_frames(
@@ -393,9 +394,9 @@ async def update_reference_frames(
         )
 
         if not success:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
-    return {"message": "References updated", "count": len(request.frame_ids)}
+    return {"message": t('api.messages.references_updated'), "count": len(request.frame_ids)}
 
 
 @router.post("/{video_id}/clusters/{cluster_index}/frames/references/add")
@@ -416,10 +417,10 @@ async def add_frames_to_references(
         )
 
         if result is None:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     return {
-        "message": f"{result['added']} frames added to references",
+        "message": t('api.messages.frames_added_refs', count=result['added']),
         "added": result['added'],
         "skipped": result['skipped'],
         "total": result['total']
@@ -444,9 +445,9 @@ async def remove_frame_from_references(
         )
 
         if not success:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
-    return {"message": "Frame removed from references"}
+    return {"message": t('api.messages.frame_removed_refs')}
 
 
 @router.post("/{video_id}/clusters/{cluster_index}/frames/references/reset")
@@ -465,9 +466,9 @@ async def reset_reference_frames(
         success = await service.reset_reference_frames(video_id, cluster_index, view_mode=view_mode)
 
         if not success:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
-    return {"message": "References reset to default (top quality frames)"}
+    return {"message": t('api.messages.references_reset')}
 
 
 @router.delete("/{video_id}/clusters/{cluster_index}/frames")
@@ -489,10 +490,10 @@ async def delete_cluster_frames(
         )
 
         if result is None:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     return {
-        "message": f"{result['deleted']} frames deleted",
+        "message": t('api.messages.frames_deleted', count=result['deleted']),
         "deleted": result['deleted'],
         "errors": result['errors'],
         "remaining_frames": result['remaining_frames']
@@ -517,7 +518,7 @@ async def get_cluster_frames_from_disk(video_id: int, cluster_index: int):
         result = await service.get_all_cluster_frames_from_disk(video_id, cluster_index)
 
         if result is None:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     return result
 
@@ -534,7 +535,7 @@ async def get_cluster_frame_image_from_disk(
     """
     # Security: prevent path traversal attacks
     if ".." in filename or "/" in filename or "\\" in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
+        raise HTTPException(status_code=400, detail=t('api.errors.invalid_filename'))
 
     async with get_db() as db:
         service = AnalysisService(db)
@@ -543,7 +544,7 @@ async def get_cluster_frame_image_from_disk(
         )
 
         if frame_path is None:
-            raise HTTPException(status_code=404, detail="Frame not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))
 
     return FileResponse(str(frame_path), media_type="image/jpeg")
 
@@ -569,10 +570,10 @@ async def delete_cluster_frames_from_disk(
         )
 
         if result is None:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     return {
-        "message": f"{result['deleted']} files deleted",
+        "message": t('api.messages.files_deleted', count=result['deleted']),
         "deleted": result['deleted'],
         "errors": result['errors'],
         "remaining": result['remaining']
@@ -606,7 +607,7 @@ async def get_all_video_frames(
         result = await service.get_all_video_frames(video_id, include_assigned)
 
         if result is None:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     return result
 
@@ -619,20 +620,20 @@ async def get_video_frame_image(video_id: int, filename: str):
     """
     # Security: prevent path traversal attacks
     if ".." in filename or "/" in filename or "\\" in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
+        raise HTTPException(status_code=400, detail=t('api.errors.invalid_filename'))
 
     async with get_db() as db:
         service = AnalysisService(db)
 
         video = await service.get_video(video_id)
         if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         output_dir = service._get_video_output_dir(video)
         frame_path = output_dir / "frames" / filename
 
         if not frame_path.exists():
-            raise HTTPException(status_code=404, detail="Frame not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))
 
     return FileResponse(str(frame_path), media_type="image/jpeg")
 
@@ -658,10 +659,10 @@ async def create_manual_cluster(
         # Verify video exists
         video = await service.get_video(video_id)
         if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         if not request.frame_paths:
-            raise HTTPException(status_code=400, detail="At least one frame is required")
+            raise HTTPException(status_code=400, detail=t('api.errors.min_one_frame_required'))
 
         result = await service.create_manual_cluster(
             video_id,
@@ -673,10 +674,10 @@ async def create_manual_cluster(
         )
 
         if result is None:
-            raise HTTPException(status_code=400, detail="Failed to create cluster")
+            raise HTTPException(status_code=400, detail=t('api.errors.failed_create_cluster'))
 
     return {
-        "message": "Cluster created successfully",
+        "message": t('api.messages.cluster_created'),
         "cluster": result,
         "view_mode": request.view_mode
     }
@@ -698,7 +699,7 @@ async def update_cluster(
         # Verify video exists
         video = await service.get_video(video_id)
         if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         success = await service.update_cluster_info(
             video_id,
@@ -709,9 +710,9 @@ async def update_cluster(
         )
 
         if not success:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
-    return {"message": "Cluster updated successfully"}
+    return {"message": t('api.messages.cluster_updated')}
 
 
 @router.post("/{video_id}/clusters/{cluster_index}/frames/add")
@@ -735,10 +736,10 @@ async def add_frames_to_cluster(
         )
 
         if result is None:
-            raise HTTPException(status_code=404, detail="Cluster not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
 
     return {
-        "message": f"{result['added']} frames added to cluster",
+        "message": t('api.messages.frames_added_cluster', count=result['added']),
         "added": result['added'],
         "skipped": result['skipped'],
         "errors": result['errors'],

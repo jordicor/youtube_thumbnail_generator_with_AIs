@@ -9,7 +9,7 @@ import {
     MODEL_MAX_REFS,
     PROVIDER_NAMES,
     SHORT_MODEL_NAMES,
-    FALLBACK_PROMPT_MODELS
+    getFallbackPromptModels
 } from './constants.js';
 import { state } from './state.js';
 
@@ -180,11 +180,11 @@ export function updateTextModelOptions() {
     modelSelect.innerHTML = '';
 
     if (!state.promptModels) {
-        modelSelect.innerHTML = '<option value="">Cargando modelos...</option>';
+        modelSelect.innerHTML = `<option value="">${t('ai_config.loading_models')}</option>`;
         return;
     }
 
-    const models = state.promptModels[provider] || [{ value: "", label: "Por defecto" }];
+    const models = state.promptModels[provider] || [{ value: "", label: t('ai_config.no_models') }];
     for (const model of models) {
         const option = document.createElement('option');
         option.value = model.value;
@@ -270,10 +270,10 @@ export function updateRefIndicator() {
     }
 
     if (supportsRef) {
-        refIndicator.textContent = 'Soporta imagenes de referencia';
+        refIndicator.textContent = t('ai_config.supports_refs');
         refIndicator.className = 'ai-config-ref-indicator supported';
     } else {
-        refIndicator.textContent = 'NO soporta imagenes de referencia';
+        refIndicator.textContent = t('ai_config.no_refs_warning');
         refIndicator.className = 'ai-config-ref-indicator not-supported';
     }
 }
@@ -305,7 +305,7 @@ export function updateRefMax(setToMax = false) {
     const maxRefs = providerRefs[model] || 1;
 
     // Update label and input
-    refMaxLabel.textContent = `(max. ${maxRefs})`;
+    refMaxLabel.textContent = t('ai_config.ref_max', {max: maxRefs});
     refInput.max = maxRefs;
 
     // Set to max when model changes, otherwise just clamp to valid range
@@ -349,7 +349,7 @@ export function updateChipDisplays() {
     }
 
     textChipValue.innerHTML = modelDisplay +
-        (textThinkingEnabled ? ' <span class="ai-config-chip-badge" id="textAiThinkingBadge">Think</span>' : '');
+        (textThinkingEnabled ? ` <span class="ai-config-chip-badge" id="textAiThinkingBadge">${t('ai_config.thinking_badge')}</span>` : '');
 
     // Update Image AI chip
     const imageProvider = document.getElementById('imageAiProvider').value;
@@ -369,7 +369,7 @@ export function updateChipDisplays() {
 
     const displayModel = SHORT_MODEL_NAMES[imageModel] || imageModel;
     const maxRefs = parseInt(document.getElementById('imageAiNumRefs').max) || 0;
-    const refBadgeText = maxRefs > 0 ? `${numRefs} refs` : 'Sin refs';
+    const refBadgeText = maxRefs > 0 ? t('ai_config.refs_badge', {count: numRefs}) : t('ai_config.no_refs');
 
     imageChipValue.innerHTML = displayModel +
         ` <span class="ai-config-chip-badge" id="imageAiRefBadge">${refBadgeText}</span>`;
@@ -433,7 +433,7 @@ export async function loadModelsFromAPI() {
         state.promptModels = {};
         for (const [provider, models] of Object.entries(data)) {
             state.promptModels[provider] = [
-                { value: "", label: "Por defecto" }
+                { value: "", label: t('generation.config.default') }
             ];
             for (const model of models) {
                 state.promptModels[provider].push({
@@ -461,7 +461,7 @@ export async function loadModelsFromAPI() {
 
     } catch (error) {
         console.error('Failed to load models from API, using fallback:', error);
-        state.promptModels = FALLBACK_PROMPT_MODELS;
+        state.promptModels = getFallbackPromptModels();
         state.modelsLoaded = true;
 
         updateTextModelOptions();
@@ -492,24 +492,24 @@ export async function checkGranSabioStatus() {
             if (chipStatusEl) {
                 chipStatusEl.classList.remove('unavailable');
                 chipStatusEl.classList.add('available');
-                chipStatusEl.title = data.message || 'Gran Sabio LLM connected';
+                chipStatusEl.title = data.message || t('ai_config.gran_sabio.connected');
             }
-            if (chipTextEl) chipTextEl.textContent = 'Online';
+            if (chipTextEl) chipTextEl.textContent = t('ai_config.gran_sabio.connected');
         } else {
             if (chipStatusEl) {
                 chipStatusEl.classList.remove('available');
                 chipStatusEl.classList.add('unavailable');
-                chipStatusEl.title = data.message || 'Gran Sabio LLM not available';
+                chipStatusEl.title = data.message || t('ai_config.gran_sabio.disconnected');
             }
-            if (chipTextEl) chipTextEl.textContent = 'Offline';
+            if (chipTextEl) chipTextEl.textContent = t('ai_config.gran_sabio.disconnected');
         }
     } catch (e) {
         if (chipStatusEl) {
             chipStatusEl.classList.remove('available');
             chipStatusEl.classList.add('unavailable');
-            chipStatusEl.title = 'Could not check Gran Sabio LLM status';
+            chipStatusEl.title = t('ai_config.gran_sabio.error');
         }
-        if (chipTextEl) chipTextEl.textContent = 'Offline';
+        if (chipTextEl) chipTextEl.textContent = t('ai_config.gran_sabio.disconnected');
     }
 }
 

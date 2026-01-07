@@ -1,19 +1,19 @@
 {% extends "base.html" %}
 
-{% block title %}Video Detail - Thumbnail Generator{% endblock %}
+{% block title %}{{ t('video_detail.title') }} - {{ t('common.app_name') }}{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <a href="/" class="back-link">&larr; Volver a videos</a>
-    <h1 id="videoTitle">Cargando...</h1>
+    <a href="/" class="back-link">&larr; {{ t('video_detail.back_to_list') }}</a>
+    <h1 id="videoTitle">{{ t('common.loading') }}</h1>
 </div>
 
 <div class="video-detail" id="videoDetailApp" data-video-id="{{ video_id }}">
     <!-- Video info section -->
     <section class="section">
-        <h2>Informacion del Video</h2>
+        <h2>{{ t('video_detail.info.title') }}</h2>
         <div id="videoInfo" class="video-info-card">
-            <div class="loading">Cargando informacion...</div>
+            <div class="loading">{{ t('common.loading') }}</div>
         </div>
     </section>
 
@@ -22,13 +22,13 @@
         <div class="section-header-collapsible" onclick="VideoDetail.toggleSection('transcriptionContent')">
             <h2>
                 <span class="collapse-icon" id="transcriptionContentIcon">&#9660;</span>
-                Transcripcion del Video
+                {{ t('transcription.title') }}
             </h2>
         </div>
         <div id="transcriptionContent" class="collapsible-content">
             <div class="transcription-container">
                 <div id="transcriptionText" class="transcription-text">
-                    <div class="loading">Cargando transcripcion...</div>
+                    <div class="loading">{{ t('transcription.loading') }}</div>
                 </div>
             </div>
         </div>
@@ -37,12 +37,12 @@
     <!-- Clusters section -->
     <section class="section">
         <div class="section-header-row">
-            <h2 class="section-title">Personas/Personajes Detectados <span class="info-tooltip" data-tooltip="Grupos de imagenes de cada persona detectada en el video. Usa la ☆ para seleccionar cual aparecera en las miniaturas. Haz clic en ⚙ para editar el cluster y anadir detalles (nombre, descripcion, etc.).">&#9432;</span></h2>
+            <h2 class="section-title">{{ t('clusters.title') }} <span class="info-tooltip" data-tooltip="{{ t('clusters.tooltip') }}">&#9432;</span></h2>
             <div class="cluster-view-selector">
-                <label for="clusterViewType">Ver como:</label>
+                <label for="clusterViewType">{{ t('clusters.view_as') }}</label>
                 <select id="clusterViewType" onchange="VideoDetail.changeClusterViewType()">
-                    <option value="person" selected>Por Persona</option>
-                    <option value="person_scene">Por Persona + Escena</option>
+                    <option value="person" selected>{{ t('clusters.by_person') }}</option>
+                    <option value="person_scene">{{ t('clusters.by_person_scene') }}</option>
                 </select>
             </div>
         </div>
@@ -52,26 +52,26 @@
             <div class="selection-bar-left">
                 <label class="checkbox-wrapper">
                     <input type="checkbox" id="selectAllClusters" onchange="VideoDetail.toggleSelectAllClusters()">
-                    <span>Seleccionar todos</span>
+                    <span>{{ t('common.select_all') }}</span>
                 </label>
-                <span id="clusterSelectionCount" class="selection-count">0 seleccionados</span>
+                <span id="clusterSelectionCount" class="selection-count">{{ t('selection.selected_count', count=0) }}</span>
             </div>
             <div class="selection-bar-right">
-                <a href="/video/{{ video_id }}/cluster/create" class="btn btn-secondary btn-create-cluster" title="Crear cluster manualmente">
-                    + Nuevo
+                <a href="/video/{{ video_id }}/cluster/create" class="btn btn-secondary btn-create-cluster" title="{{ t('clusters.create_cluster') }}">
+                    {{ t('clusters.new') }}
                 </a>
                 <button id="btnMergeClusters" class="btn btn-secondary" onclick="VideoDetail.showMergeModal()" disabled>
-                    Fusionar
+                    {{ t('clusters.merge') }}
                 </button>
                 <button id="btnDeleteSelectedClusters" class="btn btn-danger" onclick="VideoDetail.showDeleteSelectedModal()" disabled>
-                    Eliminar
+                    {{ t('common.delete') }}
                 </button>
             </div>
         </div>
 
         <div id="clustersGridContainer" class="clusters-grid-container">
             <div id="clustersGrid" class="clusters-grid">
-                <div class="loading">Cargando clusters...</div>
+                <div class="loading">{{ t('clusters.loading') }}</div>
             </div>
         </div>
     </section>
@@ -81,14 +81,14 @@
         <div class="modal-dialog modal-danger">
             <div class="modal-header">
                 <span class="modal-icon">&#9888;</span>
-                <span class="modal-title">Eliminar Cluster</span>
+                <span class="modal-title">{{ t('clusters.delete_title') }}</span>
             </div>
             <div class="modal-body">
-                <p id="deleteClusterMessage">¿Eliminar este cluster? Se perderan los frames asociados.</p>
+                <p id="deleteClusterMessage">{{ t('clusters.delete_message') }}</p>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('deleteClusterModal')">Cancelar</button>
-                <button class="btn btn-confirm" id="confirmDeleteBtn" onclick="VideoDetail.confirmDeleteCluster()">Eliminar</button>
+                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('deleteClusterModal')">{{ t('common.cancel') }}</button>
+                <button class="btn btn-confirm" id="confirmDeleteBtn" onclick="VideoDetail.confirmDeleteCluster()">{{ t('common.delete') }}</button>
             </div>
         </div>
     </div>
@@ -98,23 +98,23 @@
         <div class="modal-dialog modal-info">
             <div class="modal-header">
                 <span class="modal-icon">&#8644;</span>
-                <span class="modal-title">Fusionar Clusters</span>
+                <span class="modal-title">{{ t('clusters.merge_title') }}</span>
             </div>
             <div class="modal-body">
-                <p>Se fusionaran <strong id="mergeCount">0</strong> clusters en uno solo.</p>
-                <p style="margin-top: 10px;">Selecciona cual sera el principal (su imagen se usara como representativa):</p>
+                <p>{{ t('clusters.merge_message', count='<strong id="mergeCount">0</strong>') }}</p>
+                <p style="margin-top: 10px;">{{ t('clusters.merge_select_main') }}</p>
                 <div id="mergeTargetOptions" class="merge-target-options" style="margin-top: 15px;"></div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('mergeClustersModal')">Cancelar</button>
-                <button class="btn btn-confirm" onclick="VideoDetail.confirmMergeClusters()">Fusionar</button>
+                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('mergeClustersModal')">{{ t('common.cancel') }}</button>
+                <button class="btn btn-confirm" onclick="VideoDetail.confirmMergeClusters()">{{ t('clusters.merge') }}</button>
             </div>
         </div>
     </div>
 
     <!-- AI Configuration Chips Bar -->
     <div class="ai-config-bar" id="aiConfigBar">
-        <span class="ai-config-bar-label">Configuracion IA:</span>
+        <span class="ai-config-bar-label">{{ t('ai_config.bar_label') }}</span>
 
         <!-- Overlay for closing popovers -->
         <div class="ai-config-overlay" id="aiConfigOverlay" onclick="VideoDetail.closeAllAiPopovers()"></div>
@@ -124,10 +124,10 @@
             <div class="ai-config-chip" id="textAiChip" onclick="VideoDetail.toggleAiPopover('textAi')">
                 <span class="ai-config-chip-icon">&#129302;</span>
                 <div class="ai-config-chip-content">
-                    <span class="ai-config-chip-title">IA Texto</span>
+                    <span class="ai-config-chip-title">{{ t('ai_config.text_ai') }}</span>
                     <span class="ai-config-chip-value" id="textAiChipValue">
-                        Claude 3.5
-                        <span class="ai-config-chip-badge" id="textAiThinkingBadge" style="display: none;">Think</span>
+                        {{ t('ai_providers.anthropic') }}
+                        <span class="ai-config-chip-badge" id="textAiThinkingBadge" style="display: none;">{{ t('ai_config.thinking_badge') }}</span>
                     </span>
                 </div>
                 <span class="ai-config-chip-arrow">&#9660;</span>
@@ -136,43 +136,43 @@
             <!-- Text AI Popover -->
             <div class="ai-config-popover" id="textAiPopover">
                 <div class="ai-config-popover-header">
-                    <span class="ai-config-popover-title">&#129302; Configurar IA para Textos</span>
+                    <span class="ai-config-popover-title">&#129302; {{ t('ai_config.text_config_title') }}</span>
                     <button class="ai-config-popover-close" onclick="VideoDetail.closeAiPopover('textAi')">&times;</button>
                 </div>
                 <div class="ai-config-popover-body">
                     <div class="form-group">
-                        <label for="textAiProvider">Motor IA:</label>
+                        <label for="textAiProvider">{{ t('ai_config.provider') }}</label>
                         <select id="textAiProvider" onchange="VideoDetail.updateTextAiModelOptions()">
-                            <option value="anthropic">Anthropic (Claude)</option>
-                            <option value="openai">OpenAI (GPT)</option>
-                            <option value="google">Google (Gemini)</option>
-                            <option value="xai">xAI (Grok)</option>
+                            <option value="anthropic">{{ t('ai_providers.anthropic') }}</option>
+                            <option value="openai">{{ t('ai_providers.openai') }}</option>
+                            <option value="google">{{ t('ai_providers.google') }}</option>
+                            <option value="xai">{{ t('ai_providers.xai') }}</option>
                         </select>
                     </div>
                     <div class="form-group">
-                        <label for="textAiModel">Modelo:</label>
+                        <label for="textAiModel">{{ t('ai_config.model') }}</label>
                         <select id="textAiModel">
-                            <option value="">Cargando modelos...</option>
+                            <option value="">{{ t('ai_config.loading_models') }}</option>
                         </select>
                     </div>
                     <div class="ai-config-thinking-row">
                         <label class="ai-config-thinking-toggle">
                             <input type="checkbox" id="textAiThinkingEnabled" onchange="VideoDetail.toggleTextAiThinkingLevel()">
-                            <span>Thinking mode</span>
+                            <span>{{ t('ai_config.thinking_mode') }}</span>
                         </label>
                         <div class="ai-config-thinking-level hidden" id="textAiThinkingLevelGroup">
-                            <label for="textAiThinkingLevel">Nivel:</label>
+                            <label for="textAiThinkingLevel">{{ t('ai_config.thinking_level') }}</label>
                             <select id="textAiThinkingLevel">
-                                <option value="low">Bajo</option>
-                                <option value="medium" selected>Medio</option>
-                                <option value="high">Alto</option>
+                                <option value="low">{{ t('ai_config.thinking_low') }}</option>
+                                <option value="medium" selected>{{ t('ai_config.thinking_medium') }}</option>
+                                <option value="high">{{ t('ai_config.thinking_high') }}</option>
                             </select>
                         </div>
                     </div>
                 </div>
                 <div class="ai-config-popover-info">
                     <span class="ai-config-popover-info-icon">&#9432;</span>
-                    <span>Esta configuracion se usa para generar titulos, descripciones y prompts de imagenes.</span>
+                    <span>{{ t('ai_config.text_info') }}</span>
                 </div>
             </div>
         </div>
@@ -182,10 +182,10 @@
             <div class="ai-config-chip" id="imageAiChip" onclick="VideoDetail.toggleAiPopover('imageAi')">
                 <span class="ai-config-chip-icon">&#128247;</span>
                 <div class="ai-config-chip-content">
-                    <span class="ai-config-chip-title">IA Imagenes</span>
+                    <span class="ai-config-chip-title">{{ t('ai_config.image_ai') }}</span>
                     <span class="ai-config-chip-value" id="imageAiChipValue">
-                        Gemini Flash
-                        <span class="ai-config-chip-badge" id="imageAiRefBadge">3 refs</span>
+                        {{ t('ai_providers.gemini') }}
+                        <span class="ai-config-chip-badge" id="imageAiRefBadge">{{ t('ai_config.refs_badge', count=3) }}</span>
                     </span>
                 </div>
                 <span class="ai-config-chip-arrow">&#9660;</span>
@@ -194,27 +194,27 @@
             <!-- Image AI Popover -->
             <div class="ai-config-popover ai-config-popover-wide" id="imageAiPopover">
                 <div class="ai-config-popover-header">
-                    <span class="ai-config-popover-title">&#128247; Configurar Generador de Imagenes</span>
+                    <span class="ai-config-popover-title">&#128247; {{ t('ai_config.image_config_title') }}</span>
                     <button class="ai-config-popover-close" onclick="VideoDetail.closeAiPopover('imageAi')">&times;</button>
                 </div>
                 <div class="ai-config-popover-body">
                     <div class="form-group">
-                        <label for="imageAiProvider">Proveedor:</label>
+                        <label for="imageAiProvider">{{ t('ai_config.image_provider') }}</label>
                         <select id="imageAiProvider" onchange="VideoDetail.updateImageAiModelOptions(true)">
-                            <option value="gemini">Gemini (Google)</option>
-                            <option value="poe">Poe (FLUX/Ideogram)</option>
-                            <option value="openai">OpenAI</option>
-                            <option value="replicate">Replicate</option>
+                            <option value="gemini">{{ t('ai_providers.gemini') }}</option>
+                            <option value="poe">{{ t('ai_providers.poe') }}</option>
+                            <option value="openai">{{ t('ai_providers.openai') }}</option>
+                            <option value="replicate">{{ t('ai_providers.replicate') }}</option>
                         </select>
-                        <small class="ai-config-ref-indicator supported" id="imageAiRefIndicator">Soporta imagenes de referencia</small>
+                        <small class="ai-config-ref-indicator supported" id="imageAiRefIndicator">{{ t('ai_config.supports_refs') }}</small>
                     </div>
 
                     <!-- Gemini Model -->
                     <div class="ai-config-model-subsection" id="imageAiGeminiModelGroup">
                         <div class="form-group" style="margin-bottom: 0;">
-                            <label for="imageAiGeminiModel">Modelo:</label>
+                            <label for="imageAiGeminiModel">{{ t('ai_config.model') }}</label>
                             <select id="imageAiGeminiModel" onchange="VideoDetail.updateImageAiRefMax(true)">
-                                <option value="gemini-2.5-flash-image">gemini-2.5-flash-image (Rapido)</option>
+                                <option value="gemini-2.5-flash-image">gemini-2.5-flash-image ({{ t('ai_config.fast') }})</option>
                                 <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (4K)</option>
                             </select>
                         </div>
@@ -223,14 +223,14 @@
                     <!-- Poe Model -->
                     <div class="ai-config-model-subsection" id="imageAiPoeModelGroup" style="display: none;">
                         <div class="form-group" style="margin-bottom: 0;">
-                            <label for="imageAiPoeModel">Modelo:</label>
+                            <label for="imageAiPoeModel">{{ t('ai_config.model') }}</label>
                             <select id="imageAiPoeModel" onchange="VideoDetail.updateImageAiRefMax(true)">
-                                <option value="flux2pro">flux2pro - Mejor calidad</option>
-                                <option value="flux2flex">flux2flex - Alta resolucion</option>
-                                <option value="fluxkontextpro">fluxkontextpro - Mejor prompt</option>
-                                <option value="seedream40">seedream40 - Combinar refs</option>
+                                <option value="flux2pro">flux2pro - {{ t('ai_config.best_quality') }}</option>
+                                <option value="flux2flex">flux2flex - {{ t('ai_config.high_res') }}</option>
+                                <option value="fluxkontextpro">fluxkontextpro - {{ t('ai_config.best_prompt') }}</option>
+                                <option value="seedream40">seedream40 - {{ t('ai_config.combine_refs') }}</option>
                                 <option value="nanobananapro">nanobananapro - Gemini 3</option>
-                                <option value="Ideogram-v3">Ideogram-v3 - Texto/logos</option>
+                                <option value="Ideogram-v3">Ideogram-v3 - {{ t('ai_config.text_logos') }}</option>
                             </select>
                         </div>
                     </div>
@@ -238,15 +238,15 @@
                     <!-- OpenAI Model -->
                     <div class="ai-config-model-subsection" id="imageAiOpenaiModelGroup" style="display: none;">
                         <div class="warning-box" id="imageAiOpenaiWarning" style="display: none; margin-bottom: 10px;">
-                            <strong>AVISO:</strong> DALL-E 3 NO soporta refs.
+                            <strong>{{ t('common.warning') }}:</strong> DALL-E 3 {{ t('ai_config.no_refs_warning') }}
                         </div>
                         <div class="form-group" style="margin-bottom: 0;">
-                            <label for="imageAiOpenaiModel">Modelo:</label>
+                            <label for="imageAiOpenaiModel">{{ t('ai_config.model') }}</label>
                             <select id="imageAiOpenaiModel" onchange="VideoDetail.updateImageAiOpenaiWarning(); VideoDetail.updateImageAiRefMax(true)">
-                                <option value="gpt-image-1.5" data-ref="true">gpt-image-1.5 - Mejor</option>
-                                <option value="gpt-image-1" data-ref="true">gpt-image-1 - Estandar</option>
-                                <option value="gpt-image-1-mini" data-ref="true">gpt-image-1-mini - Rapido</option>
-                                <option value="dall-e-3" data-ref="false">dall-e-3 - Sin refs</option>
+                                <option value="gpt-image-1.5" data-ref="true">gpt-image-1.5 - {{ t('ai_config.best') }}</option>
+                                <option value="gpt-image-1" data-ref="true">gpt-image-1 - {{ t('ai_config.standard') }}</option>
+                                <option value="gpt-image-1-mini" data-ref="true">gpt-image-1-mini - {{ t('ai_config.fast') }}</option>
+                                <option value="dall-e-3" data-ref="false">dall-e-3 - {{ t('ai_config.no_refs') }}</option>
                             </select>
                         </div>
                     </div>
@@ -254,7 +254,7 @@
                     <!-- Reference Images -->
                     <div class="form-group" id="imageAiRefGroup" style="margin-top: 14px;">
                         <label for="imageAiNumRefs">
-                            Imagenes de referencia <span id="imageAiRefMaxLabel" class="ref-max-label">(max. 3)</span>
+                            {{ t('ai_config.ref_images') }} <span id="imageAiRefMaxLabel" class="ref-max-label">{{ t('ai_config.ref_max', max=3) }}</span>
                         </label>
                         <input type="number" id="imageAiNumRefs" value="3" min="1" max="3">
                     </div>
@@ -263,9 +263,9 @@
         </div>
 
         <!-- Gran Sabio LLM Status -->
-        <span class="gransabio-status unavailable" id="gransabioStatusChip" title="Estado de Gran Sabio LLM">
+        <span class="gransabio-status unavailable" id="gransabioStatusChip" title="{{ t('ai_config.gran_sabio.status') }}">
             <span class="status-dot"></span>
-            <span class="status-text">Offline</span>
+            <span class="status-text">{{ t('ai_config.gran_sabio.offline') }}</span>
         </span>
     </div>
 
@@ -274,7 +274,7 @@
         <div class="section-header-collapsible" onclick="VideoDetail.toggleSection('contentSection')">
             <h2>
                 <span class="collapse-icon" id="contentSectionIcon">&#9660;</span>
-                Optimizacion de Contenido
+                {{ t('content_optimization.title') }}
             </h2>
         </div>
 
@@ -282,10 +282,10 @@
             <!-- Tabs -->
             <div class="content-tabs">
                 <button class="tab-btn active" onclick="VideoDetail.switchContentTab('titles')" id="tabTitles">
-                    Titulos
+                    {{ t('content_optimization.tab_titles') }}
                 </button>
                 <button class="tab-btn" onclick="VideoDetail.switchContentTab('descriptions')" id="tabDescriptions">
-                    Descripciones
+                    {{ t('content_optimization.tab_descriptions') }}
                 </button>
             </div>
 
@@ -295,62 +295,62 @@
                     <div class="form-section">
                         <div class="form-row">
                             <div class="form-group">
-                                <label for="titleStyle">Estilo: <span class="info-tooltip" data-tooltip="Neutro: descriptivo y claro. SEO: con palabras clave para busquedas. Clickbait: llamativo con gancho emocional.">&#9432;</span></label>
+                                <label for="titleStyle">{{ t('titles_form.style_label') }} <span class="info-tooltip" data-tooltip="{{ t('titles_form.style_tooltip') }}">&#9432;</span></label>
                                 <select id="titleStyle" onchange="VideoDetail.updateTitleStyleUI()">
-                                    <option value="neutral">Neutro - Claros y descriptivos</option>
-                                    <option value="seo">SEO - Optimizado para busquedas</option>
-                                    <option value="clickbait">Clickbait - Llamativo y con gancho</option>
-                                    <option value="custom">Personalizado</option>
+                                    <option value="neutral">{{ t('titles_form.style_neutral') }}</option>
+                                    <option value="seo">{{ t('titles_form.style_seo') }}</option>
+                                    <option value="clickbait">{{ t('titles_form.style_clickbait') }}</option>
+                                    <option value="custom">{{ t('titles_form.style_custom') }}</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label for="titleLanguage">Idioma:</label>
+                                <label for="titleLanguage">{{ t('titles_form.language_label') }}</label>
                                 <select id="titleLanguage">
-                                    <option value="es" selected>Espanol</option>
-                                    <option value="en">English</option>
-                                    <option value="fr">Francais</option>
-                                    <option value="it">Italiano</option>
-                                    <option value="de">Deutsch</option>
-                                    <option value="pt">Portugues</option>
+                                    <option value="es" selected>{{ t('languages.es') }}</option>
+                                    <option value="en">{{ t('languages.en') }}</option>
+                                    <option value="fr">{{ t('languages.fr') }}</option>
+                                    <option value="it">{{ t('languages.it') }}</option>
+                                    <option value="de">{{ t('languages.de') }}</option>
+                                    <option value="pt">{{ t('languages.pt') }}</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label for="titleQuantity">Cantidad:</label>
+                                <label for="titleQuantity">{{ t('titles_form.quantity_label') }}</label>
                                 <input type="number" id="titleQuantity" value="5" min="1" max="50">
                             </div>
                         </div>
 
                         <div class="form-group" id="customPromptGroup" style="display: none;">
-                            <label for="titleCustomPrompt">Prompt personalizado:</label>
-                            <textarea id="titleCustomPrompt" rows="3" placeholder="Describe como quieres que sean los titulos..."></textarea>
+                            <label for="titleCustomPrompt">{{ t('titles_form.custom_prompt_label') }}</label>
+                            <textarea id="titleCustomPrompt" rows="3" placeholder="{{ t('titles_form.custom_prompt_placeholder') }}"></textarea>
                         </div>
 
                         <div class="form-group" id="customInstructionsGroup">
-                            <label for="titleCustomInstructions">Instrucciones adicionales (opcional):</label>
-                            <textarea id="titleCustomInstructions" rows="2" placeholder="Ej: Incluir el nombre del canal, mencionar que es un tutorial..."></textarea>
+                            <label for="titleCustomInstructions">{{ t('titles_form.instructions_label') }}</label>
+                            <textarea id="titleCustomInstructions" rows="2" placeholder="{{ t('titles_form.instructions_placeholder') }}"></textarea>
                         </div>
 
                         <button type="button" class="btn btn-primary" id="generateTitlesBtn" onclick="VideoDetail.generateTitles()">
-                            Generar Titulos
+                            {{ t('titles_form.generate_button') }}
                         </button>
                     </div>
 
                     <div class="titles-results-section" id="titlesResultsSection" style="display: none;">
                         <div class="titles-results-header">
-                            <h4>Titulos <span id="titlesCount" class="titles-count"></span></h4>
+                            <h4>{{ t('titles_form.results_header') }} <span id="titlesCount" class="titles-count"></span></h4>
                             <div class="titles-header-actions">
-                                <span id="titlesSelectionInfo" class="titles-selection-info" title="Los titulos seleccionados orientaran la generacion de imagenes">
-                                    Selecciona titulos para orientar las imagenes
+                                <span id="titlesSelectionInfo" class="titles-selection-info" title="{{ t('titles_form.selection_info') }}">
+                                    {{ t('titles_form.selection_info') }}
                                 </span>
                                 <div class="titles-action-buttons">
-                                    <button class="btn btn-small btn-secondary" id="selectAllTitlesBtn" onclick="VideoDetail.toggleSelectAllTitles()" title="Seleccionar todos">
-                                        &#9744; Todos
+                                    <button class="btn btn-small btn-secondary" id="selectAllTitlesBtn" onclick="VideoDetail.toggleSelectAllTitles()" title="{{ t('common.select_all') }}">
+                                        &#9744; {{ t('titles_form.select_all') }}
                                     </button>
-                                    <button class="btn btn-small btn-delete-selected" id="deleteSelectedTitlesBtn" onclick="VideoDetail.deleteSelectedTitles()" title="Eliminar seleccionados">
-                                        &#128465; Eliminar
+                                    <button class="btn btn-small btn-delete-selected" id="deleteSelectedTitlesBtn" onclick="VideoDetail.deleteSelectedTitles()" title="{{ t('titles_form.delete_selected') }}">
+                                        &#128465; {{ t('titles_form.delete_selected') }}
                                     </button>
-                                    <button class="btn btn-small btn-secondary" onclick="VideoDetail.copyAllTitles()" title="Copiar todos">
-                                        &#128203; Copiar
+                                    <button class="btn btn-small btn-secondary" onclick="VideoDetail.copyAllTitles()" title="{{ t('titles_form.copy_all') }}">
+                                        &#128203; {{ t('titles_form.copy_all') }}
                                     </button>
                                 </div>
                             </div>
@@ -358,14 +358,14 @@
                         <div id="titlesResultsList" class="titles-results-list"></div>
                         <p class="titles-hint">
                             <span class="info-icon">&#9432;</span>
-                            Haz clic en un titulo para seleccionarlo. Los titulos seleccionados orientaran la IA al generar thumbnails.
+                            {{ t('titles_form.hint') }}
                         </p>
                     </div>
 
                     <div class="content-loading" id="titlesLoading" style="display: none;">
                         <div class="loading-spinner"></div>
                         <div class="content-loading-text">
-                            <span id="titlesLoadingMain">Preparando...</span>
+                            <span id="titlesLoadingMain">{{ t('titles_form.preparing') }}</span>
                             <small id="titlesLoadingHint"></small>
                         </div>
                     </div>
@@ -378,88 +378,88 @@
                     <div class="form-section">
                         <div class="form-row">
                             <div class="form-group">
-                                <label for="descStyle">Estilo:</label>
+                                <label for="descStyle">{{ t('descriptions_form.style_label') }}</label>
                                 <select id="descStyle" onchange="VideoDetail.updateDescStyleUI()">
-                                    <option value="informative">Informativa - Completa y profesional</option>
-                                    <option value="seo">SEO - Optimizada para busquedas</option>
-                                    <option value="minimal">Minimalista - Breve y directa</option>
-                                    <option value="custom">Personalizado</option>
+                                    <option value="informative">{{ t('descriptions_form.style_informative') }}</option>
+                                    <option value="seo">{{ t('descriptions_form.style_seo') }}</option>
+                                    <option value="minimal">{{ t('descriptions_form.style_minimal') }}</option>
+                                    <option value="custom">{{ t('descriptions_form.style_custom') }}</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label for="descLanguage">Idioma:</label>
+                                <label for="descLanguage">{{ t('descriptions_form.language_label') }}</label>
                                 <select id="descLanguage">
-                                    <option value="es" selected>Espanol</option>
-                                    <option value="en">English</option>
-                                    <option value="fr">Francais</option>
-                                    <option value="it">Italiano</option>
-                                    <option value="de">Deutsch</option>
-                                    <option value="pt">Portugues</option>
+                                    <option value="es" selected>{{ t('languages.es') }}</option>
+                                    <option value="en">{{ t('languages.en') }}</option>
+                                    <option value="fr">{{ t('languages.fr') }}</option>
+                                    <option value="it">{{ t('languages.it') }}</option>
+                                    <option value="de">{{ t('languages.de') }}</option>
+                                    <option value="pt">{{ t('languages.pt') }}</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label for="descLength">Longitud:</label>
+                                <label for="descLength">{{ t('descriptions_form.length_label') }}</label>
                                 <select id="descLength">
-                                    <option value="short">Corta (~200 car.)</option>
-                                    <option value="medium" selected>Media (~500 car.)</option>
-                                    <option value="long">Larga (~1000 car.)</option>
-                                    <option value="very_long">Muy larga (~2000 car.)</option>
+                                    <option value="short">{{ t('descriptions_form.length_short') }}</option>
+                                    <option value="medium" selected>{{ t('descriptions_form.length_medium') }}</option>
+                                    <option value="long">{{ t('descriptions_form.length_long') }}</option>
+                                    <option value="very_long">{{ t('descriptions_form.length_very_long') }}</option>
                                 </select>
                             </div>
                             <div class="form-group">
-                                <label for="descQuantity">Cantidad:</label>
+                                <label for="descQuantity">{{ t('descriptions_form.quantity_label') }}</label>
                                 <input type="number" id="descQuantity" value="1" min="1" max="3">
                             </div>
                         </div>
 
                         <!-- Checkboxes for extra options -->
                         <div class="form-group">
-                            <label>Opciones adicionales:</label>
+                            <label>{{ t('descriptions_form.options_label') }}</label>
                             <div class="checkbox-group">
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="descTimestamps">
-                                    <span>Incluir timestamps <span class="info-tooltip" data-tooltip="Anade marcas de tiempo (ej: 0:00 Intro, 2:30 Tema principal) para que los espectadores naveguen por el video.">&#9432;</span></span>
+                                    <span>{{ t('descriptions_form.timestamps') }} <span class="info-tooltip" data-tooltip="{{ t('descriptions_form.timestamps_tooltip') }}">&#9432;</span></span>
                                 </label>
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="descHashtags">
-                                    <span>Incluir hashtags</span>
+                                    <span>{{ t('descriptions_form.hashtags') }}</span>
                                 </label>
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="descEmojis">
-                                    <span>Incluir emojis</span>
+                                    <span>{{ t('descriptions_form.emojis') }}</span>
                                 </label>
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="descSocialLinks">
-                                    <span>Incluir redes sociales</span>
+                                    <span>{{ t('descriptions_form.social_links') }}</span>
                                 </label>
                             </div>
                         </div>
 
                         <div class="form-group" id="descCustomPromptGroup" style="display: none;">
-                            <label for="descCustomPrompt">Prompt personalizado:</label>
-                            <textarea id="descCustomPrompt" rows="3" placeholder="Describe como quieres que sea la descripcion..."></textarea>
+                            <label for="descCustomPrompt">{{ t('descriptions_form.custom_prompt_label') }}</label>
+                            <textarea id="descCustomPrompt" rows="3" placeholder="{{ t('descriptions_form.custom_prompt_placeholder') }}"></textarea>
                         </div>
 
                         <div class="form-group" id="descCustomInstructionsGroup">
-                            <label for="descCustomInstructions">Instrucciones adicionales (opcional):</label>
-                            <textarea id="descCustomInstructions" rows="2" placeholder="Ej: Mencionar el patrocinador, incluir disclaimer..."></textarea>
+                            <label for="descCustomInstructions">{{ t('descriptions_form.instructions_label') }}</label>
+                            <textarea id="descCustomInstructions" rows="2" placeholder="{{ t('descriptions_form.instructions_placeholder') }}"></textarea>
                         </div>
 
                         <button type="button" class="btn btn-primary" id="generateDescBtn" onclick="VideoDetail.generateDescriptions()">
-                            Generar Descripciones
+                            {{ t('descriptions_form.generate_button') }}
                         </button>
                     </div>
 
                     <div class="form-section descriptions-results-section" id="descriptionsResultsSection" style="display: none;">
                         <div class="descriptions-results-header">
-                            <h4>Descripciones <span id="descriptionsCount" class="descriptions-count"></span></h4>
+                            <h4>{{ t('descriptions_form.results_header') }} <span id="descriptionsCount" class="descriptions-count"></span></h4>
                             <div class="descriptions-header-actions">
                                 <div class="descriptions-action-buttons">
-                                    <button class="btn btn-small btn-delete-selected" id="deleteAllDescriptionsBtn" onclick="VideoDetail.deleteAllDescriptions()" title="Eliminar todas">
-                                        &#128465; Eliminar
+                                    <button class="btn btn-small btn-delete-selected" id="deleteAllDescriptionsBtn" onclick="VideoDetail.deleteAllDescriptions()" title="{{ t('descriptions_form.delete_all') }}">
+                                        &#128465; {{ t('descriptions_form.delete_all') }}
                                     </button>
-                                    <button class="btn btn-small btn-secondary" onclick="VideoDetail.copyAllDescriptions()" title="Copiar todas">
-                                        &#128203; Copiar
+                                    <button class="btn btn-small btn-secondary" onclick="VideoDetail.copyAllDescriptions()" title="{{ t('descriptions_form.copy_all') }}">
+                                        &#128203; {{ t('descriptions_form.copy_all') }}
                                     </button>
                                 </div>
                             </div>
@@ -470,7 +470,7 @@
                     <div class="content-loading" id="descriptionsLoading" style="display: none;">
                         <div class="loading-spinner"></div>
                         <div class="content-loading-text">
-                            <span id="descriptionsLoadingMain">Preparando...</span>
+                            <span id="descriptionsLoadingMain">{{ t('descriptions_form.preparing') }}</span>
                             <small id="descriptionsLoadingHint"></small>
                         </div>
                     </div>
@@ -481,34 +481,34 @@
 
     <!-- Generation form -->
     <section class="section">
-        <h2>Generar Thumbnails</h2>
+        <h2>{{ t('generate_form.title') }}</h2>
         <form id="generateForm" class="generate-form generate-form-simplified">
             <div class="form-group cluster-select-group">
-                <label>Persona/Personaje: <span class="info-tooltip" data-tooltip="La IA usara estas imagenes como referencia para generar las miniaturas, manteniendo el mismo rostro, peinado, ropa y aspecto general. Selecciona arriba (con ☆) el personaje que quieras que aparezca en el thumbnail.">&#9432;</span></label>
+                <label>{{ t('generate_form.cluster_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.cluster_tooltip') }}">&#9432;</span></label>
                 <div id="selectedClusterDisplay" class="selected-cluster-display">
-                    <span class="no-selection">&#9734; Selecciona un cluster arriba usando la estrella</span>
+                    <span class="no-selection">&#9734; {{ t('generate_form.no_cluster_selected') }}</span>
                 </div>
                 <select id="clusterSelect" required style="display: none;">
-                    <option value="">Selecciona un cluster</option>
+                    <option value="">{{ t('common.select') }}</option>
                 </select>
             </div>
 
             <div class="form-row">
                 <div class="form-group">
-                    <label for="numPrompts">Conceptos: <span class="info-tooltip" data-tooltip="Ideas creativas diferentes que la IA generara basandose en el contenido del video.">&#9432;</span></label>
+                    <label for="numPrompts">{{ t('generate_form.concepts_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.concepts_tooltip') }}">&#9432;</span></label>
                     <input type="number" id="numPrompts" value="5" min="1" max="50">
                 </div>
                 <div class="form-group">
-                    <label for="numVariations">Variaciones: <span class="info-tooltip" data-tooltip="Versiones diferentes de cada concepto. Util para elegir la mejor composicion.">&#9432;</span></label>
+                    <label for="numVariations">{{ t('generate_form.variations_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.variations_tooltip') }}">&#9432;</span></label>
                     <input type="number" id="numVariations" value="1" min="1" max="50">
                 </div>
                 <div class="form-group">
-                    <label for="expression">Expresion:</label>
+                    <label for="expression">{{ t('generate_form.expression_label') }}</label>
                     <select id="expression">
-                        <option value="">Automatico</option>
-                        <option value="smiling">Sonriendo</option>
-                        <option value="mouth_closed">Boca cerrada</option>
-                        <option value="neutral">Neutral</option>
+                        <option value="">{{ t('generate_form.expression_auto') }}</option>
+                        <option value="smiling">{{ t('generate_form.expression_smiling') }}</option>
+                        <option value="mouth_closed">{{ t('generate_form.expression_mouth_closed') }}</option>
+                        <option value="neutral">{{ t('generate_form.expression_neutral') }}</option>
                     </select>
                 </div>
             </div>
@@ -516,29 +516,29 @@
             <div class="form-row" style="margin-top: 10px;">
                 <label class="checkbox-label">
                     <input type="checkbox" id="promptIncludeHistory">
-                    <span>Evitar repetir conceptos previos</span>
+                    <span>{{ t('generate_form.avoid_repeat') }}</span>
                 </label>
             </div>
 
             <!-- Reference Image Section -->
             <div class="form-group reference-image-group" style="margin-top: 15px;">
                 <label for="referenceImageInput">
-                    Imagen de referencia (opcional):
-                    <span class="info-tooltip" data-tooltip="Sube una imagen para que la IA la use como inspiracion visual al crear los conceptos y/o como referencia de estilo para la generacion.">&#9432;</span>
+                    {{ t('generate_form.reference_image_label') }}
+                    <span class="info-tooltip" data-tooltip="{{ t('generate_form.reference_image_tooltip') }}">&#9432;</span>
                 </label>
 
                 <div class="reference-image-upload">
                     <input type="file" id="referenceImageInput" accept="image/*" style="display: none;">
                     <button type="button" class="btn btn-secondary btn-small" onclick="document.getElementById('referenceImageInput').click()">
-                        &#128247; Seleccionar imagen
+                        &#128247; {{ t('generate_form.select_image') }}
                     </button>
-                    <span id="referenceImageName" class="reference-image-name">Ninguna imagen seleccionada</span>
+                    <span id="referenceImageName" class="reference-image-name">{{ t('generate_form.no_image_selected') }}</span>
                 </div>
 
                 <div id="referenceImagePreview" class="reference-image-preview" style="display: none;">
                     <img id="referenceImageImg" src="" alt="Preview">
                     <button type="button" id="clearReferenceImage" class="reference-image-clear"
-                            onclick="VideoDetail.clearReferenceImage()" title="Quitar imagen">
+                            onclick="VideoDetail.clearReferenceImage()" title="{{ t('generate_form.remove_image') }}">
                         &#10005;
                     </button>
                 </div>
@@ -546,11 +546,11 @@
                 <div id="referenceImageOptions" class="reference-image-options" style="display: none; margin-top: 10px;">
                     <label class="checkbox-label">
                         <input type="checkbox" id="useRefForPrompts" checked>
-                        <span>Analizar para prompts <span class="info-tooltip" data-tooltip="La IA de texto analizara esta imagen antes de crear los conceptos, usandola como inspiracion visual.">&#9432;</span></span>
+                        <span>{{ t('generate_form.analyze_for_prompts') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.analyze_tooltip') }}">&#9432;</span></span>
                     </label>
                     <label class="checkbox-label">
                         <input type="checkbox" id="includeRefInImages">
-                        <span>Incluir como referencia de estilo <span class="info-tooltip" data-tooltip="La imagen se enviara junto con las referencias del cluster a la IA de imagenes. Si se alcanza el limite, se quitara la ultima referencia del cluster.">&#9432;</span></span>
+                        <span>{{ t('generate_form.include_as_ref') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.include_tooltip') }}">&#9432;</span></span>
                     </label>
                 </div>
             </div>
@@ -558,32 +558,32 @@
             <!-- Custom Instructions (at the end, as they override everything) -->
             <div class="form-group" style="margin-top: 15px;">
                 <label for="promptCustomInstructions">
-                    Instrucciones para los prompts (opcional):
-                    <span class="info-tooltip" data-tooltip="Instrucciones globales para la IA. Prevalecen sobre todo lo demas. Puedes indicar estilo, composicion, fondos, estetica, o cualquier detalle especifico. Si has subido una imagen de referencia, puedes dar instrucciones sobre como usarla.">&#9432;</span>
+                    {{ t('generate_form.instructions_label') }}
+                    <span class="info-tooltip" data-tooltip="{{ t('generate_form.instructions_tooltip') }}">&#9432;</span>
                 </label>
-                <textarea id="promptCustomInstructions" class="custom-instructions-textarea" placeholder="Ej: Estilo YouTube 2016, borde blanco, fondo kawaii, expresion exagerada..."></textarea>
+                <textarea id="promptCustomInstructions" class="custom-instructions-textarea" placeholder="{{ t('generate_form.instructions_placeholder') }}"></textarea>
             </div>
 
             <button type="submit" class="btn btn-primary btn-large" style="width: 100%; max-width: 400px; margin: 20px auto 0; display: block;">
-                Generar Thumbnails
+                {{ t('generate_form.generate_button') }}
             </button>
         </form>
     </section>
 
     <!-- Generation status -->
     <section class="section hidden" id="generationStatus">
-        <h2>Progreso de Generacion</h2>
+        <h2>{{ t('generate_form.progress_title') }}</h2>
         <div class="progress-container">
             <div class="progress-bar">
                 <div class="progress-fill" id="progressFill"></div>
             </div>
-            <p id="progressText">Iniciando...</p>
+            <p id="progressText">{{ t('generate_form.progress_starting') }}</p>
         </div>
     </section>
 
     <!-- Results (shown during/after generation) -->
     <section class="section hidden" id="resultsSection">
-        <h2>Generando Thumbnails...</h2>
+        <h2>{{ t('generate_form.results_generating') }}</h2>
         <div id="thumbnailsGrid" class="thumbnails-grid"></div>
     </section>
 
@@ -591,27 +591,27 @@
     <section class="section" id="existingThumbnailsSection">
         <div class="section-header-with-actions">
             <h2>
-                <span>Miniaturas Guardadas</span>
+                <span>{{ t('thumbnails.saved_title') }}</span>
                 <span class="thumbnail-count-badge" id="thumbnailCountBadge">0</span>
             </h2>
             <div class="section-actions">
                 <button class="btn btn-secondary btn-small" id="downloadAllBtn" onclick="VideoDetail.downloadAllThumbnails()" style="display: none;">
-                    &#128230; Descargar todas
+                    &#128230; {{ t('thumbnails.download_all') }}
                 </button>
             </div>
         </div>
         <div class="existing-thumbnails-wrapper" id="existingThumbnailsWrapper">
             <div class="existing-thumbnails-container" id="existingThumbnailsContainer">
                 <div class="existing-thumbnails-grid" id="existingThumbnailsGrid">
-                    <div class="loading">Cargando miniaturas...</div>
+                    <div class="loading">{{ t('thumbnails.loading') }}</div>
                 </div>
             </div>
         </div>
         <div class="no-thumbnails-message" id="noThumbnailsMessage" style="display: none;">
             <div class="empty-state">
                 <span class="empty-icon">🖼️</span>
-                <p>No hay miniaturas generadas todavia</p>
-                <small>Configura las opciones arriba y genera tu primera miniatura</small>
+                <p>{{ t('empty_state.no_thumbnails') }}</p>
+                <small>{{ t('empty_state.thumbnails_hint') }}</small>
             </div>
         </div>
     </section>

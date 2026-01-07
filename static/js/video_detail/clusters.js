@@ -21,12 +21,12 @@ export function getDisplayName(cluster) {
     }
 
     if (cluster.cluster_type === 'person_scene') {
-        const parentLabel = cluster.parent_label || `Persona ${(cluster.parent_cluster_index || 0) + 1}`;
+        const parentLabel = cluster.parent_label || t('video_detail.clusters.person', {index: (cluster.parent_cluster_index || 0) + 1});
         const sceneNum = cluster.scene_index !== null ? cluster.scene_index : '?';
-        return `${escapeHtml(parentLabel)} - Escena ${sceneNum}`;
+        return `${escapeHtml(parentLabel)} - ${t('video_detail.clusters.scene', {index: sceneNum})}`;
     }
 
-    return `Persona ${cluster.cluster_index + 1}`;
+    return t('video_detail.clusters.person', {index: cluster.cluster_index + 1});
 }
 
 /**
@@ -36,7 +36,7 @@ export function getDisplayName(cluster) {
  */
 export function getName(clusterIndex) {
     const cluster = state.clusters.find(c => c.cluster_index === clusterIndex);
-    return cluster?.label || 'Persona ' + (clusterIndex + 1);
+    return cluster?.label || t('video_detail.clusters.person', {index: clusterIndex + 1});
 }
 
 // =========================================================================
@@ -60,14 +60,14 @@ export async function load() {
 
         if (data.clusters.length === 0) {
             const emptyMsg = state.currentClusterType === 'person_scene'
-                ? 'No hay clusters por escena. Analiza un video para crearlos automaticamente.'
-                : 'No se detectaron personas/personajes';
+                ? t('empty_state.no_clusters_scene')
+                : t('empty_state.no_clusters');
             grid.innerHTML = `<p class="empty-state">${emptyMsg}</p>`;
             return;
         }
 
         grid.innerHTML = '';
-        select.innerHTML = '<option value="">Selecciona un cluster</option>';
+        select.innerHTML = `<option value="">${t('common.select')}</option>`;
 
         for (const cluster of data.clusters) {
             const displayName = getDisplayName(cluster);
@@ -81,25 +81,25 @@ export async function load() {
                     <input type="checkbox" id="cluster-cb-${cluster.cluster_index}">
                 </div>
                 <div class="cluster-card-actions">
-                    <button class="cluster-reference-btn" onclick="event.stopPropagation(); VideoDetail.setClusterAsReference(${cluster.cluster_index})" title="Usar como referencia para IA">
+                    <button class="cluster-reference-btn" onclick="event.stopPropagation(); VideoDetail.setClusterAsReference(${cluster.cluster_index})" title="${t('generate_form.cluster_tooltip')}">
                         &#9734;
                     </button>
-                    <a href="/video/${state.videoId}/cluster/${cluster.cluster_index}/frames?view_mode=${state.currentClusterType}" class="cluster-frames-btn" onclick="event.stopPropagation()" title="Gestionar frames">
+                    <a href="/video/${state.videoId}/cluster/${cluster.cluster_index}/frames?view_mode=${state.currentClusterType}" class="cluster-frames-btn" onclick="event.stopPropagation()" title="${t('video_detail.clusters.manage_frames')}">
                         &#9881;
                     </a>
-                    <button class="cluster-delete-btn" onclick="event.stopPropagation(); VideoDetail.showDeleteModal(${cluster.cluster_index}, ${cluster.num_frames})" title="Eliminar cluster">
+                    <button class="cluster-delete-btn" onclick="event.stopPropagation(); VideoDetail.showDeleteModal(${cluster.cluster_index}, ${cluster.num_frames})" title="${t('video_detail.clusters.delete_cluster')}">
                         &#128465;
                     </button>
                 </div>
                 <div class="cluster-reference-badge" style="display: none;">
-                    &#128247; Referencia IA
+                    &#128247; ${t('clusters.references_title')}
                 </div>
                 <img src="/api/analysis/${state.videoId}/clusters/by-id/${cluster.id}/image"
                      alt="Cluster ${cluster.cluster_index}"
                      onerror="this.src='/static/img/placeholder.svg'">
                 <div class="cluster-info">
                     <h4>${displayName}</h4>
-                    <p>${cluster.num_frames} frames</p>
+                    <p>${t('clusters.frame_count_other', {count: cluster.num_frames})}</p>
                 </div>
             `;
             // Click on card (outside action buttons) toggles checkbox selection
@@ -120,7 +120,7 @@ export async function load() {
             // Add to select
             const option = document.createElement('option');
             option.value = cluster.cluster_index;
-            option.textContent = `${displayName} (${cluster.num_frames} frames)`;
+            option.textContent = `${displayName} (${t('clusters.frame_count_other', {count: cluster.num_frames})})`;
             select.appendChild(option);
         }
 
@@ -130,7 +130,7 @@ export async function load() {
         setupScrollIndicator();
 
     } catch (error) {
-        grid.innerHTML = `<div class="error">Error cargando clusters: ${escapeHtml(error.message)}</div>`;
+        grid.innerHTML = `<div class="error">${t('errors.load_clusters')}: ${escapeHtml(error.message)}</div>`;
     }
 }
 
@@ -202,7 +202,7 @@ export function updateSelectionUI() {
     const deleteBtn = document.getElementById('btnDeleteSelectedClusters');
     const selectAllCb = document.getElementById('selectAllClusters');
 
-    countEl.textContent = `${count} seleccionado${count !== 1 ? 's' : ''}`;
+    countEl.textContent = t('selection.selected_count', {count: count});
     countEl.className = count > 0 ? 'selection-count has-selection' : 'selection-count';
 
     mergeBtn.disabled = count < 2;
@@ -268,15 +268,15 @@ export function updateReferenceUI() {
                              onerror="this.src='/static/img/placeholder.svg'">
                         <div class="cluster-preview-info">
                             <span class="cluster-preview-name">${displayName}</span>
-                            <span class="cluster-preview-frames">${cluster.num_frames} frames</span>
+                            <span class="cluster-preview-frames">${cluster.num_frames} ${t('video_detail.clusters.frames_other')}</span>
                         </div>
                     </div>
-                    <span class="cluster-preview-badge">&#9733; Referencia IA</span>
+                    <span class="cluster-preview-badge">&#9733; ${t('clusters.references_title')}</span>
                 `;
                 display.classList.add('has-selection');
             }
         } else {
-            display.innerHTML = '<span class="no-selection">&#9734; Selecciona un cluster arriba usando la estrella</span>';
+            display.innerHTML = `<span class="no-selection">&#9734; ${t('errors.select_cluster')}</span>`;
             display.classList.remove('has-selection');
         }
     }
@@ -321,7 +321,7 @@ export function showDeleteModal(clusterIndex, numFrames) {
     state.clusterToDelete = clusterIndex;
     const name = getName(clusterIndex);
     document.getElementById('deleteClusterMessage').textContent =
-        `¿Eliminar "${name}"? Se perderan ${numFrames} frames asociados.`;
+        t('clusters.delete_message');
     document.getElementById('deleteClusterModal').classList.add('visible');
 }
 
@@ -338,7 +338,7 @@ export function showDeleteSelectedModal() {
 
     state.clusterToDelete = Array.from(state.selectedClusters);
     document.getElementById('deleteClusterMessage').textContent =
-        `¿Eliminar ${count} cluster${count > 1 ? 's' : ''}? Se perderan ${totalFrames} frames en total.`;
+        t('clusters.merge_message', {count: count});
     document.getElementById('deleteClusterModal').classList.add('visible');
 }
 
@@ -359,18 +359,18 @@ export async function confirmDelete() {
                 method: 'DELETE'
             });
             if (!response.ok) {
-                throw new Error(`Error eliminando cluster ${idx}`);
+                throw new Error(t('errors.delete_cluster'));
             }
         }
 
         ThumbnailApp.showToast(
-            `Cluster${indicesToDelete.length > 1 ? 's' : ''} eliminado${indicesToDelete.length > 1 ? 's' : ''} correctamente`,
+            t('clusters.delete_title'),
             'success'
         );
         closeModal('deleteClusterModal');
         load();
     } catch (error) {
-        ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
     }
 
     state.clusterToDelete = null;
@@ -400,7 +400,7 @@ export function showMergeModal() {
         option.innerHTML = `
             <input type="radio" name="mergeTarget" value="${idx}" ${i === 0 ? 'checked' : ''}>
             <img src="/api/analysis/${state.videoId}/clusters/by-id/${cluster?.id}/image" alt="${escapeHtml(name)}">
-            <span>${escapeHtml(name)} (${cluster?.num_frames || 0} frames)</span>
+            <span>${escapeHtml(name)} (${t('clusters.frame_count_other', {count: cluster?.num_frames || 0})})</span>
         `;
         optionsContainer.appendChild(option);
     });
@@ -431,14 +431,14 @@ export async function confirmMerge() {
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.detail || 'Error fusionando clusters');
+            throw new Error(error.detail || t('errors.merge_clusters'));
         }
 
-        ThumbnailApp.showToast('Clusters fusionados correctamente', 'success');
+        ThumbnailApp.showToast(t('clusters.merge_title'), 'success');
         closeModal('mergeClustersModal');
         load();
     } catch (error) {
-        ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
     }
 }
 

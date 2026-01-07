@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from config import ALLOWED_IP_RANGES, ENABLE_IP_FILTERING
+from i18n.i18n import translate as t
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ class LANOnlyMiddleware(BaseHTTPMiddleware):
             logger.warning("[SECURITY] Request with no client IP - blocked")
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Access denied: Unable to determine client IP"}
+                content={"detail": t('api.errors.access_denied_no_ip')}
             )
 
         # Check if IP is allowed
@@ -76,7 +77,7 @@ class LANOnlyMiddleware(BaseHTTPMiddleware):
             return JSONResponse(
                 status_code=403,
                 content={
-                    "detail": "Access restricted to local network",
+                    "detail": t('api.errors.access_restricted_local'),
                     "hint": "This application only accepts connections from private IP ranges (192.168.x.x, 10.x.x.x, 172.16-31.x.x, localhost)"
                 }
             )

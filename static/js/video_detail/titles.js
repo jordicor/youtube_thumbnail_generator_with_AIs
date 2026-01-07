@@ -96,7 +96,7 @@ export async function generate() {
     if (style === 'custom') {
         customPrompt = document.getElementById('titleCustomPrompt').value.trim();
         if (!customPrompt) {
-            ThumbnailApp.showToast('Por favor, introduce un prompt personalizado', 'error');
+            ThumbnailApp.showToast(t('errors.custom_prompt_required'), 'error');
             return;
         }
     } else {
@@ -108,7 +108,7 @@ export async function generate() {
     const loadingHint = document.getElementById('titlesLoadingHint');
 
     loadingEl.style.display = 'flex';
-    loadingMain.textContent = 'Comprobando...';
+    loadingMain.textContent = t('common.loading');
     loadingHint.textContent = '';
     document.getElementById('titlesResultsSection').style.display = 'none';
     document.getElementById('generateTitlesBtn').disabled = true;
@@ -127,14 +127,14 @@ export async function generate() {
     }
 
     if (transcriptionExists) {
-        loadingMain.textContent = 'Generando titulos...';
+        loadingMain.textContent = t('titles.generating');
         loadingHint.textContent = '';
     } else {
-        loadingMain.textContent = 'Transcribiendo audio...';
-        loadingHint.textContent = 'Solo se realiza una vez por video';
+        loadingMain.textContent = t('analysis.transcribing');
+        loadingHint.textContent = t('titles_form.preparing');
 
         generatingTimeout = setTimeout(() => {
-            loadingMain.textContent = 'Generando titulos con IA...';
+            loadingMain.textContent = t('titles.generating');
             loadingHint.textContent = '';
         }, CONFIG.TRANSCRIPTION_CHECK_TIMEOUT_MS);
     }
@@ -162,11 +162,11 @@ export async function generate() {
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.detail || 'Error generando titulos');
+            throw new Error(data.detail || t('errors.generate_titles'));
         }
 
         if (!data.success) {
-            throw new Error(data.error || 'Error generando titulos');
+            throw new Error(data.error || t('errors.generate_titles'));
         }
 
         const titleObjects = data.titles.map(text => ({ text, dbId: null }));
@@ -175,14 +175,14 @@ export async function generate() {
         saveToDb(data.titles, style, language, data.provider, data.model);
 
         if (data.transcription_generated) {
-            ThumbnailApp.showToast(`${data.titles.length} titulos generados (audio transcrito)`, 'success');
+            ThumbnailApp.showToast(t('titles.generating', {count: data.titles.length}), 'success');
         } else {
-            ThumbnailApp.showToast(`${data.titles.length} titulos generados`, 'success');
+            ThumbnailApp.showToast(t('titles.generating', {count: data.titles.length}), 'success');
         }
 
     } catch (error) {
         if (generatingTimeout) clearTimeout(generatingTimeout);
-        ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
     } finally {
         document.getElementById('titlesLoading').style.display = 'none';
         document.getElementById('generateTitlesBtn').disabled = false;
@@ -218,17 +218,17 @@ export function display(titles, append = true) {
         item.className = 'title-item';
         item.dataset.titleIndex = index;
         item.innerHTML = `
-            <div class="title-select-wrapper" onclick="VideoDetail.toggleTitleSelection(${index})" title="Seleccionar para orientar imagenes">
+            <div class="title-select-wrapper" onclick="VideoDetail.toggleTitleSelection(${index})" title="${t('titles_form.select_tooltip')}">
                 <input type="checkbox" class="title-checkbox" id="title-cb-${index}"
                        ${state.selectedTitles.has(index) ? 'checked' : ''}
                        onclick="event.stopPropagation(); VideoDetail.toggleTitleSelection(${index})">
             </div>
             <span class="title-text" onclick="VideoDetail.toggleTitleSelection(${index})">${escapeHtml(titleText)}</span>
             <div class="title-actions">
-                <button class="title-copy-btn" onclick="event.stopPropagation(); VideoDetail.copyTitle(${index})" title="Copiar al portapapeles">
+                <button class="title-copy-btn" onclick="event.stopPropagation(); VideoDetail.copyTitle(${index})" title="${t('titles_form.copy_tooltip')}">
                     &#128203;
                 </button>
-                <button class="title-delete-btn" onclick="event.stopPropagation(); VideoDetail.deleteTitle(${index})" title="Eliminar">
+                <button class="title-delete-btn" onclick="event.stopPropagation(); VideoDetail.deleteTitle(${index})" title="${t('titles_form.delete_tooltip')}">
                     &#128465;
                 </button>
             </div>
@@ -316,10 +316,10 @@ export function updateSelectionInfo() {
     const infoEl = document.getElementById('titlesSelectionInfo');
     if (infoEl) {
         if (selectedCount > 0) {
-            infoEl.textContent = `${selectedCount} seleccionado${selectedCount > 1 ? 's' : ''}`;
+            infoEl.textContent = t('selection.selected_count', {count: selectedCount});
             infoEl.classList.add('has-selection');
         } else {
-            infoEl.textContent = 'Selecciona titulos para orientar las imagenes';
+            infoEl.textContent = t('titles_form.selection_info');
             infoEl.classList.remove('has-selection');
         }
     }
@@ -340,11 +340,11 @@ export function updateSelectAllButton() {
     const allSelected = validIndices.length > 0 && validIndices.every(i => state.selectedTitles.has(i));
 
     if (allSelected) {
-        btn.innerHTML = '&#9745; Ninguno';
-        btn.title = 'Deseleccionar todos';
+        btn.innerHTML = `&#9745; ${t('common.none')}`;
+        btn.title = t('common.deselect_all');
     } else {
-        btn.innerHTML = '&#9744; Todos';
-        btn.title = 'Seleccionar todos';
+        btn.innerHTML = `&#9744; ${t('common.all')}`;
+        btn.title = t('common.select_all');
     }
 }
 
@@ -410,7 +410,7 @@ export async function deleteOne(index) {
     updateSelectionInfo();
     updateSelectAllButton();
     updateCount();
-    ThumbnailApp.showToast('Titulo eliminado', 'success');
+    ThumbnailApp.showToast(t('common.success'), 'success');
 }
 
 /**
@@ -421,8 +421,8 @@ export async function deleteSelected() {
     if (selectedCount === 0) return;
 
     const confirmMsg = selectedCount === 1
-        ? '¿Eliminar el titulo seleccionado?'
-        : `¿Eliminar los ${selectedCount} titulos seleccionados?`;
+        ? t('common.delete')
+        : t('common.delete');
 
     if (!confirm(confirmMsg)) return;
 
@@ -468,7 +468,7 @@ export async function deleteSelected() {
         updateCount();
     }, CONFIG.ANIMATION_DURATION_MS);
 
-    ThumbnailApp.showToast(`${selectedCount} titulo${selectedCount > 1 ? 's' : ''} eliminado${selectedCount > 1 ? 's' : ''}`, 'success');
+    ThumbnailApp.showToast(t('common.success'), 'success');
 }
 
 // =========================================================================
@@ -500,9 +500,9 @@ export async function copy(index) {
             }, CONFIG.COPY_FEEDBACK_DURATION_MS);
         }
 
-        ThumbnailApp.showToast('Titulo copiado al portapapeles', 'success');
+        ThumbnailApp.showToast(t('titles.copied'), 'success');
     } catch (error) {
-        ThumbnailApp.showToast('Error al copiar', 'error');
+        ThumbnailApp.showToast(t('errors.generic'), 'error');
     }
 }
 
@@ -519,9 +519,9 @@ export async function copyAll() {
     try {
         const allTitles = validTitles.join('\n');
         await navigator.clipboard.writeText(allTitles);
-        ThumbnailApp.showToast(`${validTitles.length} titulos copiados`, 'success');
+        ThumbnailApp.showToast(t('titles.copied'), 'success');
     } catch (error) {
-        ThumbnailApp.showToast('Error al copiar', 'error');
+        ThumbnailApp.showToast(t('errors.generic'), 'error');
     }
 }
 

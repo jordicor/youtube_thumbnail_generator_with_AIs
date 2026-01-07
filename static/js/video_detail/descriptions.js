@@ -112,7 +112,7 @@ export async function generate() {
     if (style === 'custom') {
         customPrompt = document.getElementById('descCustomPrompt').value.trim();
         if (!customPrompt) {
-            ThumbnailApp.showToast('Por favor, introduce un prompt personalizado', 'error');
+            ThumbnailApp.showToast(t('errors.custom_prompt_required'), 'error');
             return;
         }
     } else {
@@ -124,7 +124,7 @@ export async function generate() {
     const loadingHint = document.getElementById('descriptionsLoadingHint');
 
     loadingEl.style.display = 'flex';
-    loadingMain.textContent = 'Comprobando...';
+    loadingMain.textContent = t('common.loading');
     loadingHint.textContent = '';
     document.getElementById('generateDescBtn').disabled = true;
 
@@ -142,14 +142,14 @@ export async function generate() {
     }
 
     if (transcriptionExists) {
-        loadingMain.textContent = 'Generando descripciones...';
+        loadingMain.textContent = t('descriptions_form.generate_button');
         loadingHint.textContent = '';
     } else {
-        loadingMain.textContent = 'Transcribiendo audio...';
-        loadingHint.textContent = 'Solo se realiza una vez por video';
+        loadingMain.textContent = t('analysis.transcribing');
+        loadingHint.textContent = t('generate_form.progress_starting');
 
         generatingTimeout = setTimeout(() => {
-            loadingMain.textContent = 'Generando descripciones con IA...';
+            loadingMain.textContent = t('descriptions_form.generate_button');
             loadingHint.textContent = '';
         }, CONFIG.TRANSCRIPTION_CHECK_TIMEOUT_MS);
     }
@@ -182,11 +182,11 @@ export async function generate() {
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.detail || 'Error generando descripciones');
+            throw new Error(data.detail || t('errors.generation_failed'));
         }
 
         if (!data.success) {
-            throw new Error(data.error || 'Error generando descripciones');
+            throw new Error(data.error || t('errors.generation_failed'));
         }
 
         const descriptionObjects = data.descriptions.map(text => ({ text, dbId: null }));
@@ -196,14 +196,14 @@ export async function generate() {
                  includeTimestamps, includeHashtags, includeEmojis, includeSocialLinks);
 
         if (data.transcription_generated) {
-            ThumbnailApp.showToast(`${data.descriptions.length} descripcion(es) generada(s) (audio transcrito)`, 'success');
+            ThumbnailApp.showToast(t('descriptions.generating'), 'success');
         } else {
-            ThumbnailApp.showToast(`${data.descriptions.length} descripcion(es) generada(s)`, 'success');
+            ThumbnailApp.showToast(t('descriptions.generating'), 'success');
         }
 
     } catch (error) {
         if (generatingTimeout) clearTimeout(generatingTimeout);
-        ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        ThumbnailApp.showToast(t('errors.generic') + ': ' + error.message, 'error');
     } finally {
         document.getElementById('descriptionsLoading').style.display = 'none';
         document.getElementById('generateDescBtn').disabled = false;
@@ -240,10 +240,10 @@ export function display(descriptions, append = true) {
         item.innerHTML = `
             <div class="description-text">${escapeHtml(descText)}</div>
             <div class="description-actions">
-                <button class="description-copy-btn" onclick="VideoDetail.copyDescription(${index})" title="Copiar al portapapeles">
-                    &#128203; Copiar
+                <button class="description-copy-btn" onclick="VideoDetail.copyDescription(${index})" title="${t('descriptions_form.copy_all')}">
+                    &#128203; ${t('descriptions_form.copy_all')}
                 </button>
-                <button class="description-delete-btn" onclick="VideoDetail.deleteDescription(${index})" title="Eliminar">
+                <button class="description-delete-btn" onclick="VideoDetail.deleteDescription(${index})" title="${t('common.delete')}">
                     &#128465;
                 </button>
             </div>
@@ -307,7 +307,7 @@ export async function deleteOne(index) {
         }, CONFIG.ANIMATION_DURATION_MS);
     }
 
-    ThumbnailApp.showToast('Descripcion eliminada', 'success');
+    ThumbnailApp.showToast(t('common.success'), 'success');
 }
 
 /**
@@ -341,7 +341,7 @@ export async function deleteAll() {
     document.getElementById('descriptionsResultsSection').style.display = 'none';
     updateCount();
 
-    ThumbnailApp.showToast(`${validDescriptions.length} descripcion(es) eliminada(s)`, 'success');
+    ThumbnailApp.showToast(t('common.success'), 'success');
 }
 
 // =========================================================================
@@ -366,7 +366,7 @@ export async function copy(index) {
         if (btn) {
             const originalHTML = btn.innerHTML;
             btn.classList.add('copied');
-            btn.innerHTML = '&#10003; Copiado';
+            btn.innerHTML = '&#10003; ' + t('descriptions_form.copy_all');
 
             setTimeout(() => {
                 btn.classList.remove('copied');
@@ -374,9 +374,9 @@ export async function copy(index) {
             }, CONFIG.COPY_FEEDBACK_DURATION_MS);
         }
 
-        ThumbnailApp.showToast('Descripcion copiada al portapapeles', 'success');
+        ThumbnailApp.showToast(t('descriptions.copied'), 'success');
     } catch (error) {
-        ThumbnailApp.showToast('Error al copiar', 'error');
+        ThumbnailApp.showToast(t('errors.generic'), 'error');
     }
 }
 
@@ -392,9 +392,9 @@ export async function copyAll() {
             .map(d => typeof d === 'string' ? d : d.text)
             .join('\n\n---\n\n');
         await navigator.clipboard.writeText(allDescriptions);
-        ThumbnailApp.showToast(`${validDescriptions.length} descripcion(es) copiada(s)`, 'success');
+        ThumbnailApp.showToast(t('descriptions.copied'), 'success');
     } catch (error) {
-        ThumbnailApp.showToast('Error al copiar', 'error');
+        ThumbnailApp.showToast(t('errors.generic'), 'error');
     }
 }
 

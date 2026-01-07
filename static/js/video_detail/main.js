@@ -29,16 +29,16 @@ async function loadVideoInfo() {
         const infoDiv = document.getElementById('videoInfo');
         const duration = video.duration_seconds
             ? `${Math.floor(video.duration_seconds / 60)}:${String(Math.floor(video.duration_seconds % 60)).padStart(2, '0')}`
-            : 'N/A';
+            : t('common.na');
 
         infoDiv.innerHTML = `
-            <p><strong>Archivo:</strong> ${escapeHtml(video.filename)}</p>
-            <p><strong>Duracion:</strong> ${escapeHtml(duration)}</p>
-            <p><strong>Estado:</strong> ${escapeHtml(video.status)}</p>
+            <p><strong>${t('video_detail.info.filename')}:</strong> ${escapeHtml(video.filename)}</p>
+            <p><strong>${t('video_detail.info.duration')}:</strong> ${escapeHtml(duration)}</p>
+            <p><strong>${t('video_detail.info.title')}:</strong> ${escapeHtml(video.status)}</p>
         `;
     } catch (error) {
         document.getElementById('videoInfo').innerHTML =
-            `<div class="error">Error cargando video: ${escapeHtml(error.message)}</div>`;
+            `<div class="error">${t('errors.load_video')}: ${escapeHtml(error.message)}</div>`;
     }
 }
 

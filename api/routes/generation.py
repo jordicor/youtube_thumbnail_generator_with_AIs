@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from database.db import get_db
 from services.generation_service import GenerationService
 from job_queue.queue import enqueue_generation
+from i18n.i18n import translate as t
 
 
 router = APIRouter()
@@ -110,12 +111,12 @@ async def start_generation(
         # Verify video is analyzed
         video = await service.get_video(video_id)
         if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         if video['status'] not in ('analyzed', 'completed'):
             raise HTTPException(
                 status_code=400,
-                detail=f"Video must be analyzed first. Current status: {video['status']}"
+                detail=t('api.errors.video_must_be_analyzed', status=video['status'])
             )
 
         # Verify cluster exists
@@ -123,7 +124,7 @@ async def start_generation(
         if not cluster:
             raise HTTPException(
                 status_code=404,
-                detail=f"Cluster {request.cluster_index} not found"
+                detail=t('api.errors.cluster_not_found')
             )
 
         # Create job in database
@@ -164,14 +165,14 @@ async def start_generation(
         # Failed to enqueue - update job status
         async with get_db() as db:
             service = GenerationService(db)
-            await service.update_job_status(job['id'], 'error', 0, 'Failed to enqueue generation job')
-        raise HTTPException(status_code=500, detail="Failed to enqueue generation job")
+            await service.update_job_status(job['id'], 'error', 0, t('api.errors.failed_enqueue_generation'))
+        raise HTTPException(status_code=500, detail=t('api.errors.failed_enqueue_generation'))
 
     return {
         "job_id": job['id'],
         "video_id": video_id,
         "status": "pending",
-        "message": "Generation started",
+        "message": t('api.messages.generation_started'),
         "arq_job_id": arq_job_id
     }
 
@@ -186,7 +187,7 @@ async def get_generation_status(job_id: int):
         status = await service.get_job_status(job_id)
 
     if not status:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.job_not_found'))
 
     return GenerationStatusResponse(**status)
 
@@ -213,7 +214,7 @@ async def cancel_generation(job_id: int):
         success = await service.cancel_job(job_id)
 
     if not success:
-        raise HTTPException(status_code=400, detail="Job cannot be cancelled")
+        raise HTTPException(status_code=400, detail=t('api.errors.job_cannot_cancel'))
 
     return {"job_id": job_id, "status": "cancelled"}
 

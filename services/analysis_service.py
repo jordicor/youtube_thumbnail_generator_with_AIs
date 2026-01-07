@@ -12,6 +12,7 @@ import shutil
 import re
 
 from config import MAX_REFERENCE_FRAMES
+from i18n import t
 
 
 def extract_scene_index_from_path(frame_path: str) -> Optional[int]:
@@ -606,7 +607,7 @@ class AnalysisService:
             The merged cluster info, or None if failed.
         """
         if len(cluster_indices) < 2:
-            return {'success': False, 'error': 'Need at least 2 clusters to merge'}
+            return {'success': False, 'error': t('api.errors.min_clusters_required')}
 
         if target_index not in cluster_indices:
             target_index = cluster_indices[0]
@@ -614,7 +615,7 @@ class AnalysisService:
         # Get video info for output_dir
         video = await self.get_video(video_id)
         if not video:
-            return {'success': False, 'error': 'Video not found'}
+            return {'success': False, 'error': t('api.errors.video_not_found')}
 
         output_dir = self._get_video_output_dir(video)
         clusters_dir = output_dir / "clusters"
@@ -622,13 +623,13 @@ class AnalysisService:
         # Get target cluster
         target = await self._get_cluster_by_index_v2(video_id, target_index, view_mode)
         if not target:
-            return {'success': False, 'error': 'Target cluster not found'}
+            return {'success': False, 'error': t('api.errors.cluster_not_found')}
 
         target_id = target['id']
         source_indices = [i for i in cluster_indices if i != target_index]
 
         if not source_indices:
-            return {'success': False, 'error': 'No source clusters to merge'}
+            return {'success': False, 'error': t('api.errors.no_source_clusters')}
 
         # Get source cluster IDs
         source_ids = []
@@ -638,7 +639,7 @@ class AnalysisService:
                 source_ids.append(source['id'])
 
         if not source_ids:
-            return {'success': False, 'error': 'Source clusters not found'}
+            return {'success': False, 'error': t('api.errors.source_clusters_not_found')}
 
         # Move assignments to target (ignore duplicates)
         placeholders = ','.join('?' * len(source_ids))
@@ -1368,7 +1369,7 @@ class AnalysisService:
         """
         cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
         if not cluster:
-            return {'added': 0, 'skipped': 0, 'error': 'Cluster not found'}
+            return {'added': 0, 'skipped': 0, 'error': t('api.errors.cluster_not_found')}
 
         cluster_id = cluster['id']
 
@@ -1476,7 +1477,7 @@ class AnalysisService:
         """
         cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
         if not cluster:
-            return {'success': False, 'error': 'Cluster not found'}
+            return {'success': False, 'error': t('api.errors.cluster_not_found')}
 
         cluster_id = cluster['id']
         video = await self.get_video(video_id)
@@ -1690,11 +1691,11 @@ class AnalysisService:
             Created cluster info or None if failed
         """
         if not frame_paths:
-            return {'success': False, 'error': 'No frames provided'}
+            return {'success': False, 'error': t('api.errors.no_frames_provided')}
 
         video = await self.get_video(video_id)
         if not video:
-            return {'success': False, 'error': 'Video not found'}
+            return {'success': False, 'error': t('api.errors.video_not_found')}
 
         output_dir = self._get_video_output_dir(video)
         clusters_dir = output_dir / "clusters"
@@ -1724,7 +1725,7 @@ class AnalysisService:
                 frame_ids.append(cursor.lastrowid)
 
         if not frame_ids:
-            return {'success': False, 'error': 'No valid frames found'}
+            return {'success': False, 'error': t('api.errors.no_valid_frames')}
 
         # Get frames with quality for sorting
         frames_data = []
@@ -1813,7 +1814,7 @@ class AnalysisService:
         """
         cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
         if not cluster:
-            return {'success': False, 'error': 'Cluster not found'}
+            return {'success': False, 'error': t('api.errors.cluster_not_found')}
 
         video = await self.get_video(video_id)
         output_dir = self._get_video_output_dir(video)

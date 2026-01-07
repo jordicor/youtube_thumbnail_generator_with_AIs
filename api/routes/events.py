@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from database.db import get_db
 from services.analysis_service import AnalysisService
 from services.generation_service import GenerationService
+from i18n.i18n import translate as t
 
 
 router = APIRouter()
@@ -73,7 +74,7 @@ async def stream_analysis_status(video_id: int, request: Request):
 
                     if not status:
                         yield await create_sse_message(
-                            {"error": "Video not found"},
+                            {"error": t('api.errors.video_not_found')},
                             event="error"
                         )
                         break
@@ -91,7 +92,7 @@ async def stream_analysis_status(video_id: int, request: Request):
                                     "video_id": video_id,
                                     "status": status['status'],
                                     "progress": 0,
-                                    "error_message": status.get('error_message', 'Unknown error')
+                                    "error_message": status.get('error_message', t('errors.generic'))
                                 },
                                 event="error"
                             )
@@ -104,7 +105,7 @@ async def stream_analysis_status(video_id: int, request: Request):
                                     "status": status['status'],
                                     "progress": 100,
                                     "clusters": status.get('clusters', 0),
-                                    "message": "Analysis completed"
+                                    "message": t('api.messages.analysis_completed')
                                 },
                                 event="complete"
                             )
@@ -123,12 +124,12 @@ async def stream_analysis_status(video_id: int, request: Request):
                             progress = progress_map.get(status['status'], status.get('progress', 0))
 
                             step_map = {
-                                'pending': 'Waiting...',
-                                'analyzing': 'Analyzing video...',
-                                'analyzing_scenes': 'Detecting scenes...',
-                                'analyzing_faces': 'Analyzing faces...',
-                                'clustering': 'Clustering faces...',
-                                'transcribing': 'Transcribing audio...',
+                                'pending': t('api.steps.waiting'),
+                                'analyzing': t('api.steps.analyzing_video'),
+                                'analyzing_scenes': t('api.steps.detecting_scenes'),
+                                'analyzing_faces': t('api.steps.analyzing_faces'),
+                                'clustering': t('api.steps.clustering_faces'),
+                                'transcribing': t('api.steps.transcribing_audio'),
                             }
                             current_step = step_map.get(status['status'], status['status'])
 
@@ -148,7 +149,7 @@ async def stream_analysis_status(video_id: int, request: Request):
                     error_count += 1
                     if error_count >= max_errors:
                         yield await create_sse_message(
-                            {"error": f"Too many errors: {str(e)}"},
+                            {"error": t('api.errors.too_many_errors', error=str(e))},
                             event="error"
                         )
                         break
@@ -211,7 +212,7 @@ async def stream_generation_status(job_id: int, request: Request):
 
                     if not status:
                         yield await create_sse_message(
-                            {"error": "Job not found"},
+                            {"error": t('api.errors.job_not_found')},
                             event="error"
                         )
                         break
@@ -256,7 +257,7 @@ async def stream_generation_status(job_id: int, request: Request):
                                     "job_id": job_id,
                                     "status": status['status'],
                                     "progress": 0,
-                                    "error_message": status.get('error_message', 'Unknown error')
+                                    "error_message": status.get('error_message', t('errors.generic'))
                                 },
                                 event="error"
                             )
@@ -270,7 +271,7 @@ async def stream_generation_status(job_id: int, request: Request):
                                     "progress": 100,
                                     "thumbnails_generated": status.get('thumbnails_generated', 0),
                                     "total_thumbnails": status.get('total_thumbnails', 0),
-                                    "message": "Generation completed"
+                                    "message": t('api.messages.generation_completed')
                                 },
                                 event="complete"
                             )
@@ -281,7 +282,7 @@ async def stream_generation_status(job_id: int, request: Request):
                                 {
                                     "job_id": job_id,
                                     "status": "cancelled",
-                                    "message": "Generation cancelled"
+                                    "message": t('api.messages.generation_cancelled')
                                 },
                                 event="cancelled"
                             )
@@ -290,10 +291,10 @@ async def stream_generation_status(job_id: int, request: Request):
                         else:
                             # Progress update
                             step_map = {
-                                'pending': 'Starting...',
-                                'transcribing': 'Transcribing audio...',
-                                'prompting': 'Generating prompts...',
-                                'generating': 'Creating thumbnails...',
+                                'pending': t('api.steps.starting'),
+                                'transcribing': t('api.steps.transcribing_audio'),
+                                'prompting': t('api.steps.generating_prompts'),
+                                'generating': t('api.steps.creating_thumbnails'),
                             }
                             current_step = step_map.get(status['status'], status['status'])
 
@@ -315,7 +316,7 @@ async def stream_generation_status(job_id: int, request: Request):
                     error_count += 1
                     if error_count >= max_errors:
                         yield await create_sse_message(
-                            {"error": f"Too many errors: {str(e)}"},
+                            {"error": t('api.errors.too_many_errors', error=str(e))},
                             event="error"
                         )
                         break

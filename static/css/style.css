@@ -82,6 +82,36 @@ body {
     color: var(--primary-color);
 }
 
+/* Language Selector */
+.language-selector {
+    display: flex;
+    gap: 4px;
+    margin-right: 16px;
+}
+
+.lang-btn {
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    background-color: transparent;
+    color: var(--text-muted);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.lang-btn:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+
+.lang-btn.active {
+    background-color: var(--primary-color);
+    border-color: var(--primary-color);
+    color: white;
+}
+
 /* Directory Selector */
 .directory-selector {
     position: relative;

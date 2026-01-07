@@ -52,7 +52,7 @@ export async function loadExisting() {
         setupScrollIndicator();
 
     } catch (error) {
-        grid.innerHTML = `<div class="error">Error cargando miniaturas: ${escapeHtml(error.message)}</div>`;
+        grid.innerHTML = `<div class="error">${t('errors.load_thumbnails')}: ${escapeHtml(error.message)}</div>`;
     }
 }
 
@@ -98,7 +98,8 @@ export function createCard(thumb, index) {
     let dateStr = '';
     if (thumb.created_at) {
         const date = new Date(thumb.created_at);
-        dateStr = date.toLocaleDateString('es-ES', {
+        const locale = getLanguage() === 'es' ? 'es-ES' : 'en-US';
+        dateStr = date.toLocaleDateString(locale, {
             day: '2-digit',
             month: 'short',
             hour: '2-digit',
@@ -118,11 +119,11 @@ export function createCard(thumb, index) {
             </div>
         </div>
         <div class="thumbnail-info">
-            <p class="thumbnail-title" title="${escapeHtml(thumb.suggested_title || 'Sin titulo')}">${escapeHtml(thumb.suggested_title || 'Sin titulo')}</p>
+            <p class="thumbnail-title" title="${escapeHtml(thumb.suggested_title || t('results.no_thumbnails_yet'))}">${escapeHtml(thumb.suggested_title || t('results.no_thumbnails_yet'))}</p>
             ${dateStr ? `<small class="thumbnail-date">${dateStr}</small>` : ''}
             <div class="thumbnail-actions">
-                <a href="/api/thumbnails/${thumb.id}" download class="btn btn-small btn-primary" title="Descargar">&#8595;</a>
-                <button class="btn btn-small btn-danger" onclick="VideoDetail.deleteThumbnail(${thumb.id})" title="Eliminar">&#128465;</button>
+                <a href="/api/thumbnails/${thumb.id}" download class="btn btn-small btn-primary" title="${t('results.thumbnails.download')}">&#8595;</a>
+                <button class="btn btn-small btn-danger" onclick="VideoDetail.deleteThumbnail(${thumb.id})" title="${t('common.delete')}">&#128465;</button>
             </div>
         </div>
     `;
@@ -187,7 +188,7 @@ export function observeImages() {
  * @param {number} thumbnailId - Thumbnail database ID
  */
 export async function deleteOne(thumbnailId) {
-    if (!confirm('¿Eliminar esta miniatura?')) return;
+    if (!confirm(t('common.delete'))) return;
 
     try {
         const response = await fetch(`/api/thumbnails/${thumbnailId}`, {
@@ -195,7 +196,7 @@ export async function deleteOne(thumbnailId) {
         });
 
         if (!response.ok) {
-            throw new Error('Error al eliminar');
+            throw new Error(t('errors.delete_failed'));
         }
 
         const card = document.querySelector(`.thumbnail-card[data-thumbnail-id="${thumbnailId}"]`);
@@ -207,9 +208,9 @@ export async function deleteOne(thumbnailId) {
             }, CONFIG.ANIMATION_DURATION_MS);
         }
 
-        ThumbnailApp.showToast('Miniatura eliminada', 'success');
+        ThumbnailApp.showToast(t('common.success'), 'success');
     } catch (error) {
-        ThumbnailApp.showToast('Error: ' + error.message, 'error');
+        ThumbnailApp.showToast(t('errors.generic') + ': ' + error.message, 'error');
     }
 }
 

@@ -10,6 +10,8 @@ from typing import Optional, List
 from datetime import datetime
 import aiosqlite
 
+from i18n.i18n import translate as t
+
 
 class DirectoryService:
     """Service for directory-related operations."""
@@ -282,7 +284,7 @@ class DirectoryService:
     def _format_time_ago(self, timestamp_str: Optional[str]) -> str:
         """Format timestamp as human-readable 'time ago' string."""
         if not timestamp_str:
-            return "Nunca"
+            return t('time_service.never')
 
         try:
             # Parse SQLite timestamp
@@ -297,18 +299,24 @@ class DirectoryService:
             seconds = diff.total_seconds()
 
             if seconds < 60:
-                return "Hace un momento"
+                return t('time_service.just_now')
             elif seconds < 3600:
                 minutes = int(seconds / 60)
-                return f"Hace {minutes} min"
+                return t('time_service.minutes_ago', count=minutes)
             elif seconds < 86400:
                 hours = int(seconds / 3600)
-                return f"Hace {hours} hora{'s' if hours > 1 else ''}"
+                if hours == 1:
+                    return t('time_service.hour_ago')
+                return t('time_service.hours_ago', count=hours)
             elif seconds < 604800:
                 days = int(seconds / 86400)
-                return f"Hace {days} dia{'s' if days > 1 else ''}"
+                if days == 1:
+                    return t('time_service.day_ago')
+                return t('time_service.days_ago', count=days)
             else:
                 weeks = int(seconds / 604800)
-                return f"Hace {weeks} semana{'s' if weeks > 1 else ''}"
+                if weeks == 1:
+                    return t('time_service.week_ago')
+                return t('time_service.weeks_ago', count=weeks)
         except Exception:
-            return "Desconocido"
+            return t('time_service.unknown')

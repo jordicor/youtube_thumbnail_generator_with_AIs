@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from database.db import get_db
 from services.directory_service import DirectoryService
+from i18n.i18n import translate as t
 
 
 router = APIRouter()
@@ -35,7 +36,7 @@ class DirectoryResponse(BaseModel):
     last_scanned_at: Optional[str] = None
     video_count: int = 0
     hidden_count: int = 0
-    time_ago: str = "Nunca"
+    time_ago: str = ""
     created_at: str
 
     class Config:
@@ -97,7 +98,7 @@ async def list_directories():
                 last_scanned_at=str(d['last_scanned_at']) if d.get('last_scanned_at') else None,
                 video_count=visible_count,
                 hidden_count=hidden_count,
-                time_ago=d.get('time_ago', 'Nunca'),
+                time_ago=d.get('time_ago', t('time_service.never')),
                 created_at=str(d['created_at'])
             ))
 
@@ -129,7 +130,7 @@ async def add_directory(data: DirectoryCreate):
         last_scanned_at=str(directory['last_scanned_at']) if directory.get('last_scanned_at') else None,
         video_count=visible_count,
         hidden_count=hidden_count,
-        time_ago=directory.get('time_ago', 'Nunca'),
+        time_ago=directory.get('time_ago', t('time_service.never')),
         created_at=str(directory['created_at'])
     )
 
@@ -142,7 +143,7 @@ async def get_directory(directory_id: int):
         directory = await service.get_directory(directory_id)
 
         if not directory:
-            raise HTTPException(status_code=404, detail="Directory not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.directory_not_found'))
 
         hidden_count = await service.count_hidden_videos(directory_id)
         visible_count = await service.count_visible_videos(directory_id)
@@ -154,7 +155,7 @@ async def get_directory(directory_id: int):
         last_scanned_at=str(directory['last_scanned_at']) if directory.get('last_scanned_at') else None,
         video_count=visible_count,
         hidden_count=hidden_count,
-        time_ago=directory.get('time_ago', 'Nunca'),
+        time_ago=directory.get('time_ago', t('time_service.never')),
         created_at=str(directory['created_at'])
     )
 
@@ -167,7 +168,7 @@ async def update_directory(directory_id: int, data: DirectoryUpdate):
         directory = await service.update_directory(directory_id, data.name)
 
         if not directory:
-            raise HTTPException(status_code=404, detail="Directory not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.directory_not_found'))
 
         hidden_count = await service.count_hidden_videos(directory_id)
         visible_count = await service.count_visible_videos(directory_id)
@@ -179,7 +180,7 @@ async def update_directory(directory_id: int, data: DirectoryUpdate):
         last_scanned_at=str(directory['last_scanned_at']) if directory.get('last_scanned_at') else None,
         video_count=visible_count,
         hidden_count=hidden_count,
-        time_ago=directory.get('time_ago', 'Nunca'),
+        time_ago=directory.get('time_ago', t('time_service.never')),
         created_at=str(directory['created_at'])
     )
 
@@ -195,7 +196,7 @@ async def delete_directory(directory_id: int):
         success = await service.delete_directory(directory_id)
 
     if not success:
-        raise HTTPException(status_code=404, detail="Directory not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.directory_not_found'))
 
     return {"deleted": True, "directory_id": directory_id}
 
@@ -235,7 +236,7 @@ async def get_directory_videos(
         directory = await service.get_directory(directory_id)
 
         if not directory:
-            raise HTTPException(status_code=404, detail="Directory not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.directory_not_found'))
 
         videos = await service.get_videos(directory_id, status=status, skip=skip, limit=limit)
         total = await service.count_videos(directory_id, status=status)
@@ -249,7 +250,7 @@ async def get_directory_videos(
         last_scanned_at=str(directory['last_scanned_at']) if directory.get('last_scanned_at') else None,
         video_count=visible_count,
         hidden_count=hidden_count,
-        time_ago=directory.get('time_ago', 'Nunca'),
+        time_ago=directory.get('time_ago', t('time_service.never')),
         created_at=str(directory['created_at'])
     )
 

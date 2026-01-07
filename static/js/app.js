@@ -47,7 +47,7 @@ async function apiRequest(endpoint, options = {}) {
  * Format duration in seconds to MM:SS
  */
 function formatDuration(seconds) {
-    if (!seconds) return 'N/A';
+    if (!seconds) return t('common.na');
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${String(secs).padStart(2, '0')}`;
@@ -57,9 +57,10 @@ function formatDuration(seconds) {
  * Format date string
  */
 function formatDate(dateString) {
-    if (!dateString) return 'N/A';
+    if (!dateString) return t('common.na');
     const date = new Date(dateString);
-    return date.toLocaleDateString('es-ES', {
+    const locale = getLanguage() === 'es' ? 'es-ES' : 'en-US';
+    return date.toLocaleDateString(locale, {
         year: 'numeric',
         month: 'short',
         day: 'numeric',
@@ -69,20 +70,15 @@ function formatDate(dateString) {
 }
 
 /**
- * Status labels in Spanish
+ * Get localized status label
  */
-const STATUS_LABELS = {
-    'pending': 'Pendiente',
-    'analyzing': 'Analizando...',
-    'analyzed': 'Analizado',
-    'generating': 'Generando...',
-    'completed': 'Completado',
-    'cancelled': 'Cancelado',
-    'error': 'Error'
-};
-
 function getStatusLabel(status) {
-    return STATUS_LABELS[status] || status;
+    // Valid statuses that have translations
+    const validStatuses = ['pending', 'analyzing', 'analyzed', 'generating', 'completed', 'cancelled', 'error'];
+    if (validStatuses.includes(status)) {
+        return t(`status.${status}`);
+    }
+    return status;
 }
 
 /**
@@ -123,19 +119,19 @@ function showToast(message, type = 'info') {
  * @param {string} options.title - Modal title
  * @param {string} options.message - Modal message
  * @param {string} [options.type='info'] - Modal type: 'info', 'warning', 'danger'
- * @param {string} [options.confirmText='Aceptar'] - Confirm button text
- * @param {string} [options.cancelText='Cancelar'] - Cancel button text
+ * @param {string} [options.confirmText] - Confirm button text (default: localized 'Accept')
+ * @param {string} [options.cancelText] - Cancel button text (default: localized 'Cancel')
  * @param {boolean} [options.showCancel=true] - Whether to show cancel button
  * @returns {Promise<boolean>} - Resolves to true if confirmed, false if cancelled
  */
 function showModal(options) {
     return new Promise((resolve) => {
         const {
-            title = 'Confirmar',
+            title = t('modal.confirm_title'),
             message = '',
             type = 'info',
-            confirmText = 'Aceptar',
-            cancelText = 'Cancelar',
+            confirmText = t('common.accept'),
+            cancelText = t('common.cancel'),
             showCancel = true
         } = options;
 
@@ -153,8 +149,8 @@ function showModal(options) {
                     </div>
                     <div class="modal-body"></div>
                     <div class="modal-footer">
-                        <button class="btn btn-cancel">Cancelar</button>
-                        <button class="btn btn-confirm">Aceptar</button>
+                        <button class="btn btn-cancel"></button>
+                        <button class="btn btn-confirm"></button>
                     </div>
                 </div>
             `;

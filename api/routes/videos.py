@@ -14,6 +14,7 @@ from database.db import get_db
 from services.video_service import VideoService
 from services.analysis_service import AnalysisService
 from job_queue.queue import enqueue_analysis
+from i18n.i18n import translate as t
 
 
 router = APIRouter()
@@ -180,7 +181,7 @@ async def get_video(video_id: int):
         video = await service.get_video(video_id)
 
     if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     return VideoResponse(
         id=video['id'],
@@ -209,7 +210,7 @@ async def upload_video(
     if ext not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file extension. Allowed: {', '.join(sorted(allowed_extensions))}"
+            detail=t('api.errors.invalid_file_extension', extensions=', '.join(sorted(allowed_extensions)))
         )
 
     # Read first bytes to validate content type (magic bytes)
@@ -219,7 +220,7 @@ async def upload_video(
     if not is_valid:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file content: {result}. File extension was {ext} but content doesn't match a video format."
+            detail=t('api.errors.invalid_file_content', error=result, ext=ext)
         )
 
     # Reset file position for actual upload
@@ -240,7 +241,7 @@ async def delete_video(video_id: int):
         success = await service.delete_video(video_id)
 
     if not success:
-        raise HTTPException(status_code=404, detail="Video not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     return {"deleted": True, "video_id": video_id}
 
@@ -256,7 +257,7 @@ async def get_video_thumbnail(video_id: int):
         thumbnail_path = await service.get_video_thumbnail(video_id)
 
     if not thumbnail_path or not Path(thumbnail_path).exists():
-        raise HTTPException(status_code=404, detail="Thumbnail not available")
+        raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_not_available'))
 
     return FileResponse(thumbnail_path, media_type="image/jpeg")
 
@@ -269,7 +270,7 @@ async def hide_video(video_id: int):
         success = await service.hide_video(video_id)
 
     if not success:
-        raise HTTPException(status_code=404, detail="Video not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     return {"hidden": True, "video_id": video_id}
 
@@ -282,7 +283,7 @@ async def show_video(video_id: int):
         success = await service.show_video(video_id)
 
     if not success:
-        raise HTTPException(status_code=404, detail="Video not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     return {"hidden": False, "video_id": video_id}
 
@@ -299,7 +300,7 @@ async def reanalyze_video(video_id: int):
         success = await service.reanalyze_video(video_id)
 
         if not success:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         # Update status to analyzing
         analysis_service = AnalysisService(db)
@@ -318,8 +319,8 @@ async def reanalyze_video(video_id: int):
         # Failed to enqueue - revert status
         async with get_db() as db:
             analysis_service = AnalysisService(db)
-            await analysis_service.update_video_status(video_id, 'pending', 'Failed to enqueue analysis job')
-        raise HTTPException(status_code=500, detail="Failed to enqueue analysis job")
+            await analysis_service.update_video_status(video_id, 'pending', t('api.errors.failed_enqueue_analysis'))
+        raise HTTPException(status_code=500, detail=t('api.errors.failed_enqueue_analysis'))
 
     return {"reanalyzing": True, "video_id": video_id, "job_id": job_id}
 

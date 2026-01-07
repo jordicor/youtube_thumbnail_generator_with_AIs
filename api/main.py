@@ -8,9 +8,10 @@ from fastapi import FastAPI, Request, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from contextlib import asynccontextmanager
 from pathlib import Path
+from pydantic import BaseModel
 import sys
 
 # Add project root to path
@@ -23,6 +24,7 @@ from database.db import init_db, close_db
 from config import MAX_REFERENCE_FRAMES, SERVER_HOST, SERVER_PORT, DEBUG_MODE
 from job_queue.client import RedisManager
 from job_queue.queue import close_arq_pool
+from i18n.i18n import translate as t, set_language, get_language, SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE
 
 
 # ============================================================================
@@ -96,6 +98,62 @@ app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
 TEMPLATES_DIR = ROOT_DIR / "templates"
 TEMPLATES_DIR.mkdir(exist_ok=True)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+# Add i18n globals to Jinja2
+templates.env.globals["t"] = t
+templates.env.globals["get_language"] = get_language
+templates.env.globals["SUPPORTED_LANGUAGES"] = SUPPORTED_LANGUAGES
+
+
+# ============================================================================
+# I18N MIDDLEWARE
+# ============================================================================
+
+@app.middleware("http")
+async def i18n_middleware(request: Request, call_next):
+    """Detect language from cookie and set it for the request."""
+    lang_cookie = request.cookies.get("lang")
+    if lang_cookie and lang_cookie in SUPPORTED_LANGUAGES:
+        set_language(lang_cookie)
+    else:
+        set_language(DEFAULT_LANGUAGE)
+
+    response = await call_next(request)
+    return response
+
+
+# ============================================================================
+# I18N ENDPOINT
+# ============================================================================
+
+class LanguageRequest(BaseModel):
+    lang: str
+
+
+@app.post("/api/lang")
+async def set_language_endpoint(request: Request, body: LanguageRequest):
+    """Set language preference."""
+    if body.lang not in SUPPORTED_LANGUAGES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unsupported language: {body.lang}"}
+        )
+
+    response = JSONResponse(content={"lang": body.lang, "success": True})
+    response.set_cookie(
+        key="lang",
+        value=body.lang,
+        max_age=365 * 24 * 60 * 60,  # 1 year
+        httponly=False,
+        samesite="lax"
+    )
+    return response
+
+
+@app.get("/api/lang")
+async def get_language_endpoint(request: Request):
+    """Get current language."""
+    return {"lang": get_language()}
 
 
 # ============================================================================

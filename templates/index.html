@@ -4,10 +4,10 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>Mis Videos</h1>
+    <h1>{{ t('index.heading') }}</h1>
     <div class="actions">
         <button id="scanBtn" class="btn btn-secondary" disabled>
-            Escanear directorio
+            {{ t('index.scan_directory') }}
         </button>
     </div>
 </div>
@@ -15,18 +15,18 @@
 <!-- Directory info bar -->
 <div class="directory-info-bar" id="directoryInfoBar" style="display: none;">
     <div class="info-left">
-        <span class="info-stats" id="directoryStats">0 videos</span>
-        <span class="info-time" id="directoryTime">Ultimo escaneo: Nunca</span>
+        <span class="info-stats" id="directoryStats">0 {{ t('video.count_other') }}</span>
+        <span class="info-time" id="directoryTime">{{ t('index.last_scan', time=t('time.never')) }}</span>
     </div>
     <div class="info-right">
         <div class="filter-container">
-            <label for="statusFilter">Filtro:</label>
+            <label for="statusFilter">{{ t('common.filter') }}:</label>
             <select id="statusFilter" class="status-filter">
-                <option value="all">Todos</option>
-                <option value="pending">Pendientes</option>
-                <option value="analyzed">Analizados</option>
-                <option value="error">Errores</option>
-                <option value="hidden">Ocultos</option>
+                <option value="all">{{ t('index.filters.all') }}</option>
+                <option value="pending">{{ t('index.filters.pending') }}</option>
+                <option value="analyzed">{{ t('index.filters.analyzed') }}</option>
+                <option value="error">{{ t('index.filters.error') }}</option>
+                <option value="hidden">{{ t('index.filters.hidden') }}</option>
             </select>
         </div>
     </div>
@@ -37,16 +37,16 @@
     <div class="selection-bar-left">
         <label class="checkbox-wrapper">
             <input type="checkbox" id="selectAllCheckbox">
-            <span>Seleccionar todos</span>
+            <span>{{ t('selection.select_all') }}</span>
         </label>
-        <span class="selection-count" id="selectionCount">0 seleccionados</span>
+        <span class="selection-count" id="selectionCount">{{ t('selection.selected_count', count=0) }}</span>
     </div>
     <div class="selection-bar-right">
         <button id="analyzeSelectedBtn" class="btn btn-primary" disabled>
-            Analizar Seleccionados
+            {{ t('index.analyze_selected') }}
         </button>
         <button id="hideSelectedBtn" class="btn btn-secondary" disabled>
-            Ocultar Seleccionados
+            {{ t('index.hide_selected') }}
         </button>
     </div>
     <!-- Gmail-style selection banner -->
@@ -59,22 +59,22 @@
 <!-- Video list -->
 <div class="video-grid" id="videoGrid">
     <div class="empty-state">
-        <p>Selecciona un directorio para ver tus videos.</p>
-        <p>Usa el selector de arriba para elegir o añadir un directorio.</p>
+        <p>{{ t('directory.select_to_view') }}</p>
+        <p>{{ t('directory.use_selector') }}</p>
     </div>
 </div>
 
 <!-- Pagination -->
 <div class="pagination-container" id="paginationContainer" style="display: none;">
     <div class="pagination-info">
-        <span id="paginationInfo">Mostrando 1-50 de 100 vídeos</span>
+        <span id="paginationInfo">{{ t('pagination.showing', start=1, end=50, total=100) }}</span>
     </div>
     <div class="pagination-controls">
-        <button class="pagination-btn" id="firstPageBtn" title="Primera página">«</button>
-        <button class="pagination-btn" id="prevPageBtn" title="Página anterior">‹</button>
+        <button class="pagination-btn" id="firstPageBtn" title="{{ t('pagination.first_page') }}">«</button>
+        <button class="pagination-btn" id="prevPageBtn" title="{{ t('pagination.prev_page') }}">‹</button>
         <div class="pagination-numbers" id="paginationNumbers"></div>
-        <button class="pagination-btn" id="nextPageBtn" title="Página siguiente">›</button>
-        <button class="pagination-btn" id="lastPageBtn" title="Última página">»</button>
+        <button class="pagination-btn" id="nextPageBtn" title="{{ t('pagination.next_page') }}">›</button>
+        <button class="pagination-btn" id="lastPageBtn" title="{{ t('pagination.last_page') }}">»</button>
     </div>
 </div>
 
@@ -90,7 +90,7 @@
             <!-- Analysis overlay -->
             <div class="video-analysis-overlay">
                 <div class="overlay-spinner"></div>
-                <span class="overlay-text">Analizando...</span>
+                <span class="overlay-text">{{ t('analysis.analyzing') }}</span>
                 <span class="overlay-step"></span>
             </div>
         </div>
@@ -99,11 +99,11 @@
             <p class="video-meta"></p>
         </div>
         <div class="video-actions">
-            <button class="btn btn-primary btn-analyze">Analizar</button>
-            <button class="btn btn-secondary btn-view">Ver</button>
-            <button class="btn btn-warning btn-reanalyze" title="Eliminar analisis y volver a procesar">Re-analizar</button>
-            <button class="btn btn-secondary btn-hide" title="Ocultar video de la lista">Ocultar</button>
-            <button class="btn btn-success btn-show" title="Volver a mostrar en la lista">Mostrar</button>
+            <button class="btn btn-primary btn-analyze">{{ t('index.card.analyze') }}</button>
+            <button class="btn btn-secondary btn-view">{{ t('index.card.view') }}</button>
+            <button class="btn btn-warning btn-reanalyze" title="{{ t('index.card.reanalyze') }}">{{ t('index.card.reanalyze') }}</button>
+            <button class="btn btn-secondary btn-hide" title="{{ t('index.card.hide') }}">{{ t('index.card.hide') }}</button>
+            <button class="btn btn-success btn-show" title="{{ t('index.card.show') }}">{{ t('index.card.show') }}</button>
         </div>
     </div>
 </template>
@@ -223,7 +223,7 @@
             }
         } catch (error) {
             console.error('Error loading directories:', error);
-            ThumbnailApp.showToast('Error cargando directorios', 'error');
+            ThumbnailApp.showToast(t('errors.load_directories'), 'error');
         }
     }
 
@@ -231,8 +231,8 @@
         if (directories.length === 0) {
             directoryList.innerHTML = `
                 <div class="directory-empty">
-                    <p>No hay directorios guardados.</p>
-                    <p>Añade uno abajo.</p>
+                    <p>${t('directory.no_directories')}</p>
+                    <p>${t('directory.add_below')}</p>
                 </div>
             `;
             return;
@@ -246,10 +246,10 @@
                     <div class="directory-item-path">${escapeHtml(dir.path)}</div>
                 </div>
                 <div class="directory-item-meta">
-                    <div class="directory-item-count">${dir.video_count} videos</div>
+                    <div class="directory-item-count">${t(dir.video_count === 1 ? 'video.count_one' : 'video.count_other', {count: dir.video_count})}</div>
                     <div class="directory-item-time">${dir.time_ago}</div>
                 </div>
-                <button class="directory-item-delete" data-id="${dir.id}" title="Eliminar">×</button>
+                <button class="directory-item-delete" data-id="${dir.id}" title="${t('common.delete')}">×</button>
             </div>
         `).join('');
 
@@ -274,11 +274,11 @@
                 e.stopPropagation();
                 const dirId = parseInt(btn.dataset.id);
                 const confirmed = await ThumbnailApp.showModal({
-                    title: 'Eliminar Directorio',
-                    message: '¿Eliminar este directorio de la lista?<br><br>Los videos permaneceran en la base de datos.',
+                    title: t('directory.delete_title'),
+                    message: t('directory.delete_confirm_short') + '<br><br>' + t('directory.delete_videos_remain'),
                     type: 'warning',
-                    confirmText: 'Eliminar',
-                    cancelText: 'Cancelar'
+                    confirmText: t('common.delete'),
+                    cancelText: t('common.cancel')
                 });
                 if (confirmed) {
                     await deleteDirectory(dirId);
@@ -311,7 +311,7 @@
     function updateDirectoryInfoBar(dir) {
         directoryInfoBar.style.display = 'flex';
         // Stats will be updated by updateFilteredStats after videos load
-        directoryTime.textContent = `Ultimo escaneo: ${dir.time_ago}`;
+        directoryTime.textContent = t('index.last_scan', {time: dir.time_ago});
     }
 
     async function deleteDirectory(dirId) {
@@ -329,17 +329,17 @@
                 currentDirectoryId = null;
                 currentDirectory = null;
                 localStorage.removeItem('activeDirectoryId');
-                directoryName.textContent = 'Seleccionar directorio...';
+                directoryName.textContent = t('header.select_directory');
                 scanBtn.disabled = true;
                 directoryInfoBar.style.display = 'none';
                 showEmptyState();
             }
 
             await loadDirectories();
-            ThumbnailApp.showToast('Directorio eliminado', 'success');
+            ThumbnailApp.showToast(t('directory.deleted'), 'success');
         } catch (error) {
             console.error('Error deleting directory:', error);
-            ThumbnailApp.showToast('Error eliminando directorio', 'error');
+            ThumbnailApp.showToast(t('errors.delete_failed'), 'error');
         }
     }
 
@@ -359,12 +359,12 @@
     async function addDirectory() {
         const path = newDirectoryPath.value.trim();
         if (!path) {
-            ThumbnailApp.showToast('Introduce una ruta de directorio', 'error');
+            ThumbnailApp.showToast(t('errors.enter_directory_path'), 'error');
             return;
         }
 
         addDirectoryBtn.disabled = true;
-        addDirectoryBtn.textContent = 'Añadiendo...';
+        addDirectoryBtn.textContent = t('directory.adding');
 
         try {
             const response = await fetch('/api/directories', {
@@ -390,13 +390,13 @@
             // Auto-scan since it's new
             await scanDirectory();
 
-            ThumbnailApp.showToast('Directorio añadido', 'success');
+            ThumbnailApp.showToast(t('directory.added'), 'success');
         } catch (error) {
             console.error('Error adding directory:', error);
             ThumbnailApp.showToast(error.message, 'error');
         } finally {
             addDirectoryBtn.disabled = false;
-            addDirectoryBtn.textContent = 'Añadir';
+            addDirectoryBtn.textContent = t('header.add_directory');
         }
     }
 
@@ -405,7 +405,7 @@
     // ========================================================================
 
     async function loadVideosForDirectory(directoryId, filter = null, page = 1) {
-        videoGrid.innerHTML = '<div class="loading">Cargando videos...</div>';
+        videoGrid.innerHTML = '<div class="loading">' + t('common.loading') + '</div>';
         showSelectionBar(false);
         hidePagination();
 
@@ -436,35 +436,35 @@
                 if (activeFilter === 'pending') {
                     emptyMessage = `
                         <div class="empty-state">
-                            <p>No hay videos pendientes de analizar.</p>
-                            <p>Cambia el filtro para ver otros videos.</p>
+                            <p>${t('empty_state.no_pending')}</p>
+                            <p>${t('empty_state.change_filter')}</p>
                         </div>
                     `;
                 } else if (activeFilter === 'analyzed') {
                     emptyMessage = `
                         <div class="empty-state">
-                            <p>No hay videos analizados.</p>
-                            <p>Analiza algunos videos o cambia el filtro.</p>
+                            <p>${t('empty_state.no_analyzed')}</p>
+                            <p>${t('empty_state.analyze_hint')}</p>
                         </div>
                     `;
                 } else if (activeFilter === 'error') {
                     emptyMessage = `
                         <div class="empty-state">
-                            <p>No hay videos con errores.</p>
+                            <p>${t('empty_state.no_errors')}</p>
                         </div>
                     `;
                 } else if (activeFilter === 'hidden') {
                     emptyMessage = `
                         <div class="empty-state">
-                            <p>No hay videos ocultos.</p>
-                            <p>Los videos que ocultes apareceran aqui.</p>
+                            <p>${t('empty_state.no_hidden')}</p>
+                            <p>${t('empty_state.hidden_hint')}</p>
                         </div>
                     `;
                 } else {
                     emptyMessage = `
                         <div class="empty-state">
-                            <p>No hay videos en este directorio.</p>
-                            <p>Haz clic en "Escanear directorio" para buscar videos.</p>
+                            <p>${t('empty_state.no_videos')}</p>
+                            <p>${t('empty_state.scan_hint')}</p>
                         </div>
                     `;
                 }
@@ -506,7 +506,7 @@
             }
         } catch (error) {
             console.error('Error loading videos:', error);
-            videoGrid.innerHTML = `<div class="error">Error cargando videos: ${escapeHtml(error.message)}</div>`;
+            videoGrid.innerHTML = `<div class="error">${t('errors.load_videos')}: ${escapeHtml(error.message)}</div>`;
             showSelectionBar(false);
         }
     }
@@ -514,8 +514,8 @@
     function showEmptyState() {
         videoGrid.innerHTML = `
             <div class="empty-state">
-                <p>Selecciona un directorio para ver tus videos.</p>
-                <p>Usa el selector de arriba para elegir o añadir un directorio.</p>
+                <p>${t('directory.select_to_view')}</p>
+                <p>${t('directory.use_selector')}</p>
             </div>
         `;
     }
@@ -532,8 +532,8 @@
 
         const duration = video.duration_seconds
             ? `${Math.floor(video.duration_seconds / 60)}:${String(Math.floor(video.duration_seconds % 60)).padStart(2, '0')}`
-            : 'N/A';
-        card.querySelector('.video-meta').textContent = `Duracion: ${duration}`;
+            : t('common.na');
+        card.querySelector('.video-meta').textContent = t('video.duration') + ': ' + duration;
 
         // Thumbnail
         const img = card.querySelector('img');
@@ -584,7 +584,7 @@
                 window.location.href = `/video/${video.id}`;
             });
         } else if (video.status === 'analyzing') {
-            analyzeBtn.textContent = 'Analizando...';
+            analyzeBtn.textContent = t('status.analyzing');
             analyzeBtn.disabled = true;
             viewBtn.classList.add('hidden');
 
@@ -608,16 +608,16 @@
 
     function getStatusLabel(status) {
         const labels = {
-            'pending': 'Pendiente',
-            'analyzing': 'Analizando...',
-            'analyzing_scenes': 'Detectando escenas...',
-            'analyzing_faces': 'Analizando caras...',
-            'clustering': 'Agrupando caras...',
-            'transcribing': 'Transcribiendo audio...',
-            'analyzed': 'Analizado',
-            'generating': 'Generando...',
-            'completed': 'Completado',
-            'error': 'Error'
+            'pending': t('status.pending'),
+            'analyzing': t('status.analyzing'),
+            'analyzing_scenes': t('analysis.detecting_scenes'),
+            'analyzing_faces': t('analysis.analyzing_faces'),
+            'clustering': t('analysis.clustering'),
+            'transcribing': t('analysis.transcribing'),
+            'analyzed': t('status.analyzed'),
+            'generating': t('status.generating'),
+            'completed': t('status.completed'),
+            'error': t('status.error')
         };
         return labels[status] || status;
     }
@@ -646,18 +646,18 @@
 
         if (filter === 'all' || !filter) {
             // "Todos" view: show total videos and hidden count if any
-            statsText = `${totalCount} video${totalCount !== 1 ? 's' : ''}`;
+            statsText = t(totalCount === 1 ? 'video.count_one' : 'video.count_other', {count: totalCount});
             if (hiddenCount > 0) {
-                statsText += ` (${hiddenCount} oculto${hiddenCount !== 1 ? 's' : ''})`;
+                statsText += ' (' + t(hiddenCount === 1 ? 'video.hidden_one' : 'video.hidden_other', {count: hiddenCount}) + ')';
             }
         } else if (filter === 'pending') {
-            statsText = `Pendientes: ${filteredCount}`;
+            statsText = t('index.filters.pending') + ': ' + filteredCount;
         } else if (filter === 'analyzed') {
-            statsText = `Analizados: ${filteredCount}`;
+            statsText = t('index.filters.analyzed') + ': ' + filteredCount;
         } else if (filter === 'error') {
-            statsText = `Errores: ${filteredCount}`;
+            statsText = t('index.filters.error') + ': ' + filteredCount;
         } else if (filter === 'hidden') {
-            statsText = `Ocultos: ${filteredCount}`;
+            statsText = t('index.filters.hidden') + ': ' + filteredCount;
         }
 
         directoryStats.textContent = statsText;
@@ -703,7 +703,7 @@
         const endItem = Math.min(currentPage * PAGE_SIZE, totalFilteredVideos);
 
         // Update info text
-        paginationInfo.textContent = `Mostrando ${startItem}-${endItem} de ${totalFilteredVideos} vídeos`;
+        paginationInfo.textContent = t('pagination.showing', {start: startItem, end: endItem, total: totalFilteredVideos});
 
         // Update button states
         firstPageBtn.disabled = currentPage === 1;
@@ -771,12 +771,12 @@
 
     async function scanDirectory() {
         if (!currentDirectoryId) {
-            ThumbnailApp.showToast('Selecciona un directorio primero', 'error');
+            ThumbnailApp.showToast(t('directory.select_first'), 'error');
             return;
         }
 
         scanBtn.disabled = true;
-        scanBtn.textContent = 'Escaneando...';
+        scanBtn.textContent = t('directory.scanning');
 
         try {
             const response = await fetch(`/api/directories/${currentDirectoryId}/scan`, {
@@ -791,7 +791,7 @@
             const data = await response.json();
 
             ThumbnailApp.showToast(
-                `Escaneo completado: ${data.new} nuevos, ${data.existing} existentes`,
+                t('directory.scan_complete_details', {new: data.new, existing: data.existing}),
                 'success'
             );
 
@@ -803,10 +803,10 @@
 
         } catch (error) {
             console.error('Error scanning:', error);
-            ThumbnailApp.showToast('Error escaneando: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('directory.scan_error') + ': ' + error.message, 'error');
         } finally {
             scanBtn.disabled = false;
-            scanBtn.textContent = 'Escanear directorio';
+            scanBtn.textContent = t('index.scan_directory');
         }
     }
 
@@ -818,12 +818,12 @@
     async function startAnalysis(videoId) {
         // Check if already analyzing or queued
         if (activeAnalyses.has(videoId)) {
-            ThumbnailApp.showToast('Este video ya se esta analizando', 'info');
+            ThumbnailApp.showToast(t('errors.already_analyzing'), 'info');
             return;
         }
 
         if (analysisQueue.some(item => item.videoId === videoId)) {
-            ThumbnailApp.showToast('Este video ya esta en la cola', 'info');
+            ThumbnailApp.showToast(t('errors.already_queued'), 'info');
             return;
         }
 
@@ -834,7 +834,7 @@
             // Add to queue
             analysisQueue.push({ videoId });
             updateVideoCardOverlay(videoId, 'queued');
-            ThumbnailApp.showToast('Video añadido a la cola de analisis', 'info');
+            ThumbnailApp.showToast(t('analysis.added_to_queue'), 'info');
         }
     }
 
@@ -868,21 +868,21 @@
             case 'analyzing':
                 card.classList.add('analyzing');
                 overlay.classList.add('active');
-                if (overlayText) overlayText.textContent = 'Analizando...';
+                if (overlayText) overlayText.textContent = t('analysis.analyzing');
                 if (overlayStep) overlayStep.textContent = stepText;
                 break;
 
             case 'queued':
                 card.classList.add('queued');
                 overlay.classList.add('active', 'queued');
-                if (overlayText) overlayText.textContent = 'En cola...';
-                if (overlayStep) overlayStep.textContent = `Posición: ${getQueuePosition(videoId)}`;
+                if (overlayText) overlayText.textContent = t('analysis.queued');
+                if (overlayStep) overlayStep.textContent = t('analysis.queue_position', {position: getQueuePosition(videoId)});
                 break;
 
             case 'progress':
                 card.classList.add('analyzing');
                 overlay.classList.add('active');
-                if (overlayText) overlayText.textContent = 'Analizando...';
+                if (overlayText) overlayText.textContent = t('analysis.analyzing');
                 if (overlayStep) overlayStep.textContent = stepText;
                 break;
 
@@ -896,7 +896,7 @@
         // Also update the status badge
         const statusEl = card.querySelector('.video-status');
         if (statusEl && state === 'analyzing') {
-            statusEl.textContent = 'Analizando...';
+            statusEl.textContent = t('status.analyzing');
             statusEl.className = 'video-status status-analyzing';
         }
     }
@@ -914,7 +914,7 @@
             if (card) {
                 const overlayStep = card.querySelector('.overlay-step');
                 if (overlayStep) {
-                    overlayStep.textContent = `Posición: ${index + 1}`;
+                    overlayStep.textContent = t('analysis.queue_position', {position: index + 1});
                 }
             }
         });
@@ -954,7 +954,7 @@
         } catch (error) {
             activeAnalyses.delete(videoId);
             updateVideoCardOverlay(videoId, 'error');
-            ThumbnailApp.showToast('Error iniciando analisis: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + error.message, 'error');
             // Try to refresh just this card to show error state
             await refreshSingleVideo(videoId);
             // Process next in queue
@@ -1002,7 +1002,7 @@
                     updateVideoCardOverlay(videoId, 'complete');
                     refreshSingleVideo(videoId);
 
-                    ThumbnailApp.showToast('Analisis completado', 'success');
+                    ThumbnailApp.showToast(t('analysis.complete'), 'success');
 
                     // Process next in queue
                     processAnalysisQueue();
@@ -1015,7 +1015,7 @@
                     updateVideoCardOverlay(videoId, 'error');
                     refreshSingleVideo(videoId);
 
-                    ThumbnailApp.showToast('Error: ' + (data.error_message || data.error), 'error');
+                    ThumbnailApp.showToast(t('status.error') + ': ' + (data.error_message || data.error), 'error');
 
                     // Process next in queue
                     processAnalysisQueue();
@@ -1048,7 +1048,7 @@
                     await refreshSingleVideo(videoId);
 
                     if (data.status !== 'error') {
-                        ThumbnailApp.showToast('Analisis completado', 'success');
+                        ThumbnailApp.showToast(t('analysis.complete'), 'success');
                     }
 
                     // Process next in queue
@@ -1068,11 +1068,11 @@
 
     async function hideVideo(videoId) {
         const confirmed = await ThumbnailApp.showModal({
-            title: 'Ocultar Video',
-            message: '¿Quieres ocultar este video?<br><br>No aparecera en la lista principal, pero podras verlo en el filtro "Ocultos".',
+            title: t('video_hide.title'),
+            message: t('video_hide.message'),
             type: 'warning',
-            confirmText: 'Ocultar',
-            cancelText: 'Cancelar'
+            confirmText: t('index.card.hide'),
+            cancelText: t('common.cancel')
         });
 
         if (!confirmed) return;
@@ -1086,14 +1086,14 @@
                 throw new Error('Error hiding video');
             }
 
-            ThumbnailApp.showToast('Video ocultado', 'success');
+            ThumbnailApp.showToast(t('video_hide.success'), 'success');
 
             if (currentDirectoryId) {
                 await loadVideosForDirectory(currentDirectoryId);
                 await loadDirectories();
             }
         } catch (error) {
-            ThumbnailApp.showToast('Error ocultando video: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('errors.hide_failed') + ': ' + error.message, 'error');
         }
     }
 
@@ -1107,24 +1107,24 @@
                 throw new Error('Error showing video');
             }
 
-            ThumbnailApp.showToast('Video restaurado', 'success');
+            ThumbnailApp.showToast(t('video_hide.restored'), 'success');
 
             if (currentDirectoryId) {
                 await loadVideosForDirectory(currentDirectoryId);
                 await loadDirectories();
             }
         } catch (error) {
-            ThumbnailApp.showToast('Error restaurando video: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('errors.show_failed') + ': ' + error.message, 'error');
         }
     }
 
     async function reanalyzeVideo(videoId) {
         const confirmed = await ThumbnailApp.showModal({
-            title: 'Re-analizar Video',
-            message: '¿Quieres volver a analizar este video?<br><br><strong>Se eliminaran:</strong> clusters detectados, frames extraidos, trabajos de generacion y thumbnails.<br><br><strong>No se eliminara:</strong> el archivo de video original.',
+            title: t('analysis.reanalyze_title'),
+            message: t('analysis.reanalyze_message'),
             type: 'danger',
-            confirmText: 'Re-analizar',
-            cancelText: 'Cancelar'
+            confirmText: t('index.card.reanalyze'),
+            cancelText: t('common.cancel')
         });
 
         if (!confirmed) return;
@@ -1142,9 +1142,9 @@
             await refreshSingleVideo(videoId);
             await startAnalysis(videoId);
 
-            ThumbnailApp.showToast('Re-analisis iniciado', 'success');
+            ThumbnailApp.showToast(t('analysis.reanalyze_started'), 'success');
         } catch (error) {
-            ThumbnailApp.showToast('Error re-analizando video: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + error.message, 'error');
         }
     }
 
@@ -1217,11 +1217,11 @@
 
         // Update count text
         if (allVideosSelected) {
-            selectionCount.textContent = `${totalFilteredVideos} seleccionado${totalFilteredVideos !== 1 ? 's' : ''} (todos)`;
+            selectionCount.textContent = t('selection.selected_all', {count: totalFilteredVideos});
         } else {
             selectionCount.textContent = count === 0
-                ? '0 seleccionados'
-                : `${count} seleccionado${count !== 1 ? 's' : ''}`;
+                ? t('selection.selected_count', {count: 0})
+                : t('selection.selected_count', {count: count});
         }
         selectionCount.classList.toggle('has-selection', effectiveCount > 0);
 
@@ -1248,14 +1248,14 @@
         if (allVideosSelected) {
             // Show "all selected" state
             selectionBanner.classList.add('visible');
-            selectionBannerText.textContent = `Todos los ${totalFilteredVideos} vídeos están seleccionados.`;
-            selectionBannerBtn.textContent = 'Limpiar selección';
+            selectionBannerText.textContent = t('selection.all_selected', {count: totalFilteredVideos});
+            selectionBannerBtn.textContent = t('selection.clear_selection');
         } else if (pageIsFullySelected && hasMorePages) {
             // Show "select all" option
             selectionBanner.classList.add('visible');
             const pageCount = Math.min(PAGE_SIZE, totalCheckboxes);
-            selectionBannerText.textContent = `Los ${pageCount} vídeos de esta página están seleccionados.`;
-            selectionBannerBtn.textContent = `Seleccionar los ${totalFilteredVideos} vídeos`;
+            selectionBannerText.textContent = t('selection.page_selected', {count: pageCount});
+            selectionBannerBtn.textContent = t('selection.select_all_videos', {count: totalFilteredVideos});
         } else {
             // Hide banner
             selectionBanner.classList.remove('visible');
@@ -1304,7 +1304,7 @@
         if (allVideosSelected) {
             selectedIds = await getAllFilteredVideoIds();
             if (selectedIds.length === 0) {
-                ThumbnailApp.showToast('No hay videos para analizar', 'info');
+                ThumbnailApp.showToast(t('errors.no_videos_to_analyze'), 'info');
                 return;
             }
         } else {
@@ -1336,7 +1336,7 @@
                 });
             } catch (error) {
                 console.error('Error fetching video statuses:', error);
-                ThumbnailApp.showToast('Error obteniendo estado de videos', 'error');
+                ThumbnailApp.showToast(t('errors.load_videos'), 'error');
                 return;
             }
         } else {
@@ -1354,18 +1354,18 @@
 
         // If nothing to analyze
         if (pendingIds.length === 0 && analyzedIds.length === 0) {
-            ThumbnailApp.showToast('No hay videos para analizar en la seleccion', 'info');
+            ThumbnailApp.showToast(t('video_analyze.no_videos_in_selection'), 'info');
             return;
         }
 
         // If there are already analyzed videos
         if (analyzedIds.length > 0) {
             const confirmed = await ThumbnailApp.showModal({
-                title: 'Videos ya analizados',
-                message: `<strong>${analyzedIds.length}</strong> video${analyzedIds.length !== 1 ? 's' : ''} de los seleccionados ya ${analyzedIds.length !== 1 ? 'han' : 'ha'} sido analizado${analyzedIds.length !== 1 ? 's' : ''}.<br><br>¿Quieres volver a analizarlos?<br><br><small>Se eliminaran los datos del analisis anterior.</small>`,
+                title: t('video_analyze.already_analyzed_title'),
+                message: t('video_analyze.already_analyzed_message', {count: analyzedIds.length}),
                 type: 'warning',
-                confirmText: 'Si, re-analizar todos',
-                cancelText: 'Cancelar'
+                confirmText: t('video_analyze.reanalyze_all'),
+                cancelText: t('common.cancel')
             });
 
             if (!confirmed) return;
@@ -1385,11 +1385,11 @@
         } else {
             // Only pending videos - show normal modal
             const confirmed = await ThumbnailApp.showModal({
-                title: 'Analizar Videos',
-                message: `¿Quieres analizar <strong>${pendingIds.length}</strong> video${pendingIds.length !== 1 ? 's' : ''}?<br><br>Este proceso puede tardar varios minutos.`,
+                title: t('video_analyze.title'),
+                message: t('video_analyze.message', {count: pendingIds.length}),
                 type: 'info',
-                confirmText: 'Analizar',
-                cancelText: 'Cancelar'
+                confirmText: t('analysis.start'),
+                cancelText: t('common.cancel')
             });
 
             if (!confirmed) return;
@@ -1405,7 +1405,7 @@
         }
 
         const totalStarted = pendingIds.length + analyzedIds.length;
-        ThumbnailApp.showToast(`Analisis iniciado para ${totalStarted} video${totalStarted !== 1 ? 's' : ''}`, 'success');
+        ThumbnailApp.showToast(t('analysis.started_for_count', {count: totalStarted}), 'success');
 
         // Clear selection (no need to reload the grid - overlays show progress)
         clearSelection();
@@ -1418,7 +1418,7 @@
         if (allVideosSelected) {
             selectedIds = await getAllFilteredVideoIds();
             if (selectedIds.length === 0) {
-                ThumbnailApp.showToast('No hay videos para ocultar', 'info');
+                ThumbnailApp.showToast(t('errors.no_videos_to_hide'), 'info');
                 return;
             }
         } else {
@@ -1427,11 +1427,11 @@
         }
 
         const confirmed = await ThumbnailApp.showModal({
-            title: 'Ocultar Videos',
-            message: `¿Quieres ocultar <strong>${selectedIds.length}</strong> video${selectedIds.length !== 1 ? 's' : ''}?<br><br>No apareceran en la lista principal, pero podras verlos en el filtro "Ocultos".`,
+            title: t('video_hide.bulk_title'),
+            message: t('video_hide.bulk_message', {count: selectedIds.length}),
             type: 'warning',
-            confirmText: 'Ocultar',
-            cancelText: 'Cancelar'
+            confirmText: t('index.card.hide'),
+            cancelText: t('common.cancel')
         });
 
         if (!confirmed) return;
@@ -1448,7 +1448,7 @@
             }
 
             const data = await response.json();
-            ThumbnailApp.showToast(`${data.count} video${data.count !== 1 ? 's' : ''} ocultado${data.count !== 1 ? 's' : ''}`, 'success');
+            ThumbnailApp.showToast(t('video_hide.bulk_success', {count: data.count}), 'success');
 
             // Clear selection and reload from page 1 (list has changed)
             clearSelection();
@@ -1458,7 +1458,7 @@
                 await loadDirectories();
             }
         } catch (error) {
-            ThumbnailApp.showToast('Error ocultando videos: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('errors.hide_failed') + ': ' + error.message, 'error');
         }
     }
 

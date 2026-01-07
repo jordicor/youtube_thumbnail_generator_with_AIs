@@ -13,6 +13,7 @@ from typing import Optional
 from datetime import datetime
 
 from database.db import get_db
+from i18n.i18n import translate as t
 
 
 router = APIRouter()
@@ -29,11 +30,11 @@ async def get_thumbnail(thumbnail_id: int):
             row = await cursor.fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_not_found'))
 
     filepath = row[0]
     if not Path(filepath).exists():
-        raise HTTPException(status_code=404, detail="Thumbnail file not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_file_not_found'))
 
     return FileResponse(filepath, media_type="image/png")
 
@@ -54,7 +55,7 @@ async def get_thumbnail_info(thumbnail_id: int):
             row = await cursor.fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_not_found'))
 
     columns = [description[0] for description in cursor.description]
     thumbnail = dict(zip(columns, row))
@@ -74,7 +75,7 @@ async def delete_thumbnail(thumbnail_id: int):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_not_found'))
 
         filepath = Path(row[0])
 
@@ -129,7 +130,7 @@ async def download_all_thumbnails(job_id: int):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Job not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.job_not_found'))
 
         video_filename = row[1]
 
@@ -144,7 +145,7 @@ async def download_all_thumbnails(job_id: int):
             rows = await cursor.fetchall()
 
     if not rows:
-        raise HTTPException(status_code=404, detail="No thumbnails found for this job")
+        raise HTTPException(status_code=404, detail=t('api.errors.no_thumbnails_job'))
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
@@ -190,7 +191,7 @@ async def download_all_video_thumbnails(video_id: int):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         video_filename = row[0]
 
@@ -206,7 +207,7 @@ async def download_all_video_thumbnails(video_id: int):
             rows = await cursor.fetchall()
 
     if not rows:
-        raise HTTPException(status_code=404, detail="No thumbnails found for this video")
+        raise HTTPException(status_code=404, detail=t('api.errors.no_thumbnails_video'))
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()

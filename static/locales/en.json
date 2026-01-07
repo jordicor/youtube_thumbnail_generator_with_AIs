@@ -1,0 +1,824 @@
+{
+  "common": {
+    "app_name": "YouTube Thumbnail Generator",
+    "app_title": "Thumbnail Generator",
+    "loading": "Loading...",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "accept": "Accept",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "close": "Close",
+    "back": "Back",
+    "next": "Next",
+    "previous": "Previous",
+    "search": "Search",
+    "filter": "Filter",
+    "select": "Select",
+    "select_all": "Select all",
+    "deselect_all": "Deselect all",
+    "yes": "Yes",
+    "no": "No",
+    "or": "or",
+    "and": "and",
+    "none": "None",
+    "all": "All",
+    "na": "N/A",
+    "error": "Error",
+    "success": "Success",
+    "warning": "Warning",
+    "unknown": "Unknown",
+    "info": "Info",
+    "info_tooltip": "Information"
+  },
+
+  "nav": {
+    "videos": "Videos",
+    "api_docs": "API Docs"
+  },
+
+  "header": {
+    "select_directory": "Select directory...",
+    "directory_placeholder": "Directory path...",
+    "add_directory": "Add"
+  },
+
+  "footer": {
+    "version": "YouTube Thumbnail Generator v2.0 - FastAPI Backend"
+  },
+
+  "language": {
+    "es": "ES",
+    "en": "EN",
+    "spanish": "Spanish",
+    "english": "English"
+  },
+
+  "status": {
+    "pending": "Pending",
+    "analyzing": "Analyzing...",
+    "analyzed": "Analyzed",
+    "generating": "Generating...",
+    "completed": "Completed",
+    "cancelled": "Cancelled",
+    "error": "Error"
+  },
+
+  "time": {
+    "never": "Never",
+    "just_now": "Just now",
+    "seconds_ago": "{count} seconds ago",
+    "minute_ago": "1 minute ago",
+    "minutes_ago": "{count} minutes ago",
+    "hour_ago": "1 hour ago",
+    "hours_ago": "{count} hours ago",
+    "day_ago": "1 day ago",
+    "days_ago": "{count} days ago"
+  },
+
+  "toast": {
+    "error_generic": "An error occurred",
+    "success_generic": "Operation completed",
+    "loading": "Loading..."
+  },
+
+  "modal": {
+    "confirm_title": "Confirm",
+    "confirm_text": "Are you sure?",
+    "confirm_button": "Confirm",
+    "cancel_button": "Cancel"
+  },
+
+  "video": {
+    "count_one": "{count} video",
+    "count_other": "{count} videos",
+    "hidden_one": "{count} hidden",
+    "hidden_other": "{count} hidden",
+    "duration": "Duration",
+    "size": "Size",
+    "resolution": "Resolution",
+    "status": "Status",
+    "created": "Created",
+    "updated": "Updated"
+  },
+
+  "index": {
+    "title": "Videos - Thumbnail Generator",
+    "heading": "My Videos",
+    "scan_directory": "Scan directory",
+    "last_scan": "Last scan: {time}",
+    "filters": {
+      "all": "All",
+      "pending": "Pending",
+      "analyzed": "Analyzed",
+      "error": "Errors",
+      "hidden": "Hidden"
+    },
+    "selected_one": "{count} selected",
+    "selected_other": "{count} selected",
+    "analyze_selected": "Analyze Selected",
+    "hide_selected": "Hide Selected",
+    "empty_state": {
+      "no_videos": "No videos in this directory",
+      "no_directory": "Select a directory to see videos",
+      "no_results": "No videos found with current filters"
+    },
+    "card": {
+      "analyze": "Analyze",
+      "view": "View",
+      "reanalyze": "Re-analyze",
+      "hide": "Hide",
+      "show": "Show"
+    }
+  },
+
+  "video_detail": {
+    "title": "Video Detail",
+    "back_to_list": "Back to list",
+    "info": {
+      "title": "Video Information",
+      "filename": "File",
+      "duration": "Duration",
+      "resolution": "Resolution",
+      "scenes": "Scenes",
+      "faces": "Detected faces"
+    },
+    "clusters": {
+      "title": "Detected People",
+      "person": "Person {index}",
+      "scene": "Scene {index}",
+      "person_scene": "Person {person} - Scene {scene}",
+      "frames_one": "frame",
+      "frames_other": "frames",
+      "references_one": "{count} reference",
+      "references_other": "{count} references",
+      "manage_frames": "Manage frames",
+      "delete_cluster": "Delete cluster",
+      "merge_clusters": "Merge clusters",
+      "create_cluster": "Create cluster",
+      "view_as": "View as",
+      "by_person": "By Person",
+      "by_person_scene": "By Person + Scene"
+    }
+  },
+
+  "cluster_frames": {
+    "title": "Manage Frames - Person {index}",
+    "back_to_clusters": "Back to clusters",
+    "info": {
+      "title": "Cluster Information",
+      "total_frames": "Total frames",
+      "references": "AI References",
+      "max_references": "Maximum: {max}"
+    },
+    "references": {
+      "title": "AI References",
+      "description": "Select the frames that best represent this person",
+      "add": "Add reference",
+      "remove": "Remove reference",
+      "clear_all": "Clear all"
+    },
+    "library": {
+      "title": "Frame Library",
+      "select_all": "Select all",
+      "deselect_all": "Deselect all",
+      "delete_selected": "Delete selected"
+    }
+  },
+
+  "create_cluster": {
+    "title": "Create Cluster - Video {id}",
+    "heading": "Create New Cluster",
+    "back": "Back",
+    "form": {
+      "name": "Cluster name",
+      "name_placeholder": "E.g.: Person 4",
+      "description": "Description (optional)",
+      "submit": "Create cluster"
+    },
+    "select_frames": {
+      "title": "Select Frames",
+      "description": "Choose the frames that belong to this person"
+    }
+  },
+
+  "generation": {
+    "title": "Generate Thumbnails",
+    "config": {
+      "title": "AI Configuration",
+      "provider": "Provider",
+      "model": "Model",
+      "prompt_provider": "Prompt provider",
+      "image_provider": "Image provider",
+      "references_support": "Supports references",
+      "max_references": "Max. references",
+      "default": "Default"
+    },
+    "prompts": {
+      "title": "Prompts",
+      "generate": "Generate prompts",
+      "generating": "Generating...",
+      "custom": "Custom prompt",
+      "custom_placeholder": "Write your prompt here...",
+      "select_one": "Select at least one prompt"
+    },
+    "start": "Generate Thumbnails",
+    "generating": "Generating thumbnails...",
+    "complete": "Generation complete",
+    "error": "Generation error",
+    "progress": {
+      "preparing": "Preparing...",
+      "processing": "Processing prompt {current} of {total}",
+      "saving": "Saving results..."
+    }
+  },
+
+  "results": {
+    "title": "Results - Job {id}",
+    "back": "Back to video",
+    "loading": "Loading results...",
+    "no_results": "No results available",
+    "thumbnails": {
+      "title": "Generated Thumbnails",
+      "download": "Download",
+      "download_all": "Download all",
+      "open": "Open in new tab",
+      "delete": "Delete"
+    }
+  },
+
+  "titles": {
+    "section_title": "Titles",
+    "generate": "Generate titles",
+    "generating": "Generating titles...",
+    "style": "Style",
+    "custom_prompt": "Custom prompt",
+    "custom_prompt_placeholder": "Additional instructions for generating titles...",
+    "count": "Count",
+    "results": "Generated titles",
+    "copy": "Copy",
+    "copied": "Copied!",
+    "no_results": "No titles generated",
+    "select_for_description": "Use for description",
+    "styles": {
+      "viral": "Viral",
+      "professional": "Professional",
+      "curiosity": "Curiosity",
+      "tutorial": "Tutorial",
+      "storytelling": "Storytelling"
+    }
+  },
+
+  "descriptions": {
+    "section_title": "Descriptions",
+    "generate": "Generate description",
+    "generating": "Generating description...",
+    "style": "Style",
+    "custom_prompt": "Custom prompt",
+    "title_context": "Selected title",
+    "no_title": "No title selected",
+    "results": "Generated description",
+    "copy": "Copy",
+    "copied": "Copied!",
+    "no_results": "No description generated",
+    "styles": {
+      "seo": "SEO Optimized",
+      "engaging": "Engaging",
+      "minimal": "Minimal",
+      "detailed": "Detailed"
+    }
+  },
+
+  "ai_config": {
+    "gran_sabio": {
+      "status": "Gran Sabio Status",
+      "connected": "Connected",
+      "disconnected": "Disconnected",
+      "connecting": "Connecting...",
+      "error": "Connection error"
+    },
+    "loading_models": "Loading models...",
+    "no_models": "No models available"
+  },
+
+  "errors": {
+    "generic": "An error occurred",
+    "network": "Connection error",
+    "not_found": "Not found",
+    "unauthorized": "Unauthorized",
+    "server": "Server error",
+    "validation": "Validation error",
+    "load_videos": "Error loading videos",
+    "load_video": "Error loading video",
+    "load_clusters": "Error loading clusters",
+    "load_directories": "Error loading directories",
+    "load_frames": "Error loading frames",
+    "load_thumbnails": "Error loading thumbnails",
+    "load_info": "Error loading information",
+    "load_transcription": "Error loading transcription",
+    "analysis_failed": "Analysis failed",
+    "generation_failed": "Generation failed",
+    "scan_failed": "Scan failed",
+    "delete_failed": "Delete failed",
+    "save_failed": "Save failed",
+    "hide_failed": "Error hiding video",
+    "show_failed": "Error restoring video",
+    "add_directory": "Error adding directory",
+    "enter_directory_path": "Enter a directory path",
+    "no_videos_to_analyze": "No videos to analyze",
+    "no_videos_to_hide": "No videos to hide",
+    "already_analyzing": "This video is already being analyzed",
+    "already_queued": "This video is already in queue",
+    "select_cluster": "Select a cluster above using the star",
+    "select_at_least_one_frame": "Select at least one frame",
+    "max_references_reached": "Maximum references reached",
+    "frames_not_found": "Selected frames not found",
+    "custom_prompt_required": "Custom prompt is required",
+    "delete_cluster": "Error deleting cluster",
+    "merge_clusters": "Error merging clusters",
+    "generate_titles": "Error generating titles"
+  },
+
+  "pagination": {
+    "showing": "Showing {start}-{end} of {total} videos",
+    "first_page": "First page",
+    "prev_page": "Previous page",
+    "next_page": "Next page",
+    "last_page": "Last page"
+  },
+
+  "analysis": {
+    "start": "Analyze",
+    "analyzing": "Analyzing...",
+    "detecting_scenes": "Detecting scenes...",
+    "analyzing_faces": "Analyzing faces...",
+    "clustering": "Clustering faces...",
+    "transcribing": "Transcribing audio...",
+    "complete": "Analysis complete",
+    "queued": "Queued...",
+    "queue_position": "Position: {position}",
+    "added_to_queue": "Video added to analysis queue",
+    "started_for_count": "Analysis started for {count} video(s)",
+    "reanalyze_title": "Re-analyze Video",
+    "reanalyze_message": "Do you want to re-analyze this video?<br><br><strong>Will be deleted:</strong> detected clusters, extracted frames, generation jobs and thumbnails.<br><br><strong>Will NOT be deleted:</strong> the original video file.",
+    "reanalyze_started": "Re-analysis started"
+  },
+
+  "directory": {
+    "add_title": "Add Directory",
+    "delete_title": "Delete Directory",
+    "delete_confirm": "Are you sure you want to delete this directory?",
+    "delete_warning": "All associated videos will be removed from the database.",
+    "delete_confirm_short": "Delete this directory from the list?",
+    "delete_videos_remain": "Videos will remain in the database.",
+    "path_label": "Path",
+    "scan_now": "Scan now",
+    "scanning": "Scanning...",
+    "scan_complete": "Scan complete",
+    "scan_complete_details": "Scan complete: {new} new, {existing} existing",
+    "scan_error": "Scan error",
+    "select_first": "Select a directory first",
+    "added": "Directory added",
+    "deleted": "Directory deleted",
+    "adding": "Adding...",
+    "no_directories": "No directories saved.",
+    "add_below": "Add one below.",
+    "select_to_view": "Select a directory to view your videos.",
+    "use_selector": "Use the selector above to choose or add a directory."
+  },
+
+  "video_hide": {
+    "title": "Hide Video",
+    "message": "Do you want to hide this video?<br><br>It won't appear in the main list, but you can see it in the \"Hidden\" filter.",
+    "success": "Video hidden",
+    "restored": "Video restored",
+    "bulk_title": "Hide Videos",
+    "bulk_message": "Do you want to hide <strong>{count}</strong> video(s)?<br><br>They won't appear in the main list, but you can see them in the \"Hidden\" filter.",
+    "bulk_success": "{count} video(s) hidden"
+  },
+
+  "video_analyze": {
+    "title": "Analyze Videos",
+    "message": "Do you want to analyze <strong>{count}</strong> video(s)?<br><br>This process may take several minutes.",
+    "already_analyzed_title": "Already analyzed videos",
+    "already_analyzed_message": "<strong>{count}</strong> selected video(s) have already been analyzed.<br><br>Do you want to re-analyze them?<br><br><small>Previous analysis data will be deleted.</small>",
+    "reanalyze_all": "Yes, re-analyze all",
+    "no_videos_in_selection": "No videos to analyze in selection"
+  },
+
+  "selection": {
+    "select_all": "Select all",
+    "selected_count": "{count} selected",
+    "selected_all": "{count} selected (all)",
+    "all_selected": "All {count} videos are selected.",
+    "page_selected": "All {count} videos on this page are selected.",
+    "select_all_videos": "Select all {count} videos",
+    "clear_selection": "Clear selection"
+  },
+
+  "empty_state": {
+    "no_videos": "No videos in this directory.",
+    "scan_hint": "Click \"Scan directory\" to search for videos.",
+    "no_pending": "No pending videos to analyze.",
+    "change_filter": "Change the filter to see other videos.",
+    "no_analyzed": "No analyzed videos.",
+    "analyze_hint": "Analyze some videos or change the filter.",
+    "no_errors": "No videos with errors.",
+    "no_hidden": "No hidden videos.",
+    "hidden_hint": "Videos you hide will appear here.",
+    "no_thumbnails": "No thumbnails generated yet",
+    "thumbnails_hint": "Configure the options above and generate your first thumbnail",
+    "no_references": "No references selected. Add frames from the library.",
+    "no_clusters": "No people detected in this video.",
+    "no_clusters_scene": "No scene groupings available.",
+    "no_more_frames": "No more frames available.",
+    "no_frames_filter": "No frames available with current filter.",
+    "select_frames_hint": "Select frames below to add as references"
+  },
+
+  "transcription": {
+    "title": "Video Transcription",
+    "loading": "Loading transcription...",
+    "empty": "No transcription available"
+  },
+
+  "clusters": {
+    "title": "Detected People/Characters",
+    "tooltip": "Groups of images of each person detected in the video. Use the ☆ to select which one will appear in the thumbnails. Click ⚙ to edit the cluster and add details (name, description, etc.).",
+    "view_as": "View as:",
+    "by_person": "By Person",
+    "by_person_scene": "By Person + Scene",
+    "new": "+ New",
+    "merge": "Merge",
+    "delete_title": "Delete Cluster",
+    "delete_message": "Delete this cluster? Associated frames will be lost.",
+    "merge_title": "Merge Clusters",
+    "merge_message": "<strong>{count}</strong> clusters will be merged into one.",
+    "merge_select_main": "Select which one will be the main (its image will be used as representative):",
+    "loading": "Loading clusters...",
+    "frame_count_one": "{count} frame",
+    "frame_count_other": "{count} frames",
+    "person_label": "Person {index}"
+  },
+
+  "cluster_frames": {
+    "title": "Manage Frames - {name}",
+    "back_to_clusters": "Back to clusters",
+    "info_title": "Cluster Information",
+    "name_label": "Name:",
+    "name_placeholder": "E.g.: Host, Guest, Sketch character...",
+    "notes_label": "Notes/Comments:",
+    "notes_placeholder": "E.g.: Person with glasses is the comedic character. Long hair is the host. Wears red shirt in this video...",
+    "save_changes": "Save changes",
+    "saving": "Saving...",
+    "saved": "Saved",
+    "references_title": "AI Reference Images",
+    "references_counter": "({current}/{max})",
+    "references_custom": "Custom",
+    "references_custom_tooltip": "You have customized the references",
+    "references_description": "These images are sent to the AI generator to recreate the face accurately.",
+    "references_hint": "Max 14 refs. Some AIs use fewer (1-8 depending on model).",
+    "reset_default": "Default",
+    "reset_title": "Reset references",
+    "reset_message": "Your manual selection will be discarded and the top {max} quality frames will be used as references.",
+    "reset_hint": "Frames are not deleted, only which ones are sent to the AI for thumbnail generation changes.",
+    "reset_success": "References reset to best quality",
+    "library_title": "Frame Library",
+    "library_show": "Show:",
+    "library_cluster_frames": "Cluster frames",
+    "library_all_frames": "All frames",
+    "library_group_by": "Group by:",
+    "library_group_face": "Face (unified)",
+    "library_group_scene": "Face + Scene",
+    "add_to_refs": "Add to references",
+    "add_to_cluster": "Add to cluster",
+    "delete_frames": "Delete",
+    "delete_title": "Delete {count} frames",
+    "delete_message": "This action will permanently delete:",
+    "delete_files": "Image files from disk",
+    "delete_records": "Database records",
+    "delete_refs": "If any were references, they will be removed",
+    "delete_warning": "This action cannot be undone",
+    "delete_hint": "Only selected image frames are deleted, NOT the original video file.",
+    "delete_success": "{count} frame(s) deleted",
+    "remove_reference": "Remove from references",
+    "reference_removed": "Reference removed",
+    "frames_added_refs": "{count} frame(s) added to references",
+    "frames_skipped_max": "{count} frame(s) skipped (maximum {max})",
+    "frames_added_cluster": "{count} frame(s) added to cluster",
+    "frames_already_in": "{count} frame(s) already in cluster",
+    "loading_refs": "Loading references...",
+    "loading_frames": "Loading frames...",
+    "loading_all": "Loading all frames...",
+    "scene_label": "Scene {num}",
+    "scene_unknown": "No scene",
+    "in_other_cluster": "Already in Person {index}",
+    "quality_score": "Quality score",
+    "scene_frame": "Scene and frame",
+    "library_cluster_desc": "Shows only frames that already belong to this cluster.",
+    "library_all_desc": "Shows all video frames so you can add new ones to the cluster.",
+    "delete_frames_desc": "Permanently deletes the selected frames.",
+    "name_tooltip": "A descriptive name to easily identify this person. It will be shown in the cluster list and when selecting a reference.",
+    "notes_tooltip": "Additional information for the AI when generating prompts. Useful if there are multiple people to describe each one, or to indicate specific character details.",
+    "library_select_all": "Select all"
+  },
+
+  "create_cluster": {
+    "title": "Create New Cluster",
+    "back": "Cancel and go back",
+    "name_label": "Cluster name (optional):",
+    "name_placeholder": "E.g.: Main person, Guest, etc.",
+    "notes_label": "Notes/Comments (optional):",
+    "notes_placeholder": "E.g.: Guest channel from the video, appears in intro, wears red shirt...",
+    "references_title": "AI Reference Images",
+    "references_description": "Drag frames here or select them below and use \"Add to references\". The first 10 will be used by the AI.",
+    "references_hint": "Max 14 refs. Some AIs use fewer (1-8 depending on model). Default: top 14 by quality.",
+    "clear_all": "Clear all",
+    "available_frames": "Available Frames",
+    "filter_all": "All frames",
+    "filter_unassigned": "Unassigned only",
+    "filter_with_face": "With detected face",
+    "add_to_refs": "Add to references",
+    "add_to_cluster": "Add to cluster",
+    "create_button": "Create Cluster ({count} frames)",
+    "creating": "Creating...",
+    "added_to_cluster": "Frames added to cluster",
+    "added_to_refs": "{count} frame(s) added to references",
+    "max_reached": "Maximum {max} references reached",
+    "created_success": "Cluster created with {count} frames",
+    "in_cluster": "Added to cluster",
+    "info_refs_title": "Reference Images",
+    "info_refs_text": "These images are sent to the AI generator so it can recreate the face accurately in thumbnails.",
+    "info_refs_list1": "You can select up to {max} images as references.",
+    "info_refs_list2": "If you don't select any, the highest quality ones from the cluster will be used automatically.",
+    "info_refs_list3": "Choose images where the face is clearly visible and well-lit.",
+    "info_library_title": "Available Frames",
+    "info_library_text": "All frames extracted from the video, sorted by quality (best first).",
+    "info_library_actions": "Available actions:",
+    "info_library_refs": "Mark selected frames as AI reference images (max {max}).",
+    "info_library_cluster": "Include selected frames in the new cluster.",
+    "info_library_hint": "Frames with green border are already added to the cluster. Frames with person icon already belong to another cluster, but you can add them anyway: a copy will be created, without affecting the original cluster.",
+    "understood": "Understood"
+  },
+
+  "ai_config": {
+    "bar_label": "AI Configuration:",
+    "text_ai": "Text AI",
+    "image_ai": "Image AI",
+    "text_config_title": "Configure Text AI",
+    "image_config_title": "Configure Image Generator",
+    "provider": "AI Engine:",
+    "model": "Model:",
+    "image_provider": "Provider:",
+    "thinking_mode": "Thinking mode",
+    "thinking_badge": "Think",
+    "thinking_level": "Level:",
+    "thinking_low": "Low",
+    "thinking_medium": "Medium",
+    "thinking_high": "High",
+    "text_info": "This configuration is used to generate titles, descriptions and image prompts.",
+    "supports_refs": "Supports reference images",
+    "no_refs_warning": "Does NOT support refs.",
+    "ref_images": "Reference images",
+    "ref_max": "(max. {max})",
+    "refs_badge": "{count} refs",
+    "gran_sabio": {
+      "status": "Gran Sabio Status",
+      "connected": "Connected",
+      "disconnected": "Disconnected",
+      "connecting": "Connecting...",
+      "error": "Connection error",
+      "offline": "Offline"
+    },
+    "loading_models": "Loading models...",
+    "no_models": "No models available",
+    "fast": "Fast",
+    "best": "Best",
+    "standard": "Standard",
+    "best_quality": "Best quality",
+    "high_res": "High resolution",
+    "best_prompt": "Best prompt",
+    "combine_refs": "Combine refs",
+    "text_logos": "Text/logos",
+    "no_refs": "No refs"
+  },
+
+  "content_optimization": {
+    "title": "Content Optimization",
+    "tab_titles": "Titles",
+    "tab_descriptions": "Descriptions"
+  },
+
+  "titles_form": {
+    "style_label": "Style:",
+    "style_tooltip": "Neutral: descriptive and clear. SEO: with keywords for searches. Clickbait: catchy with emotional hook.",
+    "style_neutral": "Neutral - Clear and descriptive",
+    "style_seo": "SEO - Search optimized",
+    "style_clickbait": "Clickbait - Catchy with hook",
+    "style_custom": "Custom",
+    "language_label": "Language:",
+    "quantity_label": "Quantity:",
+    "custom_prompt_label": "Custom prompt:",
+    "custom_prompt_placeholder": "Describe how you want the titles to be...",
+    "instructions_label": "Additional instructions (optional):",
+    "instructions_placeholder": "E.g.: Include channel name, mention it's a tutorial...",
+    "generate_button": "Generate Titles",
+    "results_header": "Titles",
+    "selection_info": "Select titles to guide the images",
+    "select_all": "All",
+    "delete_selected": "Delete",
+    "copy_all": "Copy",
+    "hint": "Click on a title to select it. Selected titles will guide the AI when generating thumbnails.",
+    "preparing": "Preparing...",
+    "select_tooltip": "Select to guide images",
+    "copy_tooltip": "Copy to clipboard",
+    "delete_tooltip": "Delete"
+  },
+
+  "descriptions_form": {
+    "style_label": "Style:",
+    "style_informative": "Informative - Complete and professional",
+    "style_seo": "SEO - Search optimized",
+    "style_minimal": "Minimalist - Brief and direct",
+    "style_custom": "Custom",
+    "language_label": "Language:",
+    "length_label": "Length:",
+    "length_short": "Short (~200 chars)",
+    "length_medium": "Medium (~500 chars)",
+    "length_long": "Long (~1000 chars)",
+    "length_very_long": "Very long (~2000 chars)",
+    "quantity_label": "Quantity:",
+    "options_label": "Additional options:",
+    "timestamps": "Include timestamps",
+    "timestamps_tooltip": "Add time markers (e.g.: 0:00 Intro, 2:30 Main topic) so viewers can navigate the video.",
+    "hashtags": "Include hashtags",
+    "emojis": "Include emojis",
+    "social_links": "Include social links",
+    "custom_prompt_label": "Custom prompt:",
+    "custom_prompt_placeholder": "Describe how you want the description to be...",
+    "instructions_label": "Additional instructions (optional):",
+    "instructions_placeholder": "E.g.: Mention the sponsor, include disclaimer...",
+    "generate_button": "Generate Descriptions",
+    "results_header": "Descriptions",
+    "delete_all": "Delete",
+    "copy_all": "Copy",
+    "preparing": "Preparing..."
+  },
+
+  "generate_form": {
+    "title": "Generate Thumbnails",
+    "cluster_label": "Person/Character:",
+    "cluster_tooltip": "The AI will use these images as reference to generate thumbnails, keeping the same face, hairstyle, clothes and general appearance. Select above (with ☆) the character you want to appear in the thumbnail.",
+    "no_cluster_selected": "Select a cluster above using the star",
+    "concepts_label": "Concepts:",
+    "concepts_tooltip": "Different creative ideas that the AI will generate based on the video content.",
+    "variations_label": "Variations:",
+    "variations_tooltip": "Different versions of each concept. Useful for choosing the best composition.",
+    "expression_label": "Expression:",
+    "expression_auto": "Automatic",
+    "expression_smiling": "Smiling",
+    "expression_mouth_closed": "Mouth closed",
+    "expression_neutral": "Neutral",
+    "avoid_repeat": "Avoid repeating previous concepts",
+    "reference_image_label": "Reference image (optional):",
+    "reference_image_tooltip": "Upload an image for the AI to use as visual inspiration when creating concepts and/or as style reference for generation.",
+    "select_image": "Select image",
+    "no_image_selected": "No image selected",
+    "remove_image": "Remove image",
+    "analyze_for_prompts": "Analyze for prompts",
+    "analyze_tooltip": "The text AI will analyze this image before creating concepts, using it as visual inspiration.",
+    "include_as_ref": "Include as style reference",
+    "include_tooltip": "The image will be sent along with cluster references to the image AI. If the limit is reached, the last cluster reference will be removed.",
+    "instructions_label": "Instructions for prompts (optional):",
+    "instructions_tooltip": "Global instructions for the AI. Prevail over everything else. You can indicate style, composition, backgrounds, aesthetics, or any specific detail. If you've uploaded a reference image, you can give instructions on how to use it.",
+    "instructions_placeholder": "E.g.: YouTube 2016 style, white border, kawaii background, exaggerated expression...",
+    "instructions_placeholder_with_ref": "E.g.: Use the same background as the reference image. Keep the colors but change the composition. Similar style but more dynamic...",
+    "generate_button": "Generate Thumbnails",
+    "progress_title": "Generation Progress",
+    "progress_starting": "Starting...",
+    "results_generating": "Generating Thumbnails..."
+  },
+
+  "thumbnails": {
+    "saved_title": "Saved Thumbnails",
+    "download_all": "Download all",
+    "loading": "Loading thumbnails..."
+  },
+
+  "results": {
+    "title": "Generated Thumbnails",
+    "back": "Back to videos",
+    "loading_info": "Loading job information...",
+    "loading_thumbnails": "Loading thumbnails...",
+    "status": "Status:",
+    "progress": "Progress:",
+    "thumbnails_count": "Thumbnails:",
+    "download_all_zip": "Download all (ZIP)",
+    "regenerate": "Regenerate",
+    "download": "Download",
+    "no_thumbnails_yet": "No thumbnails generated yet"
+  },
+
+  "languages": {
+    "es": "Spanish",
+    "en": "English",
+    "fr": "French",
+    "it": "Italian",
+    "de": "German",
+    "pt": "Portuguese"
+  },
+
+  "api": {
+    "errors": {
+      "video_not_found": "Video not found",
+      "video_file_not_found": "Video file not found",
+      "cluster_not_found": "Cluster not found",
+      "image_not_found": "Image not found",
+      "frame_not_found": "Frame not found",
+      "job_not_found": "Job not found",
+      "thumbnail_not_found": "Thumbnail not found",
+      "thumbnail_file_not_found": "Thumbnail file not found",
+      "thumbnail_not_available": "Thumbnail not available",
+      "directory_not_found": "Directory not found",
+      "analysis_in_progress": "Analysis already in progress",
+      "failed_enqueue_analysis": "Failed to enqueue analysis job",
+      "failed_enqueue_generation": "Failed to enqueue generation job",
+      "failed_create_cluster": "Failed to create cluster",
+      "failed_merge_clusters": "Failed to merge clusters. Verify cluster indices exist.",
+      "min_clusters_required": "At least 2 clusters are required for merging",
+      "min_one_frame_required": "At least one frame is required",
+      "invalid_filename": "Invalid filename",
+      "invalid_file_extension": "Invalid file extension. Allowed: {extensions}",
+      "invalid_file_content": "Invalid file content: {error}. File extension was {ext} but content doesn't match a video format.",
+      "job_cannot_cancel": "Job cannot be cancelled",
+      "custom_prompt_required": "Custom prompt is required when style is 'custom'",
+      "title_not_found": "Title not found",
+      "description_not_found": "Description not found",
+      "error_reading_transcription": "Error reading transcription",
+      "video_must_be_analyzed": "Video must be analyzed first. Current status: {status}",
+      "no_thumbnails_job": "No thumbnails found for this job",
+      "no_thumbnails_video": "No thumbnails found for this video",
+      "max_references": "Maximum {max} reference frames allowed",
+      "access_denied_no_ip": "Access denied: Unable to determine client IP",
+      "access_restricted_local": "Access restricted to local network",
+      "no_source_clusters": "No source clusters to merge",
+      "source_clusters_not_found": "Source clusters not found",
+      "no_frames_provided": "No frames provided",
+      "no_valid_frames": "No valid frames found",
+      "too_many_errors": "Too many errors: {error}"
+    },
+    "messages": {
+      "analysis_started": "Analysis started",
+      "analysis_completed": "Analysis completed",
+      "cluster_deleted": "Cluster deleted successfully",
+      "clusters_merged": "Clusters merged successfully",
+      "cluster_created": "Cluster created successfully",
+      "cluster_updated": "Cluster updated successfully",
+      "references_updated": "References updated",
+      "frames_added_refs": "{count} frame(s) added to references",
+      "frame_removed_refs": "Frame removed from references",
+      "references_reset": "References reset to default (top quality frames)",
+      "frames_deleted": "{count} frame(s) deleted",
+      "files_deleted": "{count} file(s) deleted",
+      "frames_added_cluster": "{count} frame(s) added to cluster",
+      "generation_started": "Generation started",
+      "generation_completed": "Generation completed",
+      "generation_cancelled": "Generation cancelled"
+    },
+    "steps": {
+      "waiting": "Waiting...",
+      "analyzing_video": "Analyzing video...",
+      "detecting_scenes": "Detecting scenes...",
+      "analyzing_faces": "Analyzing faces...",
+      "clustering_faces": "Clustering faces...",
+      "transcribing_audio": "Transcribing audio...",
+      "starting": "Starting...",
+      "generating_prompts": "Generating prompts...",
+      "creating_thumbnails": "Creating thumbnails..."
+    }
+  },
+
+  "time_service": {
+    "never": "Never",
+    "just_now": "Just now",
+    "minutes_ago": "{count} min ago",
+    "hour_ago": "1 hour ago",
+    "hours_ago": "{count} hours ago",
+    "day_ago": "1 day ago",
+    "days_ago": "{count} days ago",
+    "week_ago": "1 week ago",
+    "weeks_ago": "{count} weeks ago",
+    "unknown": "Unknown"
+  },
+
+  "ai_providers": {
+    "anthropic": "Anthropic (Claude)",
+    "openai": "OpenAI (GPT)",
+    "google": "Google (Gemini)",
+    "xai": "xAI (Grok)",
+    "gemini": "Gemini (Google)",
+    "poe": "Poe (FLUX/Ideogram)",
+    "replicate": "Replicate"
+  }
+}

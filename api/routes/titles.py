@@ -41,6 +41,7 @@ from services.content_generation_service import (
     get_available_providers,
     get_available_languages,
 )
+from i18n.i18n import translate as t
 
 
 logger = logging.getLogger(__name__)
@@ -269,13 +270,13 @@ async def get_video_info(video_id: int) -> tuple[str, Path]:
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     video_title = row[0]
     video_path = Path(row[1])
 
     if not video_path.exists():
-        raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_file_not_found'))
 
     return video_title, video_path
 
@@ -289,7 +290,7 @@ async def generate_video_titles(request: GenerateTitlesRequest):
     """Generate AI-powered titles for a video."""
 
     if request.style == "custom" and not request.custom_prompt:
-        raise HTTPException(status_code=400, detail="custom_prompt is required when style is 'custom'")
+        raise HTTPException(status_code=400, detail=t('api.errors.custom_prompt_required'))
 
     # Model validation is handled by Gran Sabio LLM internally
 
@@ -343,7 +344,7 @@ async def get_saved_titles(video_id: int):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     titles = await get_titles_for_video(video_id)
 
@@ -375,7 +376,7 @@ async def save_titles(request: SaveTitlesRequest):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     if not request.titles:
         return SaveTitlesResponse(success=True, saved_count=0, title_ids=[])
@@ -404,7 +405,7 @@ async def delete_title(title_id: int):
     deleted = await db_delete_title(title_id)
 
     if deleted == 0:
-        raise HTTPException(status_code=404, detail="Title not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.title_not_found'))
 
     return {"success": True, "deleted_id": title_id}
 
@@ -436,7 +437,7 @@ async def generate_video_descriptions(request: GenerateDescriptionsRequest):
     """Generate AI-powered descriptions for a video."""
 
     if request.style == "custom" and not request.custom_prompt:
-        raise HTTPException(status_code=400, detail="custom_prompt is required when style is 'custom'")
+        raise HTTPException(status_code=400, detail=t('api.errors.custom_prompt_required'))
 
     # Model validation is handled by Gran Sabio LLM internally
 
@@ -526,7 +527,7 @@ async def get_saved_descriptions(video_id: int):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     descriptions = await get_descriptions_for_video(video_id)
 
@@ -563,7 +564,7 @@ async def save_descriptions(request: SaveDescriptionsRequest):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     if not request.descriptions:
         return SaveDescriptionsResponse(success=True, saved_count=0, description_ids=[])
@@ -597,7 +598,7 @@ async def delete_description(description_id: int):
     deleted = await db_delete_description(description_id)
 
     if deleted == 0:
-        raise HTTPException(status_code=404, detail="Description not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.description_not_found'))
 
     return {"success": True, "deleted_id": description_id}
 
@@ -633,12 +634,12 @@ async def check_transcription_exists(video_id: int):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     video_path = Path(row[0])
 
     if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_file_not_found'))
 
     output = VideoOutput(video_path, Path(OUTPUT_DIR))
     exists = output.transcription_file.exists()
@@ -655,12 +656,12 @@ async def get_transcription(video_id: int):
             row = await cursor.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="Video not found")
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
     video_path = Path(row[0])
 
     if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Video file not found")
+        raise HTTPException(status_code=404, detail=t('api.errors.video_file_not_found'))
 
     output = VideoOutput(video_path, Path(OUTPUT_DIR))
     segments_file = output.output_dir / "transcription_segments.json"
@@ -705,7 +706,7 @@ async def get_transcription(video_id: int):
             return {"exists": True, "text": text}
     except Exception as e:
         logger.error(f"Error reading transcription file: {e}")
-        raise HTTPException(status_code=500, detail="Error reading transcription")
+        raise HTTPException(status_code=500, detail=t('api.errors.error_reading_transcription'))
 
 
 # ============================================================================

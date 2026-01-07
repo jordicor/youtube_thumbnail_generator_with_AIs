@@ -12,10 +12,6 @@ import { addNewToGallery } from './thumbnails.js';
 // Store reference image data
 let referenceImageData = null;
 
-// Placeholder texts for custom instructions
-const PLACEHOLDER_DEFAULT = 'Ej: Estilo YouTube 2016, borde blanco, fondo kawaii, expresion exagerada...';
-const PLACEHOLDER_WITH_REF = 'Ej: Usa el mismo fondo que la imagen de referencia. Manten los colores pero cambia la composicion. Estilo similar pero mas dinamico...';
-
 // =========================================================================
 // GENERATION REQUEST
 // =========================================================================
@@ -101,13 +97,13 @@ export function setupForm() {
 
         const clusterIndex = document.getElementById('clusterSelect').value;
         if (!clusterIndex) {
-            ThumbnailApp.showToast('Selecciona un persona/personaje', 'error');
+            ThumbnailApp.showToast(t('generate_form.no_cluster_selected'), 'error');
             return;
         }
 
         // Reset UI state before starting new generation
         document.getElementById('progressFill').style.width = '0%';
-        document.getElementById('progressText').textContent = 'Iniciando...';
+        document.getElementById('progressText').textContent = t('generate_form.progress_starting');
         document.getElementById('thumbnailsGrid').innerHTML = '';
         document.getElementById('resultsSection').classList.add('hidden');
 
@@ -125,7 +121,7 @@ export function setupForm() {
 
             if (!response.ok) {
                 const error = await response.json();
-                throw new Error(error.detail || 'Error starting generation');
+                throw new Error(error.detail || t('errors.generation_failed'));
             }
 
             const data = await response.json();
@@ -134,7 +130,7 @@ export function setupForm() {
             document.getElementById('generationStatus').classList.remove('hidden');
             pollStatus();
         } catch (error) {
-            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('errors.generic') + ': ' + error.message, 'error');
         }
     });
 }
@@ -167,17 +163,17 @@ export function startSSE() {
             },
             complete: (data) => {
                 document.getElementById('progressFill').style.width = '100%';
-                document.getElementById('progressText').textContent = 'Completado!';
-                ThumbnailApp.showToast('Thumbnails generados correctamente', 'success');
+                document.getElementById('progressText').textContent = t('generation.complete');
+                ThumbnailApp.showToast(t('generation.complete'), 'success');
                 loadResults();
             },
             error: (data) => {
-                document.getElementById('progressText').textContent = 'Error!';
-                ThumbnailApp.showToast('Error: ' + (data.error_message || data.error), 'error');
+                document.getElementById('progressText').textContent = t('common.error');
+                ThumbnailApp.showToast(t('errors.generic') + ': ' + (data.error_message || data.error), 'error');
             },
             cancelled: (data) => {
-                document.getElementById('progressText').textContent = 'Cancelado';
-                ThumbnailApp.showToast('Generacion cancelada', 'info');
+                document.getElementById('progressText').textContent = t('common.cancel');
+                ThumbnailApp.showToast(t('common.cancel'), 'info');
             }
         }
     );
@@ -215,7 +211,7 @@ export async function pollStatus() {
                 loadResults();
             } else if (data.status === 'error') {
                 clearInterval(interval);
-                ThumbnailApp.showToast('Error en la generacion: ' + (data.error_message || 'Error desconocido'), 'error');
+                ThumbnailApp.showToast(t('errors.generation_failed') + ': ' + (data.error_message || t('errors.generic')), 'error');
             }
         } catch (error) {
             clearInterval(interval);
@@ -242,9 +238,9 @@ export function appendThumbnail(thumb) {
     card.innerHTML = `
         <img src="/api/thumbnails/${thumb.thumbnail_id}" alt="Thumbnail">
         <div class="thumbnail-info">
-            <p><strong>${escapeHtml(thumb.suggested_title) || 'Generando...'}</strong></p>
+            <p><strong>${escapeHtml(thumb.suggested_title) || t('common.loading')}</strong></p>
             <p>${escapeHtml(thumb.text_overlay) || ''}</p>
-            <a href="/api/thumbnails/${thumb.thumbnail_id}" download class="btn btn-small">Descargar</a>
+            <a href="/api/thumbnails/${thumb.thumbnail_id}" download class="btn btn-small">${t('results.thumbnails.download')}</a>
         </div>
     `;
     grid.appendChild(card);
@@ -275,15 +271,15 @@ export async function loadResults() {
             card.innerHTML = `
                 <img src="/api/thumbnails/${thumb.id}" alt="Thumbnail">
                 <div class="thumbnail-info">
-                    <p><strong>${escapeHtml(thumb.suggested_title) || 'Sin titulo'}</strong></p>
+                    <p><strong>${escapeHtml(thumb.suggested_title) || t('empty_state.no_thumbnails')}</strong></p>
                     <p>${escapeHtml(thumb.text_overlay) || ''}</p>
-                    <a href="/api/thumbnails/${thumb.id}" download class="btn btn-small">Descargar</a>
+                    <a href="/api/thumbnails/${thumb.id}" download class="btn btn-small">${t('results.thumbnails.download')}</a>
                 </div>
             `;
             grid.appendChild(card);
         }
     } catch (error) {
-        grid.innerHTML = `<div class="error">Error cargando thumbnails: ${escapeHtml(error.message)}</div>`;
+        grid.innerHTML = `<div class="error">${t('errors.load_thumbnails')}: ${escapeHtml(error.message)}</div>`;
     }
 }
 
@@ -298,7 +294,9 @@ export async function loadResults() {
 function updateInstructionsPlaceholder(hasReferenceImage) {
     const textarea = document.getElementById('promptCustomInstructions');
     if (textarea) {
-        textarea.placeholder = hasReferenceImage ? PLACEHOLDER_WITH_REF : PLACEHOLDER_DEFAULT;
+        textarea.placeholder = hasReferenceImage
+            ? t('generate_form.instructions_placeholder_with_ref')
+            : t('generate_form.instructions_placeholder');
     }
 }
 
@@ -315,14 +313,14 @@ function setupReferenceImageHandler() {
 
         // Validate file size (max 10MB)
         if (file.size > 10 * 1024 * 1024) {
-            ThumbnailApp.showToast('Imagen demasiado grande (max 10MB)', 'error');
+            ThumbnailApp.showToast(t('errors.generic'), 'error');
             input.value = '';
             return;
         }
 
         // Validate file type
         if (!file.type.startsWith('image/')) {
-            ThumbnailApp.showToast('El archivo debe ser una imagen', 'error');
+            ThumbnailApp.showToast(t('errors.generic'), 'error');
             input.value = '';
             return;
         }
@@ -350,7 +348,7 @@ function setupReferenceImageHandler() {
         };
 
         reader.onerror = () => {
-            ThumbnailApp.showToast('Error al leer la imagen', 'error');
+            ThumbnailApp.showToast(t('errors.generic'), 'error');
         };
 
         reader.readAsDataURL(file);
@@ -367,7 +365,7 @@ export function clearReferenceImage() {
     if (input) input.value = '';
 
     const nameEl = document.getElementById('referenceImageName');
-    if (nameEl) nameEl.textContent = 'Ninguna imagen seleccionada';
+    if (nameEl) nameEl.textContent = t('generate_form.no_image_selected');
 
     const previewEl = document.getElementById('referenceImagePreview');
     if (previewEl) previewEl.style.display = 'none';

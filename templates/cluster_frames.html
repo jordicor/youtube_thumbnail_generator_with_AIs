@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}Gestionar Frames - Persona {{ cluster_index + 1 }}{% endblock %}
+{% block title %}{{ t('cluster_frames.title', index=cluster_index + 1) }}{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <a href="/video/{{ video_id }}" class="back-link">&larr; Volver a clusters</a>
-    <h1 id="pageTitle"><span id="clusterDisplayName">Persona {{ cluster_index + 1 }}</span> &middot; <span id="frameCount">--</span> frames</h1>
+    <a href="/video/{{ video_id }}" class="back-link">&larr; {{ t('cluster_frames.back_to_clusters') }}</a>
+    <h1 id="pageTitle"><span id="clusterDisplayName">{{ t('clusters.person_label', index=cluster_index + 1) }}</span> &middot; <span id="frameCount">--</span> {{ t('video_detail.clusters.frames_other') }}</h1>
 </div>
 
 <!-- Cluster Info Section -->
@@ -14,25 +14,25 @@
         <div class="section-title-row">
             <h2>
                 <span class="section-icon">&#9998;</span>
-                Informacion del Cluster
+                {{ t('cluster_frames.info_title') }}
             </h2>
         </div>
     </div>
     <div class="cluster-info-form">
         <div class="form-row">
             <div class="form-group">
-                <label for="clusterLabel">Nombre: <span class="info-tooltip" data-tooltip="Un nombre descriptivo para identificar facilmente a esta persona. Se mostrara en la lista de clusters y al seleccionar referencia.">&#9432;</span></label>
-                <input type="text" id="clusterLabel" placeholder="Ej: Presentador, Invitado, Personaje del sketch..." maxlength="128">
+                <label for="clusterLabel">{{ t('cluster_frames.name_label') }} <span class="info-tooltip" data-tooltip="{{ t('cluster_frames.name_tooltip') }}">&#9432;</span></label>
+                <input type="text" id="clusterLabel" placeholder="{{ t('cluster_frames.name_placeholder') }}" maxlength="128">
             </div>
         </div>
         <div class="form-group">
-            <label for="clusterDescription">Notas/Comentarios: <span class="info-tooltip" data-tooltip="Informacion adicional para la IA al generar prompts. Util si hay varias personas para describir cada una, o para indicar detalles especificos del personaje.">&#9432;</span></label>
+            <label for="clusterDescription">{{ t('cluster_frames.notes_label') }} <span class="info-tooltip" data-tooltip="{{ t('cluster_frames.notes_tooltip') }}">&#9432;</span></label>
             <textarea id="clusterDescription" rows="2" maxlength="2000"
-                      placeholder="Ej: Persona con gafas es el personaje comico. Pelo largo es la presentadora. Usa camiseta roja en este video..."></textarea>
+                      placeholder="{{ t('cluster_frames.notes_placeholder') }}"></textarea>
         </div>
         <div class="form-actions">
             <button class="btn btn-save btn-small" id="btnSaveClusterInfo" onclick="saveClusterInfo()" disabled>
-                &#10003; Guardar cambios
+                &#10003; {{ t('cluster_frames.save_changes') }}
             </button>
             <span class="save-status" id="saveStatus"></span>
         </div>
@@ -46,30 +46,30 @@
             <div class="section-title-row">
                 <h2>
                     <span class="section-icon">&#9889;</span>
-                    Imagenes de Referencia para IA
+                    {{ t('cluster_frames.references_title') }}
                     <span class="reference-counter" id="refCounter">(--/{{ max_refs }})</span>
-                    <span class="custom-badge hidden" id="customBadge" title="Has personalizado las referencias">Personalizado</span>
+                    <span class="custom-badge hidden" id="customBadge" title="{{ t('cluster_frames.references_custom_tooltip') }}">{{ t('cluster_frames.references_custom') }}</span>
                 </h2>
-                <button class="info-btn" onclick="showInfoModal('references')" title="Informacion">&#9432;</button>
+                <button class="info-btn" onclick="showInfoModal('references')" title="{{ t('common.info_tooltip') }}">&#9432;</button>
             </div>
             <div class="section-actions">
                 <button class="btn btn-secondary btn-small" onclick="showResetModal()" id="btnReset">
-                    &#8634; Por defecto
+                    &#8634; {{ t('cluster_frames.reset_default') }}
                 </button>
             </div>
         </div>
 
         <p class="section-description">
-            Estas imagenes se envian al generador de IA para recrear el rostro con precision.
+            {{ t('cluster_frames.references_description') }}
         </p>
 
         <div class="frames-grid reference-frames-grid" id="referenceFramesGrid">
-            <div class="loading">Cargando referencias...</div>
+            <div class="loading">{{ t('cluster_frames.loading_refs') }}</div>
         </div>
 
         <p class="section-hint">
             <span class="hint-icon">&#128161;</span>
-            Max 14 refs. Algunas IAs usan menos (1-8 segun modelo).
+            {{ t('cluster_frames.references_hint') }}
         </p>
     </section>
 
@@ -79,12 +79,12 @@
             <div class="section-title-row">
                 <h2>
                     <span class="section-icon">&#128193;</span>
-                    Biblioteca de Frames
+                    {{ t('cluster_frames.library_title') }}
                 </h2>
-                <button class="info-btn" onclick="showInfoModal('library')" title="Informacion">&#9432;</button>
+                <button class="info-btn" onclick="showInfoModal('library')" title="{{ t('common.info_tooltip') }}">&#9432;</button>
             </div>
             <div class="section-actions">
-                <span class="selection-info" id="librarySelectionInfo">0 seleccionados</span>
+                <span class="selection-info" id="librarySelectionInfo">0 {{ t('common.none') }}</span>
             </div>
         </div>
 
@@ -92,38 +92,38 @@
             <div class="toolbar-left">
                 <label class="checkbox-wrapper">
                     <input type="checkbox" id="selectAllLibrary" onchange="toggleSelectAll()">
-                    <span>Seleccionar todos</span>
+                    <span>{{ t('cluster_frames.library_select_all') }}</span>
                 </label>
                 <div class="filter-group">
-                    <label for="frameSource">Mostrar:</label>
+                    <label for="frameSource">{{ t('cluster_frames.library_show') }}</label>
                     <select id="frameSource" onchange="changeFrameSource()">
-                        <option value="cluster">Frames del cluster</option>
-                        <option value="all">Todos los frames</option>
+                        <option value="cluster">{{ t('cluster_frames.library_cluster_frames') }}</option>
+                        <option value="all">{{ t('cluster_frames.library_all_frames') }}</option>
                     </select>
                 </div>
                 <div class="filter-group">
-                    <label for="groupByMode">Agrupar por:</label>
+                    <label for="groupByMode">{{ t('cluster_frames.library_group_by') }}</label>
                     <select id="groupByMode" onchange="changeGroupByMode()">
-                        <option value="none" selected>Cara (unificado)</option>
-                        <option value="scene">Cara + Escena</option>
+                        <option value="none" selected>{{ t('cluster_frames.library_group_face') }}</option>
+                        <option value="scene">{{ t('cluster_frames.library_group_scene') }}</option>
                     </select>
                 </div>
             </div>
             <div class="toolbar-actions">
                 <button class="btn btn-secondary btn-small" id="btnAddToRefs" onclick="addSelectedToReferences()" disabled>
-                    &#10133; Anadir a referencias
+                    &#10133; {{ t('cluster_frames.add_to_refs') }}
                 </button>
                 <button class="btn btn-primary btn-small hidden" id="btnAddToCluster" onclick="addSelectedToCluster()" disabled>
-                    &#10133; Anadir al cluster
+                    &#10133; {{ t('cluster_frames.add_to_cluster') }}
                 </button>
                 <button class="btn btn-danger btn-small" id="btnDeleteFrames" onclick="showDeleteModal()" disabled>
-                    &#128465; Eliminar (<span id="deleteCount">0</span>)
+                    &#128465; {{ t('cluster_frames.delete_frames') }} (<span id="deleteCount">0</span>)
                 </button>
             </div>
         </div>
 
         <div class="frames-grid library-frames-grid" id="libraryFramesGrid">
-            <div class="loading">Cargando frames...</div>
+            <div class="loading">{{ t('cluster_frames.loading_frames') }}</div>
         </div>
     </section>
 </div>
@@ -133,21 +133,21 @@
     <div class="modal-dialog modal-info modal-wide">
         <div class="modal-header">
             <span class="modal-icon">&#9432;</span>
-            <span class="modal-title">Imagenes de Referencia</span>
+            <span class="modal-title">{{ t('create_cluster.info_refs_title') }}</span>
         </div>
         <div class="modal-body">
-            <p>Estas imagenes se envian al generador de IA para que pueda recrear el rostro con precision en los thumbnails.</p>
+            <p>{{ t('create_cluster.info_refs_text') }}</p>
             <ul class="info-list">
-                <li>Cuantas mas imagenes de calidad incluyas (hasta {{ max_refs }}), mejor sera el parecido facial.</li>
-                <li>Por defecto se seleccionan automaticamente las de mayor calidad.</li>
-                <li>Puedes personalizar cuales enviar desde la biblioteca de abajo.</li>
+                <li>{{ t('create_cluster.info_refs_list1', max=max_refs) }}</li>
+                <li>{{ t('create_cluster.info_refs_list2') }}</li>
+                <li>{{ t('create_cluster.info_refs_list3') }}</li>
             </ul>
             <div class="info-box">
-                <strong>&#8634; Por defecto:</strong> Descarta tu seleccion manual y vuelve a usar las mejores imagenes segun su puntuacion de calidad.
+                <strong>&#8634; {{ t('cluster_frames.reset_default') }}:</strong> {{ t('cluster_frames.reset_hint') }}
             </div>
         </div>
         <div class="modal-footer">
-            <button class="btn btn-primary" onclick="closeModal('infoModalReferences')">Entendido</button>
+            <button class="btn btn-primary" onclick="closeModal('infoModalReferences')">{{ t('create_cluster.understood') }}</button>
         </div>
     </div>
 </div>
@@ -157,27 +157,27 @@
     <div class="modal-dialog modal-info modal-wide">
         <div class="modal-header">
             <span class="modal-icon">&#9432;</span>
-            <span class="modal-title">Biblioteca de Frames</span>
+            <span class="modal-title">{{ t('create_cluster.info_library_title') }}</span>
         </div>
         <div class="modal-body">
-            <p>Frames disponibles ordenados por calidad (mejor primero).</p>
-            <h4>Modos de visualizacion:</h4>
+            <p>{{ t('create_cluster.info_library_text') }}</p>
+            <h4>{{ t('cluster_frames.library_show') }}:</h4>
             <ul class="info-list">
-                <li><strong>Frames del cluster:</strong> Muestra solo los frames que ya pertenecen a este cluster.</li>
-                <li><strong>Todos los frames:</strong> Muestra todos los frames del video para poder anadir nuevos al cluster.</li>
+                <li><strong>{{ t('cluster_frames.library_cluster_frames') }}:</strong> {{ t('cluster_frames.library_cluster_desc') }}</li>
+                <li><strong>{{ t('cluster_frames.library_all_frames') }}:</strong> {{ t('cluster_frames.library_all_desc') }}</li>
             </ul>
-            <h4>Acciones disponibles:</h4>
+            <h4>{{ t('create_cluster.info_library_actions') }}:</h4>
             <ul class="info-list">
-                <li><strong>&#10133; Anadir a referencias:</strong> Marca los frames como imagenes de referencia para la IA (max {{ max_refs }}).</li>
-                <li><strong>&#10133; Anadir al cluster:</strong> (En modo "Todos los frames") Incluye frames externos en este cluster.</li>
-                <li><strong>&#128465; Eliminar:</strong> (En modo "Frames del cluster") Borra permanentemente los frames seleccionados.</li>
+                <li><strong>&#10133; {{ t('cluster_frames.add_to_refs') }}:</strong> {{ t('create_cluster.info_library_refs', max=max_refs) }}</li>
+                <li><strong>&#10133; {{ t('cluster_frames.add_to_cluster') }}:</strong> {{ t('create_cluster.info_library_cluster') }}</li>
+                <li><strong>&#128465; {{ t('cluster_frames.delete_frames') }}:</strong> {{ t('cluster_frames.delete_frames_desc') }}</li>
             </ul>
             <div class="info-box info-box-hint">
-                <strong>&#128161;</strong> Los frames con icono de persona (&#128100;) ya pertenecen a otro cluster, pero puedes anadirlos igualmente: se creara una copia, sin afectar al cluster original.
+                <strong>&#128161;</strong> {{ t('create_cluster.info_library_hint') }}
             </div>
         </div>
         <div class="modal-footer">
-            <button class="btn btn-primary" onclick="closeModal('infoModalLibrary')">Entendido</button>
+            <button class="btn btn-primary" onclick="closeModal('infoModalLibrary')">{{ t('create_cluster.understood') }}</button>
         </div>
     </div>
 </div>
@@ -187,17 +187,17 @@
     <div class="modal-dialog modal-info">
         <div class="modal-header">
             <span class="modal-icon">&#8634;</span>
-            <span class="modal-title">Restablecer referencias</span>
+            <span class="modal-title">{{ t('cluster_frames.reset_title') }}</span>
         </div>
         <div class="modal-body">
-            <p>Se descartara tu seleccion manual y se volveran a usar los {{ max_refs }} frames de mayor calidad como referencias.</p>
+            <p>{{ t('cluster_frames.reset_message', max=max_refs) }}</p>
             <div class="info-box info-box-hint">
-                <strong>&#128161;</strong> Los frames no se eliminan, solo cambia cuales se envian a la IA al generar thumbnails.
+                <strong>&#128161;</strong> {{ t('cluster_frames.reset_hint') }}
             </div>
         </div>
         <div class="modal-footer">
-            <button class="btn btn-cancel" onclick="closeModal('resetModal')">Cancelar</button>
-            <button class="btn btn-confirm" onclick="confirmReset()">&#8634; Restablecer</button>
+            <button class="btn btn-cancel" onclick="closeModal('resetModal')">{{ t('common.cancel') }}</button>
+            <button class="btn btn-confirm" onclick="confirmReset()">&#8634; {{ t('cluster_frames.reset_default') }}</button>
         </div>
     </div>
 </div>
@@ -207,25 +207,25 @@
     <div class="modal-dialog modal-danger">
         <div class="modal-header">
             <span class="modal-icon">&#128465;</span>
-            <span class="modal-title">Eliminar <span id="deleteModalCount">0</span> frames</span>
+            <span class="modal-title">{{ t('cluster_frames.delete_title', count='<span id="deleteModalCount">0</span>') }}</span>
         </div>
         <div class="modal-body">
-            <p>Esta accion eliminara permanentemente:</p>
+            <p>{{ t('cluster_frames.delete_message') }}</p>
             <ul class="delete-effects-list">
-                <li><span class="icon">&#128193;</span> Los archivos de imagen del disco</li>
-                <li><span class="icon">&#128451;</span> Los registros de la base de datos</li>
-                <li><span class="icon">&#9889;</span> Si alguno era referencia, se quitara de ahi</li>
+                <li><span class="icon">&#128193;</span> {{ t('cluster_frames.delete_files') }}</li>
+                <li><span class="icon">&#128451;</span> {{ t('cluster_frames.delete_records') }}</li>
+                <li><span class="icon">&#9889;</span> {{ t('cluster_frames.delete_refs') }}</li>
             </ul>
             <div class="info-box info-box-warning">
-                <strong>&#9888; Esta accion no se puede deshacer</strong>
+                <strong>&#9888; {{ t('cluster_frames.delete_warning') }}</strong>
             </div>
             <div class="info-box info-box-hint">
-                <strong>&#128161;</strong> Solo se eliminan los frames de imagen seleccionados, NO el archivo de video original.
+                <strong>&#128161;</strong> {{ t('cluster_frames.delete_hint') }}
             </div>
         </div>
         <div class="modal-footer">
-            <button class="btn btn-cancel" onclick="closeModal('deleteModal')">Cancelar</button>
-            <button class="btn btn-confirm" onclick="confirmDelete()">&#128465; Eliminar (<span id="deleteModalCountBtn">0</span>)</button>
+            <button class="btn btn-cancel" onclick="closeModal('deleteModal')">{{ t('common.cancel') }}</button>
+            <button class="btn btn-confirm" onclick="confirmDelete()">&#128465; {{ t('common.delete') }} (<span id="deleteModalCountBtn">0</span>)</button>
         </div>
     </div>
 </div>
@@ -310,9 +310,9 @@
                 document.getElementById('clusterDescription').value = cluster.description || '';
 
                 // Update page title
-                const displayName = cluster.label || 'Persona ' + (clusterIndex + 1);
+                const displayName = cluster.label || t('clusters.person_label', {index: clusterIndex + 1});
                 document.getElementById('clusterDisplayName').textContent = displayName;
-                document.title = `Gestionar Frames - ${displayName}`;
+                document.title = t('cluster_frames.title', {name: displayName});
             }
         } catch (error) {
             console.error('Error loading cluster info:', error);
@@ -329,7 +329,7 @@
         const newDesc = descInput.value.trim() || null;
 
         saveBtn.disabled = true;
-        saveStatus.textContent = 'Guardando...';
+        saveStatus.textContent = t('cluster_frames.saving');
         saveStatus.className = 'save-status saving';
 
         try {
@@ -349,11 +349,11 @@
             clusterInfo = { ...originalClusterInfo };
 
             // Update page title
-            const displayName = newLabel || 'Persona ' + (clusterIndex + 1);
+            const displayName = newLabel || t('video_detail.clusters.person', {index: clusterIndex + 1});
             document.getElementById('clusterDisplayName').textContent = displayName;
-            document.title = `Gestionar Frames - ${displayName}`;
+            document.title = t('cluster_frames.title', {name: displayName});
 
-            saveStatus.innerHTML = '&#10003; Guardado';
+            saveStatus.innerHTML = '&#10003; ' + t('cluster_frames.saved');
             saveStatus.className = 'save-status saved';
 
             setTimeout(() => {
@@ -362,7 +362,7 @@
             }, 2000);
 
         } catch (error) {
-            saveStatus.textContent = 'Error al guardar';
+            saveStatus.textContent = t('errors.save_failed');
             saveStatus.className = 'save-status error';
             saveBtn.disabled = false;
             console.error('Error saving cluster info:', error);
@@ -405,9 +405,9 @@
         } catch (error) {
             console.error('Error loading frames:', error);
             document.getElementById('referenceFramesGrid').innerHTML =
-                `<div class="error">Error cargando frames: ${error.message}</div>`;
+                `<div class="error">${t('errors.load_frames')}: ${error.message}</div>`;
             document.getElementById('libraryFramesGrid').innerHTML =
-                `<div class="error">Error cargando biblioteca: ${error.message}</div>`;
+                `<div class="error">${t('errors.load_frames')}: ${error.message}</div>`;
         }
     }
 
@@ -442,7 +442,7 @@
         if (source === 'all') {
             // Load all video frames if not already loaded
             if (allVideoFrames.length === 0) {
-                document.getElementById('libraryFramesGrid').innerHTML = '<div class="loading">Cargando todos los frames...</div>';
+                document.getElementById('libraryFramesGrid').innerHTML = `<div class="loading">${t('cluster_frames.loading_all')}</div>`;
                 await loadAllVideoFrames();
             }
             renderAllFrames();
@@ -503,14 +503,14 @@
         let html = '';
         sortedKeys.forEach(sceneKey => {
             const frames = grouped[sceneKey];
-            const sceneLabel = sceneKey === 'unknown' ? 'Sin escena' : `Escena ${sceneKey}`;
+            const sceneLabel = sceneKey === 'unknown' ? t('cluster_frames.scene_unknown') : t('cluster_frames.scene_label', {num: sceneKey});
             const frameCount = frames.length;
 
             html += `
                 <div class="scene-group">
                     <div class="scene-group-header">
                         <span class="scene-group-title">${sceneLabel}</span>
-                        <span class="scene-group-count">${frameCount} frame${frameCount !== 1 ? 's' : ''}</span>
+                        <span class="scene-group-count">${t('clusters.frame_count_other', {count: frameCount})}</span>
                     </div>
                     <div class="scene-group-frames">
                         ${frames.map(frame => createCardFn(frame)).join('')}
@@ -558,7 +558,7 @@
         const grid = document.getElementById('referenceFramesGrid');
 
         if (referenceFrames.length === 0) {
-            grid.innerHTML = '<p class="empty-message">No hay referencias seleccionadas. Anade frames desde la biblioteca.</p>';
+            grid.innerHTML = `<p class="empty-message">${t('empty_state.no_references')}</p>`;
             return;
         }
 
@@ -569,7 +569,7 @@
         const grid = document.getElementById('libraryFramesGrid');
 
         if (libraryFrames.length === 0) {
-            grid.innerHTML = '<p class="empty-message">No hay mas frames disponibles.</p>';
+            grid.innerHTML = `<p class="empty-message">${t('empty_state.no_more_frames')}</p>`;
             return;
         }
 
@@ -590,7 +590,7 @@
         const availableFrames = allVideoFrames.filter(f => !clusterFilenames.has(f.filename));
 
         if (availableFrames.length === 0) {
-            grid.innerHTML = '<p class="empty-message">No hay frames adicionales disponibles.</p>';
+            grid.innerHTML = `<p class="empty-message">${t('empty_state.no_frames_filter')}</p>`;
             return;
         }
 
@@ -616,7 +616,7 @@
         let statusClass = '';
         if (isInOtherCluster) {
             statusClass = 'in-other-cluster';
-            statusIcon = `<span class="frame-status-icon" title="Ya en Persona ${frame.cluster_index + 1}">&#128100;</span>`;
+            statusIcon = `<span class="frame-status-icon" title="${t('cluster_frames.in_other_cluster', {index: frame.cluster_index + 1})}">&#128100;</span>`;
         }
 
         return `
@@ -635,9 +635,9 @@
                         <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
                     </div>
                     <div class="frame-meta">
-                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
-                        <span class="scene-info" title="Escena y frame">${sceneInfo}</span>
-                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                        <span class="quality-score" title="${t('cluster_frames.quality_score')}">${qualityScore.toFixed(1)}</span>
+                        <span class="scene-info" title="${t('cluster_frames.scene_frame')}">${sceneInfo}</span>
+                        <span class="expression-icon" title="${frame.expression || t('common.unknown')}">${expressionIcon}</span>
                     </div>
                 </div>
             </div>
@@ -651,7 +651,7 @@
 
         return `
             <div class="frame-card reference-frame-card" data-frame-id="${frame.id}">
-                <button class="frame-remove-btn" onclick="removeFromReferences(${frame.id})" title="Quitar de referencias">
+                <button class="frame-remove-btn" onclick="removeFromReferences(${frame.id})" title="${t('cluster_frames.remove_reference')}">
                     &times;
                 </button>
                 <img src="/api/analysis/${videoId}/clusters/${clusterIndex}/frames/${frame.id}/image"
@@ -663,8 +663,8 @@
                         <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
                     </div>
                     <div class="frame-meta">
-                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
-                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                        <span class="quality-score" title="${t('cluster_frames.quality_score')}">${qualityScore.toFixed(1)}</span>
+                        <span class="expression-icon" title="${frame.expression || t('common.unknown')}">${expressionIcon}</span>
                     </div>
                 </div>
             </div>
@@ -693,9 +693,9 @@
                         <div class="quality-fill" style="width: ${frame.quality_score || 0}%"></div>
                     </div>
                     <div class="frame-meta">
-                        <span class="quality-score" title="Puntuacion de calidad">${qualityScore.toFixed(1)}</span>
-                        <span class="scene-info" title="Escena y frame">${sceneInfo}</span>
-                        <span class="expression-icon" title="${frame.expression || 'Desconocida'}">${expressionIcon}</span>
+                        <span class="quality-score" title="${t('cluster_frames.quality_score')}">${qualityScore.toFixed(1)}</span>
+                        <span class="scene-info" title="${t('cluster_frames.scene_frame')}">${sceneInfo}</span>
+                        <span class="expression-icon" title="${frame.expression || t('common.unknown')}">${expressionIcon}</span>
                     </div>
                 </div>
             </div>
@@ -752,7 +752,7 @@
 
         // Library selection info
         document.getElementById('librarySelectionInfo').textContent =
-            `${selCount} seleccionado${selCount !== 1 ? 's' : ''}`;
+            t('selection.selected_count', {count: selCount});
 
         // Button states
         const btnAddToRefs = document.getElementById('btnAddToRefs');
@@ -778,9 +778,9 @@
 
         // Dynamic tooltip for disabled button
         if (isFull) {
-            btnAddToRefs.title = 'Maximo alcanzado. Quita referencias de la seccion superior para añadir nuevas.';
+            btnAddToRefs.title = t('errors.max_references_reached');
         } else if (selCount === 0) {
-            btnAddToRefs.title = 'Selecciona frames de la biblioteca';
+            btnAddToRefs.title = t('empty_state.select_frames_hint');
         } else {
             btnAddToRefs.title = '';
         }
@@ -885,11 +885,11 @@
 
             if (!response.ok) throw new Error('Error removing reference');
 
-            ThumbnailApp.showToast('Referencia eliminada', 'success');
+            ThumbnailApp.showToast(t('cluster_frames.reference_removed'), 'success');
             loadFrames();
 
         } catch (error) {
-            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
         }
     }
 
@@ -913,17 +913,17 @@
             const data = await response.json();
 
             if (data.added > 0) {
-                ThumbnailApp.showToast(`${data.added} frame${data.added > 1 ? 's' : ''} anadido${data.added > 1 ? 's' : ''} a referencias`, 'success');
+                ThumbnailApp.showToast(t('cluster_frames.frames_added_refs', {count: data.added}), 'success');
             }
             if (data.skipped > 0) {
-                ThumbnailApp.showToast(`${data.skipped} frame${data.skipped > 1 ? 's' : ''} omitido${data.skipped > 1 ? 's' : ''} (maximo ${MAX_REFS})`, 'warning');
+                ThumbnailApp.showToast(t('cluster_frames.frames_skipped_max', {count: data.skipped, max: MAX_REFS}), 'warning');
             }
 
             selectedLibraryIds.clear();
             loadFrames();
 
         } catch (error) {
-            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
         }
     }
 
@@ -941,7 +941,7 @@
         const framePaths = filenamesToPaths(selectedFilenames);
 
         if (framePaths.length === 0) {
-            ThumbnailApp.showToast('Error: no se encontraron los frames seleccionados', 'error');
+            ThumbnailApp.showToast(t('errors.frames_not_found'), 'error');
             return;
         }
 
@@ -960,10 +960,10 @@
             const data = await response.json();
 
             if (data.added > 0) {
-                ThumbnailApp.showToast(`${data.added} frame${data.added > 1 ? 's' : ''} anadido${data.added > 1 ? 's' : ''} al cluster`, 'success');
+                ThumbnailApp.showToast(t('cluster_frames.frames_added_cluster', {count: data.added}), 'success');
             }
             if (data.skipped > 0) {
-                ThumbnailApp.showToast(`${data.skipped} frame${data.skipped > 1 ? 's' : ''} ya estaba${data.skipped > 1 ? 'n' : ''} en el cluster`, 'info');
+                ThumbnailApp.showToast(t('cluster_frames.frames_already_in', {count: data.skipped}), 'info');
             }
 
             // Clear selection and reload
@@ -984,7 +984,7 @@
             updateCounters();
 
         } catch (error) {
-            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
         }
     }
 
@@ -1024,11 +1024,11 @@
 
             if (!response.ok) throw new Error('Error resetting references');
 
-            ThumbnailApp.showToast('Referencias restablecidas a las mejores por calidad', 'success');
+            ThumbnailApp.showToast(t('cluster_frames.reset_success'), 'success');
             loadFrames();
 
         } catch (error) {
-            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
         }
     }
 
@@ -1053,7 +1053,7 @@
 
             const data = await response.json();
 
-            ThumbnailApp.showToast(`${data.deleted} frame${data.deleted > 1 ? 's' : ''} eliminado${data.deleted > 1 ? 's' : ''}`, 'success');
+            ThumbnailApp.showToast(t('cluster_frames.delete_success', {count: data.deleted}), 'success');
 
             if (data.errors && data.errors.length > 0) {
                 console.warn('Delete errors:', data.errors);
@@ -1063,7 +1063,7 @@
             loadFrames();
 
         } catch (error) {
-            ThumbnailApp.showToast('Error: ' + error.message, 'error');
+            ThumbnailApp.showToast(t('common.error') + ': ' + error.message, 'error');
         }
     }
 

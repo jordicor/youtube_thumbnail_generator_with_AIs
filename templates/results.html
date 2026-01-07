@@ -1,28 +1,28 @@
 {% extends "base.html" %}
 
-{% block title %}Results - Thumbnail Generator{% endblock %}
+{% block title %}{{ t('results.title', id=job_id) }}{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <a href="/" class="back-link">&larr; Volver a videos</a>
-    <h1>Thumbnails Generados</h1>
+    <a href="/" class="back-link">&larr; {{ t('results.back') }}</a>
+    <h1>{{ t('results.thumbnails.title') }}</h1>
 </div>
 
 <div id="jobInfo" class="job-info">
-    <div class="loading">Cargando informacion del trabajo...</div>
+    <div class="loading">{{ t('results.loading_info') }}</div>
 </div>
 
 <div id="actionsBar" class="actions-bar" style="display: none;">
     <a id="downloadAllBtn" href="#" class="btn btn-primary">
-        Descargar todos (ZIP)
+        {{ t('results.thumbnails.download_all_zip') }}
     </a>
     <button id="regenerateBtn" class="btn btn-secondary" onclick="regenerate()">
-        Regenerar
+        {{ t('results.regenerate') }}
     </button>
 </div>
 
 <div id="thumbnailsGrid" class="thumbnails-grid">
-    <div class="loading">Cargando thumbnails...</div>
+    <div class="loading">{{ t('results.loading_thumbnails') }}</div>
 </div>
 {% endblock %}
 
@@ -48,13 +48,13 @@
 
             const infoDiv = document.getElementById('jobInfo');
             infoDiv.innerHTML = `
-                <p><strong>Estado:</strong> ${escapeHtml(data.status)}</p>
-                <p><strong>Progreso:</strong> ${escapeHtml(data.progress)}%</p>
-                <p><strong>Thumbnails:</strong> ${data.thumbnails_generated}/${data.total_thumbnails}</p>
+                <p><strong>${t('results.status')}:</strong> ${escapeHtml(data.status)}</p>
+                <p><strong>${t('results.progress')}:</strong> ${escapeHtml(data.progress)}%</p>
+                <p><strong>${t('results.thumbnails_count')}:</strong> ${data.thumbnails_generated}/${data.total_thumbnails}</p>
             `;
         } catch (error) {
             document.getElementById('jobInfo').innerHTML =
-                `<div class="error">Error cargando informacion: ${escapeHtml(error.message)}</div>`;
+                `<div class="error">${t('errors.load_info')}: ${escapeHtml(error.message)}</div>`;
         }
     }
 
@@ -67,7 +67,7 @@
             const thumbnails = await response.json();
 
             if (thumbnails.length === 0) {
-                grid.innerHTML = '<p>No hay thumbnails generados aun</p>';
+                grid.innerHTML = `<p>${t('results.no_thumbnails_yet')}</p>`;
                 actionsBar.style.display = 'none';
                 return;
             }
@@ -86,7 +86,7 @@
                         <p>${escapeHtml(thumb.text_overlay) || ''}</p>
                         <div class="thumbnail-actions">
                             <a href="/api/thumbnails/${thumb.id}" download class="btn btn-primary btn-small">
-                                Descargar
+                                ${t('results.thumbnails.download')}
                             </a>
                         </div>
                     </div>
@@ -94,7 +94,7 @@
                 grid.appendChild(card);
             }
         } catch (error) {
-            grid.innerHTML = `<div class="error">Error cargando thumbnails: ${escapeHtml(error.message)}</div>`;
+            grid.innerHTML = `<div class="error">${t('errors.load_thumbnails')}: ${escapeHtml(error.message)}</div>`;
             actionsBar.style.display = 'none';
         }
     }
