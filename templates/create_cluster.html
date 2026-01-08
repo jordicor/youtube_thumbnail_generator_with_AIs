@@ -109,7 +109,7 @@
                 &#10060; {{ t('common.cancel') }}
             </a>
             <button class="btn btn-primary btn-large" id="btnCreateCluster" onclick="createCluster()" disabled>
-                &#10003; {{ t('create_cluster.create_button', count='<span id="clusterFrameCount">0</span>') }}
+                &#10003; {{ t('create_cluster.create_button', count='<span id="clusterFrameCount">0</span>') | safe }}
             </button>
         </div>
     </section>

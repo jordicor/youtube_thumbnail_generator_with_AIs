@@ -33,12 +33,14 @@ from config import (
     THUMBNAIL_HEIGHT,
     IMAGE_PROVIDER,
     KEEP_RAW_THUMBNAILS,
+    USE_PROMPT_SYSTEM_V3,
 )
 from utils import setup_logger, VideoOutput
 from prompt_generation import (
     ThumbnailPrompt,
     ThumbnailConcept,
     ThumbnailVariation,
+    ThumbnailImage,
     enhance_prompt_with_face_description,
     enhance_prompt_with_face_description_from_text,
     get_json_prompt_for_generation
@@ -120,6 +122,541 @@ def get_effective_model(provider: str, gemini_model: str = None,
 
 
 # =============================================================================
+# V1 PROMPT HELPERS - SUBJECTS SECTION FOR TEXT PROMPTS
+# =============================================================================
+
+def build_subjects_section(
+    subjects: list[dict],
+    face_groups: dict = None,
+    style_source: str = None
+) -> str:
+    """
+    Build a subjects identification section for image generation prompts.
+
+    This section tells the image generation AI how to identify each person
+    in the reference images, which faces are the same person, and which
+    outfit to use for the final image.
+
+    Args:
+        subjects: List of subject dictionaries with:
+                  id, visual_identifier, inferred_role, face_group,
+                  is_costume_variant, variant_of
+        face_groups: Dict mapping face_group IDs to member lists, e.g.:
+                     {"face_A": {"members": ["person_01", "person_02"], "description": "..."}}
+        style_source: Subject ID whose outfit should be used in the final image
+
+    Returns:
+        Formatted string section for the image prompt, or empty string if no subjects
+    """
+    if not subjects:
+        return ""
+
+    lines = [
+        "═══════════════════════════════════════════════════════════════════════════════",
+        "REFERENCE IMAGE IDENTITY MAPPING - CLONE THESE EXACT FACES",
+        "═══════════════════════════════════════════════════════════════════════════════",
+        "The attached reference images contain REAL PEOPLE. You MUST clone their",
+        "EXACT faces from those images. Each person_XX ID maps to specific references.",
+        ""
+    ]
+
+    # Face groups section - critical for same-person-different-outfit scenarios
+    if face_groups:
+        lines.append("FACE GROUPS (same person, different outfits - use ALL images to learn face):")
+        lines.append("─────────────────────────────────────────────────────────────────────────────")
+        for group_id, group_data in face_groups.items():
+            if isinstance(group_data, dict):
+                members = group_data.get("members", [])
+                description = group_data.get("description", "")
+            else:
+                # Handle case where group_data is just a list
+                members = group_data if isinstance(group_data, list) else []
+                description = ""
+
+            members_str = ", ".join(members) if members else "unknown"
+            lines.append(f"  • {group_id}: [{members_str}]")
+            lines.append(f"    → Use ALL reference images of these IDs to learn this ONE face")
+            if description:
+                lines.append(f"    → {description}")
+        lines.append("")
+
+    # Subjects section
+    lines.append("SUBJECTS FROM REFERENCE IMAGES:")
+    lines.append("─────────────────────────────────────────────────────────────────────────────")
+
+    for s in subjects:
+        subject_id = s.get('id', 'unknown')
+        visual_id = s.get('visual_identifier', 'no description')
+        role = s.get('inferred_role', '')
+        face_group = s.get('face_group', '')
+        is_variant = s.get('is_costume_variant', False)
+        variant_of = s.get('variant_of')
+        is_style = (style_source == subject_id) if style_source else False
+
+        # Build the subject line
+        line = f"  • {subject_id}"
+        if face_group:
+            line += f" (face: {face_group})"
+        line += f": {visual_id}"
+
+        if role:
+            line += f" → {role}"
+
+        lines.append(line)
+
+        # Add annotations
+        if is_variant and variant_of:
+            lines.append(f"    ↳ SAME FACE as {variant_of} - clone IDENTICAL facial features")
+        if is_style:
+            lines.append(f"    ↳ ★ USE THIS OUTFIT/STYLING FOR THE FINAL IMAGE ★")
+
+    # Style source explicit mention
+    lines.append("")
+    if style_source:
+        lines.append(f"OUTFIT/STYLING: Use {style_source}'s appearance (clothing, hair style, accessories)")
+    else:
+        lines.append("OUTFIT/STYLING: Use the first subject's appearance")
+
+    lines.extend([
+        "",
+        "CRITICAL GENERATION RULES:",
+        "─────────────────────────────────────────────────────────────────────────────",
+        "1. FACE: Clone the EXACT face from ALL reference images in the same face_group",
+        "2. OUTFIT: Use the outfit from the subject marked as style_source",
+        "3. VERIFICATION: A friend of this person MUST recognize them INSTANTLY",
+        "4. NO MODIFICATIONS: Same nose, eyes, lips, skin tone, body type as references",
+        "═══════════════════════════════════════════════════════════════════════════════",
+        ""
+    ])
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# V3 PROMPT SYSTEM - OPTIMIZED JSON STRUCTURE (~1,000 chars)
+# =============================================================================
+# V3 features:
+# - Clear face_groups/characters/scene separation (single source of truth)
+# - physical_description for facial features in face_groups
+# - identify_in_references for cross-references in characters
+# - character_directions only for ACTIVE characters in scene
+# - No redundancies (face_groups, style_source defined once)
+# - Generation constraints and clone rules at the top
+# =============================================================================
+
+import re
+
+
+def _build_clone_rules() -> dict:
+    """
+    Build static clone rules section for V3 prompt.
+
+    These rules instruct the image AI on how to use reference images
+    for face cloning vs outfit cloning. Includes hard restrictions.
+    """
+    return {
+        "CRITICAL": "Every person in this image MUST be cloned from the attached reference photos. Creating new faces is STRICTLY FORBIDDEN.",
+        "face_rule": "For each face_group, use ALL attached reference images of that group to clone the face with 100% accuracy. The generated face MUST be immediately recognizable as the same person.",
+        "outfit_rule": "Clone exact outfit from the style_source character's reference images.",
+        "FORBIDDEN": [
+            "Creating any face not present in attached references",
+            "Using generic faces from training data",
+            "Changing facial proportions, eye spacing, nose shape, or skin tone",
+            "Adding or removing facial hair, glasses, or distinctive features",
+            "Generating persons not identified in the characters dict"
+        ],
+        "VERIFICATION": "A friend of this person MUST recognize them INSTANTLY in the generated image."
+    }
+
+
+def _build_generation_constraints() -> dict:
+    """
+    Build hard constraints for face/character generation.
+
+    These constraints MUST appear at the top of the JSON to establish
+    the absolute rules before any creative content.
+    """
+    return {
+        "face_source": "attached_reference_images_only",
+        "source_restriction": "ALL persons in the generated image MUST be EXACT clones from the attached reference photos. You are FORBIDDEN from creating new faces or using faces from your training data.",
+        "character_restriction": "Every human in the image MUST match a person_XX from the characters dict below. The attached reference images are your ONLY source for human faces.",
+        "enforcement": "STRICT - zero tolerance for new faces or identity drift"
+    }
+
+
+def _build_face_groups_v3(image: ThumbnailImage) -> dict:
+    """
+    Build face_groups section for V3 prompt.
+
+    Handles both V3 native format (with physical_description) and
+    legacy format (with description/members).
+
+    Args:
+        image: ThumbnailImage containing face_groups data
+
+    Returns:
+        dict mapping group IDs to group data with physical_description
+    """
+    if not image.face_groups:
+        return {}
+
+    result = {}
+    for group_id, group_data in image.face_groups.items():
+        if isinstance(group_data, dict):
+            # V3 format: physical_description + characters_with_this_face
+            physical_desc = group_data.get("physical_description", "")
+            members = group_data.get("characters_with_this_face") or group_data.get("members", [])
+            description = group_data.get("description", "")
+
+            # Fallback: use description if no physical_description
+            if not physical_desc and description:
+                physical_desc = description
+        else:
+            # Handle legacy format where group_data is just a list
+            members = group_data if isinstance(group_data, list) else []
+            physical_desc = ""
+
+        # Build members string for clone instruction
+        members_str = ", ".join(members) if members else "unknown"
+
+        result[group_id] = {
+            "physical_description": physical_desc or f"Person appearing in references as {members_str}",
+            "characters_with_this_face": members,
+            "clone_instruction": f"Use ALL reference images of {members_str} together to accurately clone this face"
+        }
+
+    return result
+
+
+def _extract_outfit_from_visual_identifier(visual_identifier: str) -> str:
+    """
+    Extract outfit description from visual_identifier.
+
+    Handles both old format "FROM REFERENCES: outfit description"
+    and new format with direct outfit text.
+    """
+    if not visual_identifier:
+        return "outfit from reference"
+
+    # Remove "FROM REFERENCES:" prefix if present
+    if visual_identifier.upper().startswith("FROM REFERENCES:"):
+        return visual_identifier[16:].strip()
+
+    return visual_identifier
+
+
+def _build_identify_in_references(subject: dict, face_groups: dict) -> str:
+    """
+    Build identify_in_references string for a subject.
+
+    Creates a clear instruction on how to find this character in references,
+    using cross-references to other characters when they share a face.
+
+    Args:
+        subject: Subject dict with id, face_group, visual_identifier, etc.
+        face_groups: Dict of all face groups
+
+    Returns:
+        String like "Look for: woman matching group_A description, wearing blue dress"
+    """
+    subject_id = subject.get('id', 'unknown')
+    face_group = subject.get('face_group', '')
+    visual_id = subject.get('visual_identifier', '')
+    is_variant = subject.get('is_costume_variant', False)
+    variant_of = subject.get('variant_of')
+
+    # Extract outfit description
+    outfit = _extract_outfit_from_visual_identifier(visual_id)
+
+    # If this is a costume variant, reference the original
+    if is_variant and variant_of:
+        return f"Look for: same person as {variant_of}, but wearing {outfit}"
+
+    # If we have face group info, reference it
+    if face_group and face_groups:
+        group_data = face_groups.get(face_group, {})
+        if isinstance(group_data, dict):
+            physical = group_data.get('physical_description', '')
+            if physical:
+                # Shorten physical description for identify string
+                short_physical = physical.split(',')[0] if ',' in physical else physical
+                return f"Look for: {short_physical}, {outfit}"
+
+    # Fallback: just describe the outfit
+    return f"Look for: person with {outfit}"
+
+
+def _build_characters_v3(image: ThumbnailImage) -> dict:
+    """
+    Build characters section for V3 prompt.
+
+    Prefers native V3 format (image.characters dict) if available.
+    Falls back to converting legacy subjects array.
+
+    Args:
+        image: ThumbnailImage containing characters or subjects data
+
+    Returns:
+        dict mapping character IDs to character data
+    """
+    # V3 native: use characters dict directly if available
+    if image.characters:
+        return image.characters
+
+    # Fallback: convert legacy subjects array to characters dict
+    if not image.subjects:
+        return {}
+
+    characters = {}
+    for s in image.subjects:
+        subject_id = s.get('id', 'unknown')
+
+        # Get outfit from visual_identifier or dedicated outfit field
+        outfit = s.get('outfit') or _extract_outfit_from_visual_identifier(
+            s.get('visual_identifier', '')
+        )
+
+        # Build identify_in_references
+        identify = s.get('identify_in_references') or _build_identify_in_references(
+            s, image.face_groups or {}
+        )
+
+        characters[subject_id] = {
+            "belongs_to_face": s.get('face_group', 'group_A'),
+            "outfit": outfit,
+            "identify_in_references": identify
+        }
+
+    return characters
+
+
+def _extract_active_characters_from_scene(
+    scene_text: str,
+    subjects: list = None,
+    characters: dict = None
+) -> list:
+    """
+    Extract which characters are ACTIVE in the scene description.
+
+    Searches for person_XX IDs in the scene text to determine which
+    characters actually appear in this specific scene.
+
+    Args:
+        scene_text: Scene description text (e.g., "person_02 sits at desk...")
+        subjects: Legacy list of subject dicts (V2 format)
+        characters: V3 dict mapping person_XX to character data
+
+    Returns:
+        List of character IDs that appear in the scene
+    """
+    # Collect all character IDs from either format
+    all_ids = []
+    if characters:
+        all_ids = list(characters.keys())
+    elif subjects:
+        all_ids = [s.get('id', '') for s in subjects if s.get('id')]
+
+    if not scene_text or not all_ids:
+        # Fallback: return first character if available
+        if all_ids:
+            return [all_ids[0]]
+        return ['person_01']
+
+    # Find which IDs appear in the scene text
+    active = [char_id for char_id in all_ids if char_id in scene_text]
+
+    # If no characters found in scene text, assume first character
+    if not active and all_ids:
+        active = [all_ids[0]]
+
+    return active
+
+
+def _build_scene_v3(image: ThumbnailImage) -> dict:
+    """
+    Build scene section for V3 prompt.
+
+    Creates scene with:
+    - description: what's happening
+    - character_directions: pose/expression for ACTIVE characters only
+    - environment: setting, props, lighting, effects
+
+    Args:
+        image: ThumbnailImage with scene data
+
+    Returns:
+        dict with scene structure
+    """
+    # Get active characters from scene description (supports both V3 and legacy formats)
+    active_chars = _extract_active_characters_from_scene(
+        scene_text=image.scene or image.image_prompt,
+        subjects=image.subjects,
+        characters=image.characters
+    )
+
+    # Build character_directions only for active characters
+    character_directions = {}
+    for char_id in active_chars:
+        # Find position info if available in scene text
+        position = "center frame"  # Default
+        scene_lower = (image.scene or "").lower()
+        if f"{char_id.lower()} on left" in scene_lower or "left side" in scene_lower:
+            position = "left side of frame"
+        elif f"{char_id.lower()} on right" in scene_lower or "right side" in scene_lower:
+            position = "right side of frame"
+        elif "behind" in scene_lower:
+            position = "behind desk/table"
+        elif "seated" in scene_lower or "sitting" in scene_lower:
+            position = "seated"
+
+        character_directions[char_id] = {
+            "position": position,
+            "pose": image.subject_pose or "natural engaging pose",
+            "expression": image.subject_expression or "engaging expression"
+        }
+
+    # Build environment
+    environment = {
+        "setting": image.background or "professional studio background",
+        "props": image.visual_elements or [],
+        "lighting": image.lighting or "professional three-point lighting"
+    }
+
+    # Add effects if present (V3 field)
+    if image.environment_effects:
+        environment["effects"] = image.environment_effects
+
+    return {
+        "description": image.scene or image.image_prompt,
+        "character_directions": character_directions,
+        "environment": environment
+    }
+
+
+def build_image_prompt_v3(
+    image: ThumbnailImage,
+    has_reference_images: bool = False
+) -> dict:
+    """
+    Build a V3 optimized JSON prompt from ThumbnailImage.
+
+    V3 structure with hard constraints for identity preservation:
+    - generation_constraints: HARD restrictions (face source, forbidden actions)
+    - clone_rules: Instructions for face/outfit cloning with enforcement
+    - face_groups: Real people with physical descriptions
+    - characters: Each appearance/outfit with identification
+    - scene: What happens, with character_directions for ACTIVE chars only
+    - output: Quality and aspect ratio
+
+    Args:
+        image: ThumbnailImage with all fields
+        has_reference_images: Whether reference images will be provided
+
+    Returns:
+        dict ready to serialize to JSON for image generation
+    """
+    prompt_dict = {}
+
+    # Check if we have identity data (V3 characters or legacy subjects)
+    has_identity_data = image.characters or image.subjects
+
+    # Only include constraints and identity sections if we have references and identity data
+    if has_reference_images and has_identity_data:
+        # Generation constraints FIRST - hard restrictions before any creative content
+        prompt_dict["generation_constraints"] = _build_generation_constraints()
+
+        # Clone rules with enforcement
+        prompt_dict["clone_rules"] = _build_clone_rules()
+
+        # Face groups with physical descriptions
+        face_groups = _build_face_groups_v3(image)
+        if face_groups:
+            prompt_dict["face_groups"] = face_groups
+
+        # Characters (replaces subjects array)
+        characters = _build_characters_v3(image)
+        if characters:
+            prompt_dict["characters"] = characters
+
+    # Scene with character_directions for active characters only
+    prompt_dict["scene"] = _build_scene_v3(image)
+
+    # Output settings
+    prompt_dict["output"] = {
+        "quality": image.quality or "8K photorealistic YouTube thumbnail",
+        "aspect_ratio": "16:9"
+    }
+
+    # Optional: text_in_image (different from text_overlay which is for UI)
+    if image.text_in_image:
+        prompt_dict["text_in_image"] = image.text_in_image
+
+    return prompt_dict
+
+
+def _build_face_source_header() -> str:
+    """
+    Build a mandatory header that establishes face source restrictions.
+
+    This header appears BEFORE the JSON to ensure the image AI reads
+    the constraints before processing any creative content.
+    """
+    return """═══════════════════════════════════════════════════════════════════════════════
+MANDATORY FACE SOURCE RESTRICTION - READ BEFORE PROCESSING
+═══════════════════════════════════════════════════════════════════════════════
+ALL persons in this image MUST be cloned from the attached reference photos.
+You are STRICTLY FORBIDDEN from:
+  - Creating new faces not visible in the reference images
+  - Using generic/stock faces from your training data
+  - Generating any human face that doesn't match a reference photo
+
+The attached reference images are your ONLY source for human faces.
+Each person_XX in the JSON below maps to specific reference photos.
+Clone their EXACT face - a friend must recognize them INSTANTLY.
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+
+
+def build_v3_prompt_string(
+    image: ThumbnailImage,
+    has_reference_images: bool = False
+) -> str:
+    """
+    Build a V3 JSON prompt string from ThumbnailImage.
+
+    When reference images are provided, includes a header with hard
+    constraints before the JSON content.
+
+    Returns:
+        String with optional header + JSON content
+    """
+    import json
+    prompt_dict = build_image_prompt_v3(image, has_reference_images)
+    json_content = json.dumps(prompt_dict, indent=2, ensure_ascii=False)
+
+    # Add header only when we have references and identity data
+    has_identity_data = image.characters or image.subjects
+    if has_reference_images and has_identity_data:
+        return _build_face_source_header() + json_content
+
+    return json_content
+
+
+def get_prompt_system_version() -> str:
+    """
+    Get the currently active prompt system version.
+
+    Returns:
+        "V3" if USE_PROMPT_SYSTEM_V3 is True (default)
+        "V1" otherwise (legacy fallback)
+    """
+    if USE_PROMPT_SYSTEM_V3:
+        return "V3"
+    return "V1"
+
+
+# =============================================================================
 # IMAGE GENERATION PROVIDERS
 # =============================================================================
 
@@ -127,15 +664,22 @@ def generate_with_gemini(
     prompt: str,
     reference_images: list[Path] = None,
     output_path: Path = None,
-    model: str = None
+    model: str = None,
+    concept: ThumbnailConcept = None,
+    variation: ThumbnailVariation = None,
+    image: ThumbnailImage = None
 ) -> Optional[Path]:
     """
     Generate image using Google Gemini API (Nano Banana / Nano Banana Pro).
 
     Args:
-        prompt: Text prompt for image generation
+        prompt: Text prompt for image generation (V1) or fallback (V2)
         reference_images: Optional list of reference image paths
         output_path: Where to save the generated image
+        model: Gemini model to use
+        concept: V2 - ThumbnailConcept with structured fields (legacy)
+        variation: V2 - ThumbnailVariation with structured fields (legacy)
+        image: New flat ThumbnailImage structure (preferred)
 
     Returns:
         Path to generated image or None if failed
@@ -151,11 +695,27 @@ def generate_with_gemini(
 
         client = genai.Client(api_key=GEMINI_API_KEY)
 
-        # Build the prompt with STRICT identity preservation
-        if reference_images and len(reference_images) > 0:
-            full_prompt = f"""STRICT IDENTITY CLONING - THIS IS THE SAME PERSON, NOT A SIMILAR ONE:
-The generated image MUST show an EXACT CLONE of the person in the reference photos.
-This is NOT "inspired by" or "similar to" - it must be THE EXACT SAME PERSON.
+        has_refs = reference_images and len(reference_images) > 0
+
+        # V3: Optimized JSON structure (default when ThumbnailImage available)
+        if USE_PROMPT_SYSTEM_V3 and image and image.has_v2_fields():
+            logger.info("Using V3 optimized JSON prompt from ThumbnailImage (~1,000 chars)")
+            full_prompt = build_v3_prompt_string(image, has_refs)
+            logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
+
+        # V1: Legacy text prompt with negations (~3,500 chars)
+        elif has_refs:
+            # Build subjects section if available (from image or legacy concept)
+            subjects_text = ""
+            subjects = (image.subjects if image else None) or (concept.subjects if concept else None)
+            face_groups = (image.face_groups if image else None) or (getattr(concept, 'face_groups', None) if concept else None)
+            style_source = (image.style_source if image else None) or (getattr(concept, 'style_source', None) if concept else None)
+            if subjects:
+                subjects_text = build_subjects_section(subjects, face_groups, style_source) + "\n"
+
+            full_prompt = f"""{subjects_text}STRICT IDENTITY CLONING - THIS IS THE SAME PERSON, NOT A SIMILAR ONE:
+The generated image MUST show an EXACT CLONE of the person(s) in the reference photos.
+This is NOT "inspired by" or "similar to" - it must be THE EXACT SAME PERSON(S).
 
 ═══════════════════════════════════════════════════════════════
 ABSOLUTELY FORBIDDEN - DO NOT DO ANY OF THESE:
@@ -186,12 +746,13 @@ MANDATORY - COPY EXACTLY FROM REFERENCE:
 ✅ Same clothing from reference images
 ✅ Same accessories (glasses, earrings, etc.)
 
-SCENE TO CREATE (THIS IS THE PRIMARY INSTRUCTION):
+SCENE TO CREATE (uses subject IDs from above if provided):
 {prompt}
 
-IMPORTANT: The scene description above is the MAIN guide for what to create.
-Reference images provide identity to preserve, but the scene, composition,
-background, and action should follow the prompt above, not the reference images.
+IMPORTANT: The scene description uses subject IDs (person_01, person_02, etc.) to
+indicate which person from the references does what. Match each ID to the
+corresponding reference image based on the subject identification above.
+Reference images provide identity to preserve; the scene describes actions/poses.
 
 TECHNICAL:
 - 16:9 aspect ratio (1280x720)
@@ -199,7 +760,7 @@ TECHNICAL:
 - Bold, contrasting colors
 - DO NOT include any text in the image
 
-VERIFICATION: A friend of this person should recognize them INSTANTLY.
+VERIFICATION: A friend of these people should recognize them INSTANTLY.
 """
         else:
             full_prompt = f"""Create a professional YouTube thumbnail.
@@ -313,7 +874,10 @@ def generate_with_openai(
     prompt: str,
     reference_images: list[Path] = None,
     output_path: Path = None,
-    model: str = None
+    model: str = None,
+    concept: ThumbnailConcept = None,
+    variation: ThumbnailVariation = None,
+    image: ThumbnailImage = None
 ) -> Optional[Path]:
     """
     Generate image using OpenAI GPT Image or DALL-E.
@@ -324,7 +888,14 @@ def generate_with_openai(
     - gpt-image-1-mini (faster, lower cost) - up to 16 reference images
     - dall-e-3 (legacy, deprecated) - NO reference support
 
-    Reference images are passed as base64 encoded images in the prompt.
+    Args:
+        prompt: Text prompt for image generation (V1) or fallback (V2)
+        reference_images: Reference images are passed as base64 encoded images
+        output_path: Where to save the generated image
+        model: OpenAI model to use
+        concept: V2 - ThumbnailConcept with structured fields (legacy)
+        variation: V2 - ThumbnailVariation with structured fields (legacy)
+        image: New flat ThumbnailImage structure (preferred)
     """
 
     if not OPENAI_API_KEY:
@@ -354,28 +925,44 @@ def generate_with_openai(
         if has_refs:
             logger.info(f"Using up to {max_refs} reference images")
 
-        # Build prompt with YouTube specific instructions and reference context
-        if has_refs:
+        # V3: Optimized JSON structure (default when ThumbnailImage available)
+        if USE_PROMPT_SYSTEM_V3 and image and image.has_v2_fields():
+            logger.info("Using V3 optimized JSON prompt from ThumbnailImage (~1,000 chars)")
+            full_prompt = build_v3_prompt_string(image, has_refs)
+            logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
+
+        # V1: Legacy text prompt
+        elif has_refs:
+            # Build subjects section if available (from image or legacy concept)
+            subjects_text = ""
+            subjects = (image.subjects if image else None) or (concept.subjects if concept else None)
+            face_groups = (image.face_groups if image else None) or (getattr(concept, 'face_groups', None) if concept else None)
+            style_source = (image.style_source if image else None) or (getattr(concept, 'style_source', None) if concept else None)
+            if subjects:
+                subjects_text = build_subjects_section(subjects, face_groups, style_source) + "\n"
+
             # Build prompt with reference image instructions
             ref_count = min(len(reference_images), max_refs)
-            full_prompt = f"""STRICT IDENTITY CLONING from the {ref_count} reference image(s) provided.
-The generated image MUST show the EXACT SAME PERSON from the reference photos.
+            full_prompt = f"""{subjects_text}STRICT IDENTITY CLONING from the {ref_count} reference image(s) provided.
+The generated image MUST show the EXACT SAME PERSON(S) from the reference photos.
 
 Professional YouTube video thumbnail.
 
+SCENE (uses subject IDs if provided above):
 {prompt}
 
 MANDATORY - COPY EXACTLY FROM REFERENCE:
-- Exact facial features and proportions
+- Exact facial features and proportions for each person
 - Same hair style, color, and length
 - Same skin tone and texture
 - Same body type
+- Costume variants (same person in different outfit) = IDENTICAL face
 
 Style: Bold, eye-catching YouTube thumbnail with high contrast colors.
 Do NOT include any text or letters in the image.
 Photorealistic style, professional quality.
 
-VERIFICATION: A friend of this person should recognize them INSTANTLY.
+VERIFICATION: A friend of these people should recognize them INSTANTLY.
 """
         else:
             full_prompt = f"""Professional YouTube video thumbnail.
@@ -622,7 +1209,10 @@ def generate_with_poe(
     prompt: str,
     reference_images: list[Path] = None,
     output_path: Path = None,
-    model: str = None
+    model: str = None,
+    concept: ThumbnailConcept = None,
+    variation: ThumbnailVariation = None,
+    image: ThumbnailImage = None
 ) -> Optional[Path]:
     """
     Generate image using Poe API with FLUX/Ideogram models.
@@ -637,10 +1227,13 @@ def generate_with_poe(
         - Ideogram-v3: Best for text/logos
 
     Args:
-        prompt: Text prompt for image generation
+        prompt: Text prompt for image generation (V1) or fallback (V2)
         reference_images: Optional list of reference image paths (up to 3)
         output_path: Where to save the generated image
         model: Model to use (default from config: flux2pro)
+        concept: V2 - ThumbnailConcept with structured fields (legacy)
+        variation: V2 - ThumbnailVariation with structured fields (legacy)
+        image: New flat ThumbnailImage structure (preferred)
 
     Returns:
         Path to generated image or None if failed
@@ -668,6 +1261,7 @@ def generate_with_poe(
 
         # Add reference images
         # Each model has different limits (nanobananapro: 14, fluxkontextpro: 1, etc.)
+        has_refs = reference_images and len(reference_images) > 0
         if reference_images:
             max_images = POE_MODEL_MAX_REFS.get(selected_model, 8)
             for img_path in reference_images[:max_images]:
@@ -693,11 +1287,25 @@ def generate_with_poe(
                     except Exception as e:
                         logger.warning(f"Could not load reference image {img_path}: {e}")
 
-        # Build prompt with STRICT identity preservation instructions
-        if reference_images and len(reference_images) > 0:
-            full_prompt = f"""STRICT IDENTITY CLONING - THIS IS THE SAME PERSON, NOT A SIMILAR ONE:
-The generated image MUST show an EXACT CLONE of the person in the reference photos.
-This is NOT "inspired by" or "similar to" - it must be THE EXACT SAME PERSON.
+        # V3: Optimized JSON structure (default when ThumbnailImage available)
+        if USE_PROMPT_SYSTEM_V3 and image and image.has_v2_fields():
+            logger.info("Using V3 optimized JSON prompt from ThumbnailImage (~1,000 chars)")
+            full_prompt = build_v3_prompt_string(image, has_refs)
+            logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
+
+        # V1: Legacy text prompt with negations (~3,500 chars)
+        elif has_refs:
+            # Build subjects section if available (from image or legacy concept)
+            subjects_text = ""
+            subjects = (image.subjects if image else None) or (concept.subjects if concept else None)
+            face_groups = (image.face_groups if image else None) or (getattr(concept, 'face_groups', None) if concept else None)
+            style_source = (image.style_source if image else None) or (getattr(concept, 'style_source', None) if concept else None)
+            if subjects:
+                subjects_text = build_subjects_section(subjects, face_groups, style_source) + "\n"
+
+            full_prompt = f"""{subjects_text}STRICT IDENTITY CLONING - THIS IS THE SAME PERSON, NOT A SIMILAR ONE:
+The generated image MUST show an EXACT CLONE of the person(s) in the reference photos.
+This is NOT "inspired by" or "similar to" - it must be THE EXACT SAME PERSON(S).
 
 ═══════════════════════════════════════════════════════════════
 ABSOLUTELY FORBIDDEN - DO NOT DO ANY OF THESE:
@@ -728,8 +1336,12 @@ MANDATORY - COPY EXACTLY FROM REFERENCE:
 ✅ Same clothing from reference images
 ✅ Same accessories (glasses, earrings, etc.)
 
-SCENE TO CREATE:
+SCENE TO CREATE (uses subject IDs from above if provided):
 {prompt}
+
+IMPORTANT: The scene description uses subject IDs (person_01, person_02, etc.) to
+indicate which person from the references does what. Match each ID to the
+corresponding reference image based on the subject identification above.
 
 TECHNICAL:
 - YouTube thumbnail style: bold, eye-catching, professional
@@ -737,7 +1349,7 @@ TECHNICAL:
 - High contrast colors
 - DO NOT include any text in the image
 
-VERIFICATION: A friend of this person should recognize them INSTANTLY."""
+VERIFICATION: A friend of these people should recognize them INSTANTLY."""
         else:
             full_prompt = f"""Create a professional YouTube thumbnail.
 
@@ -1070,7 +1682,10 @@ thumbnail. Clone their identity ONLY from reference images 2 onwards.
                 kwargs = {
                     "prompt": enhanced_prompt,
                     "reference_images": best_frames[:14] if best_frames else None,
-                    "output_path": output_path
+                    "output_path": output_path,
+                    # V2: Pass concept and variation for structured prompts
+                    "concept": concept,
+                    "variation": variation
                 }
                 if selected_provider == "gemini" and gemini_model:
                     kwargs["model"] = gemini_model
@@ -1078,6 +1693,10 @@ thumbnail. Clone their identity ONLY from reference images 2 onwards.
                     kwargs["model"] = openai_model
                 elif selected_provider == "poe" and poe_model:
                     kwargs["model"] = poe_model
+                # Replicate doesn't support V2 yet, remove concept/variation
+                if selected_provider == "replicate":
+                    kwargs.pop("concept", None)
+                    kwargs.pop("variation", None)
 
                 result = primary_generator(**kwargs)
                 if result:
@@ -1099,7 +1718,10 @@ thumbnail. Clone their identity ONLY from reference images 2 onwards.
                         kwargs = {
                             "prompt": enhanced_prompt,
                             "reference_images": best_frames[:14] if best_frames else None,
-                            "output_path": fallback_path
+                            "output_path": fallback_path,
+                            # V2: Pass concept and variation for structured prompts
+                            "concept": concept,
+                            "variation": variation
                         }
                         if provider == "gemini" and gemini_model:
                             kwargs["model"] = gemini_model
@@ -1107,6 +1729,10 @@ thumbnail. Clone their identity ONLY from reference images 2 onwards.
                             kwargs["model"] = openai_model
                         elif provider == "poe" and poe_model:
                             kwargs["model"] = poe_model
+                        # Replicate doesn't support V2 yet, remove concept/variation
+                        if provider == "replicate":
+                            kwargs.pop("concept", None)
+                            kwargs.pop("variation", None)
 
                         result = generator(**kwargs)
                         if result:
@@ -1140,6 +1766,227 @@ thumbnail. Clone their identity ONLY from reference images 2 onwards.
                     'variation': variation
                 } if last_thumbnail else None
                 progress_callback(image_counter, total_images, thumbnail_info)
+
+    logger.success(f"Generated {len(generated_thumbnails)}/{total_images} thumbnails")
+    logger.info(f"Thumbnails saved to: {thumbnails_dir}")
+
+    return generated_thumbnails
+
+
+# =============================================================================
+# NEW IMAGE-BASED GENERATION (flat structure, no variations)
+# =============================================================================
+
+def generate_thumbnails_from_images(
+    images: list[ThumbnailImage],
+    best_frames: list[Path],
+    output: VideoOutput,
+    use_composite: bool = False,
+    gemini_model: str = None,
+    openai_model: str = None,
+    poe_model: str = None,
+    image_provider: str = None,
+    progress_callback: callable = None,
+    has_external_style_ref: bool = False
+) -> list[Path]:
+    """
+    Generate thumbnails from a flat list of ThumbnailImage objects.
+
+    This is the new simplified function that replaces generate_thumbnails().
+    Each ThumbnailImage is independent - no concept/variation hierarchy.
+
+    Args:
+        images: List of ThumbnailImage objects
+        best_frames: List of best frame paths for reference
+        output: VideoOutput instance
+        use_composite: If True, create composite instead of full AI generation
+        gemini_model: Override Gemini model
+        openai_model: Override OpenAI model
+        poe_model: Override Poe model
+        image_provider: Override image provider ("gemini", "openai", "replicate", "poe")
+        progress_callback: Optional callback function(current, total, thumbnail_info)
+                          thumbnail_info is a dict with: path, image_index, image
+        has_external_style_ref: If True, first reference image is an external style reference
+
+    Returns:
+        List of paths to generated thumbnails
+    """
+
+    thumbnails_dir = output.output_dir / "thumbnails"
+    thumbnails_dir.mkdir(exist_ok=True)
+
+    total_images = len(images)
+    logger.info(f"Generating {total_images} thumbnails")
+
+    generated_thumbnails = []
+
+    for img in images:
+        image_idx = img.image_index
+        timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+
+        # Determine model prefix for filename
+        selected_provider = image_provider or IMAGE_PROVIDER
+        effective_model = get_effective_model(
+            selected_provider, gemini_model, openai_model, poe_model
+        )
+        model_prefix = normalize_model_name_for_filename(effective_model)
+
+        # Simplified filename: model_timestamp_N.png
+        output_path = thumbnails_dir / f"{model_prefix}_{timestamp}_{image_idx}.png"
+
+        logger.info(f"\n[Image {image_idx}/{total_images}] {img.concept_name}: {img.suggested_title}")
+
+        # Option 1: Composite thumbnail
+        if use_composite and best_frames:
+            composite_path = thumbnails_dir / f"composite_{timestamp}_{image_idx}.png"
+            result = create_composite_thumbnail(
+                background_prompt=img.image_prompt,
+                face_frame=best_frames[0],
+                text_overlay=img.text_overlay,
+                output_path=composite_path,
+                colors=img.colors
+            )
+            if result:
+                generated_thumbnails.append(result)
+                if progress_callback:
+                    progress_callback(image_idx, total_images, {
+                        'path': result,
+                        'image_index': image_idx,
+                        'image': img
+                    })
+            else:
+                if progress_callback:
+                    progress_callback(image_idx, total_images, None)
+            continue
+
+        # Option 2: Full AI generation
+        enhanced_prompt = enhance_prompt_with_face_description_from_text(
+            img.image_prompt,
+            best_frames[0] if best_frames else None
+        )
+
+        # Add note about external style reference if present
+        if has_external_style_ref and best_frames:
+            style_ref_note = """
+═══════════════════════════════════════════════════════════════════════════════
+STYLE REFERENCE (INSPIRATION ONLY - DO NOT COPY EXACTLY):
+═══════════════════════════════════════════════════════════════════════════════
+The FIRST reference image is for STYLE INSPIRATION only:
+- Use it as a loose guide for colors, mood, or aesthetic if relevant
+- The SCENE DESCRIPTION BELOW takes PRIORITY over the style reference
+- Do NOT replicate the style reference exactly - use it as inspiration only
+- Do NOT try to clone any person from the style reference
+
+PRIORITY ORDER:
+1. HIGHEST: The scene description below (image prompt)
+2. SECOND: Identity of the person from reference images 2 onwards
+3. LOWEST: Style inspiration from first reference (use loosely)
+
+The remaining reference images show the actual person who must appear in the
+thumbnail. Clone their identity ONLY from reference images 2 onwards.
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+            enhanced_prompt = style_ref_note + enhanced_prompt
+
+        # Try configured provider
+        selected_provider = image_provider or IMAGE_PROVIDER
+
+        generators = {
+            "gemini": generate_with_gemini,
+            "openai": generate_with_openai,
+            "replicate": generate_with_replicate,
+            "poe": generate_with_poe,
+        }
+
+        success = False
+
+        # Try primary provider
+        primary_generator = generators.get(selected_provider)
+        if primary_generator:
+            kwargs = {
+                "prompt": enhanced_prompt,
+                "reference_images": best_frames[:14] if best_frames else None,
+                "output_path": output_path,
+            }
+            # For V2 prompt support, pass ThumbnailImage
+            # Convert to concept/variation format for backward compatibility with providers
+            if selected_provider in ["gemini", "openai", "poe"]:
+                kwargs["image"] = img
+
+            if selected_provider == "gemini" and gemini_model:
+                kwargs["model"] = gemini_model
+            elif selected_provider == "openai" and openai_model:
+                kwargs["model"] = openai_model
+            elif selected_provider == "poe" and poe_model:
+                kwargs["model"] = poe_model
+            # Replicate doesn't support image parameter
+            if selected_provider == "replicate":
+                kwargs.pop("image", None)
+
+            result = primary_generator(**kwargs)
+            if result:
+                generated_thumbnails.append(result)
+                success = True
+
+        # Try fallbacks if primary failed
+        if not success:
+            for provider, generator in generators.items():
+                if provider != selected_provider:
+                    logger.info(f"    Trying fallback provider: {provider}")
+
+                    fallback_model = get_effective_model(
+                        provider, gemini_model, openai_model, poe_model
+                    )
+                    fallback_prefix = normalize_model_name_for_filename(fallback_model)
+                    fallback_path = thumbnails_dir / f"{fallback_prefix}_{timestamp}_{image_idx}.png"
+
+                    kwargs = {
+                        "prompt": enhanced_prompt,
+                        "reference_images": best_frames[:14] if best_frames else None,
+                        "output_path": fallback_path,
+                    }
+                    if provider in ["gemini", "openai", "poe"]:
+                        kwargs["image"] = img
+                    if provider == "gemini" and gemini_model:
+                        kwargs["model"] = gemini_model
+                    elif provider == "openai" and openai_model:
+                        kwargs["model"] = openai_model
+                    elif provider == "poe" and poe_model:
+                        kwargs["model"] = poe_model
+                    if provider == "replicate":
+                        kwargs.pop("image", None)
+
+                    result = generator(**kwargs)
+                    if result:
+                        generated_thumbnails.append(result)
+                        success = True
+                        break
+
+        # Last resort: composite
+        if not success and best_frames:
+            logger.warning("    All AI providers failed, creating composite")
+            composite_path = thumbnails_dir / f"composite_{timestamp}_{image_idx}.png"
+            result = create_composite_thumbnail(
+                background_prompt=img.image_prompt,
+                face_frame=best_frames[0],
+                text_overlay=img.text_overlay,
+                output_path=composite_path,
+                colors=img.colors
+            )
+            if result:
+                generated_thumbnails.append(result)
+                success = True
+
+        # Report progress after each image
+        if progress_callback:
+            last_thumbnail = generated_thumbnails[-1] if success and generated_thumbnails else None
+            thumbnail_info = {
+                'path': last_thumbnail,
+                'image_index': image_idx,
+                'image': img
+            } if last_thumbnail else None
+            progress_callback(image_idx, total_images, thumbnail_info)
 
     logger.success(f"Generated {len(generated_thumbnails)}/{total_images} thumbnails")
     logger.info(f"Thumbnails saved to: {thumbnails_dir}")

@@ -692,18 +692,17 @@ async def get_job(job_id: int) -> Optional[dict]:
 async def create_job(
     video_id: int,
     cluster_id: int,
-    num_prompts: int = 5,
-    num_variations: int = 1,
+    num_images: int = 5,
     preferred_expression: str = None
 ) -> int:
     """Create a new generation job."""
     return await execute_insert(
         """
         INSERT INTO generation_jobs
-        (video_id, cluster_id, num_prompts, num_variations, preferred_expression, status)
-        VALUES (?, ?, ?, ?, ?, 'pending')
+        (video_id, cluster_id, num_images, preferred_expression, status)
+        VALUES (?, ?, ?, ?, 'pending')
         """,
-        (video_id, cluster_id, num_prompts, num_variations, preferred_expression)
+        (video_id, cluster_id, num_images, preferred_expression)
     )
 
 
@@ -760,8 +759,7 @@ async def get_thumbnail(thumbnail_id: int) -> Optional[dict]:
 
 async def create_thumbnail(
     job_id: int,
-    prompt_index: int,
-    variation_index: int,
+    image_index: int,
     filepath: str,
     prompt_text: str = None,
     suggested_title: str = None,
@@ -771,10 +769,10 @@ async def create_thumbnail(
     return await execute_insert(
         """
         INSERT INTO thumbnails
-        (job_id, prompt_index, variation_index, filepath, prompt_text, suggested_title, text_overlay)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (job_id, prompt_index, variation_index, filepath, prompt_text, suggested_title, text_overlay)
+        (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)
     )
 
 
@@ -784,7 +782,7 @@ async def get_thumbnails_for_job(job_id: int) -> list:
         """
         SELECT * FROM thumbnails
         WHERE job_id = ?
-        ORDER BY prompt_index, variation_index
+        ORDER BY image_index
         """,
         (job_id,)
     )

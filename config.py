@@ -71,7 +71,7 @@ GRANSABIO_CLIENT_PATH = os.getenv("GRANSABIO_CLIENT_PATH", "")
 # Gran Sabio Vision Settings (for sending reference images to LLM)
 GRANSABIO_USERNAME = os.getenv("GRANSABIO_USERNAME", "thumbnail_generator")
 GRANSABIO_IMAGE_DETAIL = os.getenv("GRANSABIO_IMAGE_DETAIL", "auto")  # low, high, auto
-GRANSABIO_MAX_REF_IMAGES = int(os.getenv("GRANSABIO_MAX_REF_IMAGES", "5"))  # Max frames to send to LLM
+GRANSABIO_MAX_REF_IMAGES = int(os.getenv("GRANSABIO_MAX_REF_IMAGES", "20"))  # Max frames to send to LLM
 
 # =============================================================================
 # VIDEO PROCESSING SETTINGS
@@ -184,11 +184,28 @@ NUM_IMAGE_VARIATIONS = 1
 # Useful for preserving high-resolution originals (e.g., 2K/4K from Gemini 3 Pro)
 KEEP_RAW_THUMBNAILS = os.getenv("KEEP_RAW_THUMBNAILS", "true").lower() == "true"
 
+# =============================================================================
+# PROMPT SYSTEM VERSION (JSON Structured Prompts)
+# =============================================================================
+
+# V3 prompt system: Optimized JSON structure (~1,000 chars)
+# - Clear face_groups/characters/scene separation
+# - physical_description for facial features
+# - identify_in_references for cross-references
+# - character_directions only for ACTIVE characters in scene
+# - No redundancies (single source of truth for identity)
+#
+# V1 (legacy fallback): ~3,500 chars text with 22+ negations
+# Used when V3 is disabled or when structured fields are not available
+#
+# Set to "false" to use V1 legacy prompts
+USE_PROMPT_SYSTEM_V3 = os.getenv("USE_PROMPT_SYSTEM_V3", "true").lower() == "true"
+
 # Image provider: "gemini", "openai", "replicate", "poe"
 IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "gemini")
 
 # Gemini settings
-GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
 
 # Gemini 3 Pro output resolution (only for gemini-3-pro-image-preview)
 # Options: "1K" (1376x768), "2K" (2752x1536), "4K" (5504x3072) for 16:9

@@ -104,8 +104,7 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id INTEGER NOT NULL,
     cluster_id INTEGER NOT NULL,     -- Selected cluster for face reference
-    num_prompts INTEGER DEFAULT 5,   -- Number of different concepts
-    num_variations INTEGER DEFAULT 1, -- Variations per prompt
+    num_images INTEGER DEFAULT 5,    -- Number of images to generate
     preferred_expression TEXT,       -- smiling, mouth_closed, neutral
     status TEXT DEFAULT 'pending',
     -- Status values:
@@ -132,8 +131,7 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
 CREATE TABLE IF NOT EXISTS thumbnails (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL,
-    prompt_index INTEGER NOT NULL,    -- 1, 2, 3... (which prompt concept)
-    variation_index INTEGER DEFAULT 1, -- 1, 2, 3... (variation of same prompt)
+    image_index INTEGER NOT NULL,     -- 1, 2, 3... (sequential image number)
     filepath TEXT NOT NULL,           -- Path to generated image
     prompt_text TEXT,                 -- The image prompt used
     suggested_title TEXT,             -- Suggested video title

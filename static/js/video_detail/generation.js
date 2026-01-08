@@ -12,6 +12,20 @@ import { addNewToGallery } from './thumbnails.js';
 // Store reference image data
 let referenceImageData = null;
 
+// Store submit button state for restoration
+let submitBtn = null;
+let originalBtnText = null;
+
+/**
+ * Restore the submit button to its original state.
+ */
+function restoreSubmitButton() {
+    if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalBtnText;
+    }
+}
+
 // =========================================================================
 // GENERATION REQUEST
 // =========================================================================
@@ -26,8 +40,7 @@ export function getRequest() {
 
     const request = {
         cluster_index: parseInt(document.getElementById('clusterSelect').value),
-        num_prompts: parseInt(document.getElementById('numPrompts').value),
-        num_variations: parseInt(document.getElementById('numVariations').value),
+        num_images: parseInt(document.getElementById('numImages').value),
         preferred_expression: document.getElementById('expression').value || null,
 
         // Image AI settings
@@ -101,6 +114,12 @@ export function setupForm() {
             return;
         }
 
+        // Disable submit button and change text during generation
+        submitBtn = e.target.querySelector('button[type="submit"]');
+        originalBtnText = submitBtn.textContent;
+        submitBtn.disabled = true;
+        submitBtn.textContent = t('generation.generating');
+
         // Reset UI state before starting new generation
         document.getElementById('progressFill').style.width = '0%';
         document.getElementById('progressText').textContent = t('generate_form.progress_starting');
@@ -131,6 +150,7 @@ export function setupForm() {
             pollStatus();
         } catch (error) {
             ThumbnailApp.showToast(t('errors.generic') + ': ' + error.message, 'error');
+            restoreSubmitButton();
         }
     });
 }
@@ -165,15 +185,18 @@ export function startSSE() {
                 document.getElementById('progressFill').style.width = '100%';
                 document.getElementById('progressText').textContent = t('generation.complete');
                 ThumbnailApp.showToast(t('generation.complete'), 'success');
+                restoreSubmitButton();
                 loadResults();
             },
             error: (data) => {
                 document.getElementById('progressText').textContent = t('common.error');
                 ThumbnailApp.showToast(t('errors.generic') + ': ' + (data.error_message || data.error), 'error');
+                restoreSubmitButton();
             },
             cancelled: (data) => {
                 document.getElementById('progressText').textContent = t('common.cancel');
                 ThumbnailApp.showToast(t('common.cancel'), 'info');
+                restoreSubmitButton();
             }
         }
     );
@@ -208,13 +231,16 @@ export async function pollStatus() {
 
             if (data.status === 'completed') {
                 clearInterval(interval);
+                restoreSubmitButton();
                 loadResults();
             } else if (data.status === 'error') {
                 clearInterval(interval);
+                restoreSubmitButton();
                 ThumbnailApp.showToast(t('errors.generation_failed') + ': ' + (data.error_message || t('errors.generic')), 'error');
             }
         } catch (error) {
             clearInterval(interval);
+            restoreSubmitButton();
         }
     }, 2000);
 }

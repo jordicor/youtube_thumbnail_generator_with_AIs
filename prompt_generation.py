@@ -8,7 +8,7 @@ thumbnail prompts and titles.
 import json
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 
 from config import (
     ANTHROPIC_API_KEY,
@@ -30,33 +30,116 @@ logger = setup_logger(__name__)
 # =============================================================================
 
 @dataclass
-class ThumbnailVariation:
-    """A single variation of a thumbnail concept"""
-    variation_index: int
-    variation_focus: str      # What this variation emphasizes (e.g., "expression", "dynamic pose")
-    image_prompt: str         # Complete, independent prompt for image generation
-    text_overlay: str         # Text to overlay on the thumbnail
+class ThumbnailImage:
+    """
+    A single thumbnail image to generate.
+
+    This is the new flat structure that replaces the old hierarchical
+    ThumbnailConcept → ThumbnailVariation model. Each image is now
+    completely independent.
+    """
+    image_index: int                               # Sequential index (1, 2, 3...)
+    concept_name: str                              # Short name for this concept (2-4 words)
+    thumbnail_concept: str                         # Brief description of the idea
+    suggested_title: str                           # Suggested video title
+    image_prompt: str                              # Complete prompt for image generation
+    text_overlay: str                              # Text to overlay on the thumbnail
+    mood: str                                      # Emotional tone
+    colors: list[str]                              # Dominant colors as hex codes
+    key_topics: list[str]                          # Main keywords from the video
+
+    # Subject identification from reference image analysis
+    subjects: Optional[list[dict]] = None
+
+    # V2 fields for structured JSON prompts
+    scene: Optional[str] = None                    # Complete narrative description
+    subject_pose: Optional[str] = None             # Subject's posture/body language
+    subject_expression: Optional[str] = None       # Facial expression
+    subject_action: Optional[str] = None           # What the subject is doing
+    visual_elements: Optional[list[str]] = None    # Additional visual elements
+    text_in_image: Optional[str] = None            # Text to render IN the image
+    background: Optional[str] = None               # Background/environment description
+    lighting: Optional[str] = None                 # Lighting setup
+    equipment: Optional[str] = None                # Camera/lens/film stock
+    framing: Optional[str] = None                  # Shot type (close-up, medium, wide)
+    composition: Optional[str] = None              # Composition rules
+    color_palette: Optional[list[str]] = None      # Alias for colors in V2 format
+    style: Optional[str] = None                    # Visual style
+    quality: Optional[str] = None                  # Quality descriptor
+    materials: Optional[dict] = None               # Textures for realism
+    clothing_override: Optional[str] = None        # Different clothing from reference
+
+    # Face identity grouping for same person with different outfits
+    face_groups: Optional[dict] = None             # {"group_A": {"physical_description": "...", "characters_with_this_face": [...]}}
+    style_source: Optional[str] = None             # Which character defines the outfit for final image
+
+    # V3 fields - characters dict replaces subjects array
+    characters: Optional[dict] = None              # {"person_01": {"belongs_to_face": "group_A", "outfit": "...", "identify_in_references": "..."}}
+    environment_effects: Optional[str] = None      # Visual effects: glows, holographic elements, particles, etc.
 
     def to_dict(self) -> dict:
         return asdict(self)
 
+    def has_v2_fields(self) -> bool:
+        """Check if this image has V2 structured fields populated."""
+        return self.scene is not None and self.subject_pose is not None
+
+
+# =============================================================================
+# LEGACY DATA CLASSES (kept for backward compatibility with old concepts.json)
+# =============================================================================
+
+@dataclass
+class ThumbnailVariation:
+    """DEPRECATED: Use ThumbnailImage instead. Kept for backward compatibility."""
+    variation_index: int
+    variation_focus: str
+    image_prompt: str
+    text_overlay: str
+    scene: Optional[str] = None
+    subject_pose: Optional[str] = None
+    subject_expression: Optional[str] = None
+    subject_action: Optional[str] = None
+    visual_elements: Optional[list[str]] = None
+    text_in_image: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def has_v2_fields(self) -> bool:
+        return self.scene is not None and self.subject_pose is not None
+
 
 @dataclass
 class ThumbnailConcept:
-    """A thumbnail concept with multiple variations for A/B testing"""
+    """DEPRECATED: Use ThumbnailImage instead. Kept for backward compatibility."""
     concept_index: int
     concept_name: str
-    thumbnail_concept: str    # General description of the concept
+    thumbnail_concept: str
     suggested_title: str
     mood: str
     colors: list[str]
     key_topics: list[str]
     variations: list[ThumbnailVariation]
+    subjects: Optional[list[dict]] = None
+    background: Optional[str] = None
+    lighting: Optional[str] = None
+    equipment: Optional[str] = None
+    framing: Optional[str] = None
+    composition: Optional[str] = None
+    color_palette: Optional[list[str]] = None
+    style: Optional[str] = None
+    quality: Optional[str] = None
+    materials: Optional[dict] = None
+    clothing_override: Optional[str] = None
 
     def to_dict(self) -> dict:
         result = asdict(self)
         result['variations'] = [v.to_dict() for v in self.variations]
         return result
+
+    def has_v2_fields(self) -> bool:
+        return self.background is not None and self.lighting is not None
 
 
 # Legacy class for backwards compatibility
@@ -786,6 +869,286 @@ def save_concepts(concepts: list[ThumbnailConcept], output: VideoOutput):
     logger.info(f"Saved {len(concepts)} concepts ({prompt_index} total prompts) to: {prompts_dir}")
 
 
+# =============================================================================
+# NEW IMAGE-BASED GENERATION (flat structure, no variations)
+# =============================================================================
+
+def create_fallback_image(
+    video_title: str,
+    transcription: str,
+    image_index: int
+) -> ThumbnailImage:
+    """Create a basic fallback image when LLM fails"""
+
+    logger.warning(f"Creating fallback thumbnail image {image_index}")
+
+    # Extract some keywords from title
+    words = video_title.replace('.', ' ').replace('-', ' ').replace('_', ' ').split()
+    keywords = [w for w in words if len(w) > 3 and not w.isdigit()][:5]
+
+    concept_types = ["Reaction", "Tutorial", "Mystery", "Achievement", "Behind the scenes"]
+    moods = ["exciting", "professional", "mysterious", "fun", "dramatic"]
+    colors_sets = [
+        ["#FF0000", "#FFFFFF", "#000000"],
+        ["#00FF00", "#000000", "#FFFFFF"],
+        ["#0000FF", "#FFFF00", "#FFFFFF"],
+        ["#FF6B00", "#FFFFFF", "#333333"],
+        ["#9B59B6", "#FFFFFF", "#2C3E50"]
+    ]
+
+    concept_type = concept_types[(image_index - 1) % len(concept_types)]
+    mood = moods[(image_index - 1) % len(moods)]
+    colors = colors_sets[(image_index - 1) % len(colors_sets)]
+
+    return ThumbnailImage(
+        image_index=image_index,
+        concept_name=f"{concept_type} Style",
+        thumbnail_concept=f"A {mood} {concept_type.lower()} style thumbnail for the video",
+        suggested_title=video_title[:60],
+        image_prompt=f"YouTube thumbnail, {video_title}, {concept_type}, {mood}, modern design, bold colors, 16:9 aspect ratio, high quality, eye-catching",
+        text_overlay=video_title.split()[0][:10] if video_title else "VIDEO",
+        mood=mood,
+        colors=colors,
+        key_topics=keywords
+    )
+
+
+def save_images(images: list[ThumbnailImage], output: VideoOutput):
+    """Save generated images to files"""
+
+    prompts_dir = output.output_dir / "prompts"
+    prompts_dir.mkdir(exist_ok=True)
+
+    # Save full images structure
+    images_file = prompts_dir / "images.json"
+    with open(images_file, 'w', encoding='utf-8') as f:
+        json.dump([img.to_dict() for img in images], f, indent=2, ensure_ascii=False)
+
+    # Also save individual prompts for compatibility
+    for img in images:
+        data = {
+            "image_index": img.image_index,
+            "concept_name": img.concept_name,
+            "suggested_title": img.suggested_title,
+            "thumbnail_concept": img.thumbnail_concept,
+            "image_prompt": img.image_prompt,
+            "text_overlay": img.text_overlay,
+            "mood": img.mood,
+            "colors": img.colors,
+            "key_topics": img.key_topics,
+            # Scene fields
+            "scene": img.scene,
+            "subject_pose": img.subject_pose,
+            "subject_expression": img.subject_expression,
+            "subject_action": img.subject_action,
+            "visual_elements": img.visual_elements,
+            "text_in_image": img.text_in_image,
+            "background": img.background,
+            "lighting": img.lighting,
+            "equipment": img.equipment,
+            "framing": img.framing,
+            "composition": img.composition,
+            "style": img.style,
+            "quality": img.quality,
+            # Identity fields
+            "face_groups": img.face_groups,
+            "style_source": img.style_source,
+            # V3 fields
+            "characters": img.characters,
+            "environment_effects": img.environment_effects,
+            # Legacy field (deprecated, kept for compatibility)
+            "subjects": img.subjects,
+        }
+
+        prompt_file = prompts_dir / f"prompt_{img.image_index}.json"
+        with open(prompt_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    logger.info(f"Saved {len(images)} images to: {prompts_dir}")
+
+
+def generate_thumbnail_images(
+    transcription: str,
+    video_title: str,
+    output: VideoOutput,
+    num_images: int = 5,
+    cluster_description: Optional[str] = None,
+    prompt_config: Optional["PromptGenerationConfig"] = None,
+    selected_titles: Optional[list[str]] = None,
+    reference_image_base64: Optional[str] = None,
+    reference_images_base64: Optional[list[str]] = None
+) -> list[ThumbnailImage]:
+    """
+    Generate thumbnail images (flat structure, no variations).
+
+    Args:
+        transcription: Video transcription text
+        video_title: Original video title/filename
+        output: VideoOutput instance
+        num_images: Number of different images to generate
+        cluster_description: Optional user-provided context about the reference images
+        prompt_config: Optional Gran Sabio LLM configuration for prompt generation
+        selected_titles: Optional list of user-selected titles to guide image generation
+        reference_image_base64: Optional single external reference image for visual inspiration
+        reference_images_base64: Optional list of reference images (max 20)
+
+    Returns:
+        List of ThumbnailImage objects
+    """
+
+    logger.info(f"Generating {num_images} thumbnail images...")
+
+    # Check cache - look for images.json with matching count
+    prompts_dir = output.output_dir / "prompts"
+    images_file = prompts_dir / "images.json"
+
+    if images_file.exists():
+        try:
+            with open(images_file, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+
+            # Check if cache matches requested count
+            if len(cached_data) == num_images:
+                logger.info(f"Loading cached images ({num_images})...")
+
+                images = []
+                for img_data in cached_data:
+                    images.append(ThumbnailImage(
+                        image_index=img_data.get('image_index', 0),
+                        concept_name=img_data.get('concept_name', ''),
+                        thumbnail_concept=img_data.get('thumbnail_concept', ''),
+                        suggested_title=img_data.get('suggested_title', video_title),
+                        image_prompt=img_data.get('image_prompt', ''),
+                        text_overlay=img_data.get('text_overlay', ''),
+                        mood=img_data.get('mood', 'professional'),
+                        colors=img_data.get('colors', ['#FF0000', '#FFFFFF']),
+                        key_topics=img_data.get('key_topics', []),
+                        subjects=img_data.get('subjects'),
+                        scene=img_data.get('scene'),
+                        subject_pose=img_data.get('subject_pose'),
+                        subject_expression=img_data.get('subject_expression'),
+                        subject_action=img_data.get('subject_action'),
+                        visual_elements=img_data.get('visual_elements'),
+                        text_in_image=img_data.get('text_in_image'),
+                        background=img_data.get('background'),
+                        lighting=img_data.get('lighting'),
+                        equipment=img_data.get('equipment'),
+                        framing=img_data.get('framing'),
+                        composition=img_data.get('composition'),
+                        color_palette=img_data.get('color_palette'),
+                        style=img_data.get('style'),
+                        quality=img_data.get('quality'),
+                        materials=img_data.get('materials'),
+                        clothing_override=img_data.get('clothing_override'),
+                        face_groups=img_data.get('face_groups'),
+                        style_source=img_data.get('style_source')
+                    ))
+                return images
+            else:
+                logger.info(f"Cache has {len(cached_data)} images but {num_images} requested. Regenerating...")
+        except Exception as e:
+            logger.warning(f"Could not load cached images: {e}")
+
+    # Use Gran Sabio LLM exclusively
+    if prompt_config is None:
+        logger.error("prompt_config is required - Gran Sabio LLM is the only supported method")
+        return None
+
+    from gransabio_prompt_generator import generate_thumbnail_images_gransabio
+
+    logger.info(f"Using Gran Sabio LLM ({prompt_config.provider}) to generate images...")
+    data = generate_thumbnail_images_gransabio(
+        transcription=get_transcription_summary(transcription, 3000),
+        video_title=video_title,
+        num_images=num_images,
+        cluster_description=cluster_description,
+        config=prompt_config,
+        thumbnail_style=f"Style guidance:\n{THUMBNAIL_STYLE}",
+        selected_titles=selected_titles,
+        reference_image_base64=reference_image_base64,
+        reference_images_base64=reference_images_base64
+    )
+
+    if data:
+        logger.info(f"Gran Sabio LLM successfully generated {len(data)} images")
+
+    if not data:
+        logger.error("Gran Sabio LLM failed to generate images - no fallback available")
+        return None
+
+    # Parse images from response
+    images = []
+
+    if isinstance(data, list):
+        for idx, img_data in enumerate(data[:num_images]):
+            # V3/V2 fields
+            scene = img_data.get('scene')
+            subject_pose = img_data.get('subject_pose')
+            subject_expression = img_data.get('subject_expression')
+
+            # V3: characters dict (new format)
+            characters = img_data.get('characters')
+
+            # V3: environment_effects (new field)
+            environment_effects = img_data.get('environment_effects')
+
+            # Build fallback image_prompt from scene if not provided
+            image_prompt = img_data.get('image_prompt', '')
+            if not image_prompt and scene:
+                image_prompt = f"{scene}. {subject_pose or ''}. {subject_expression or ''}"
+
+            images.append(ThumbnailImage(
+                image_index=idx + 1,
+                concept_name=img_data.get('concept_name', f'Image {idx + 1}'),
+                thumbnail_concept=img_data.get('thumbnail_concept', ''),
+                suggested_title=img_data.get('suggested_title', video_title),
+                image_prompt=image_prompt,
+                text_overlay=img_data.get('text_overlay', ''),
+                mood=img_data.get('mood', 'professional'),
+                colors=img_data.get('colors', ['#FF0000', '#FFFFFF']),
+                key_topics=img_data.get('key_topics', []),
+                subjects=img_data.get('subjects'),
+                scene=scene,
+                subject_pose=subject_pose,
+                subject_expression=subject_expression,
+                subject_action=img_data.get('subject_action'),
+                visual_elements=img_data.get('visual_elements'),
+                text_in_image=img_data.get('text_in_image'),
+                background=img_data.get('background'),
+                lighting=img_data.get('lighting'),
+                equipment=img_data.get('equipment'),
+                framing=img_data.get('framing'),
+                composition=img_data.get('composition'),
+                color_palette=img_data.get('color_palette') or img_data.get('colors'),
+                style=img_data.get('style'),
+                quality=img_data.get('quality'),
+                materials=img_data.get('materials'),
+                clothing_override=img_data.get('clothing_override'),
+                face_groups=img_data.get('face_groups'),
+                style_source=img_data.get('style_source'),
+                characters=characters,
+                environment_effects=environment_effects
+            ))
+
+        if len(images) < num_images:
+            logger.warning(f"Gran Sabio LLM returned {len(images)} images instead of {num_images}")
+
+    else:
+        logger.error("Unexpected response format (not a list) - no fallback available")
+        return None
+
+    # Save images
+    save_images(images, output)
+
+    logger.success(f"Generated {len(images)} thumbnail images")
+
+    return images
+
+
+# =============================================================================
+# LEGACY CONCEPT-BASED GENERATION (kept for backward compatibility)
+# =============================================================================
+
 def generate_thumbnail_concepts(
     transcription: str,
     video_title: str,
@@ -920,11 +1283,30 @@ Use this information as you see fit when crafting your thumbnail concepts and im
             variations = []
 
             for v_idx, v_data in enumerate(variations_data[:num_variations_per_concept]):
+                # V2 fields: scene, subject_pose, subject_expression, etc.
+                # If V2 fields present but no image_prompt, build a fallback
+                scene = v_data.get('scene')
+                subject_pose = v_data.get('subject_pose')
+                subject_expression = v_data.get('subject_expression')
+
+                # Build fallback image_prompt from V2 fields if not provided
+                image_prompt = v_data.get('image_prompt', '')
+                if not image_prompt and scene:
+                    # Create a basic text prompt from V2 fields for backwards compatibility
+                    image_prompt = f"{scene}. {subject_pose or ''}. {subject_expression or ''}"
+
                 variations.append(ThumbnailVariation(
                     variation_index=v_data.get('variation_index', v_idx + 1),
                     variation_focus=v_data.get('variation_focus', f'Variation {v_idx + 1}'),
-                    image_prompt=v_data.get('image_prompt', ''),
-                    text_overlay=v_data.get('text_overlay', '')
+                    image_prompt=image_prompt,
+                    text_overlay=v_data.get('text_overlay', ''),
+                    # V2 fields
+                    scene=scene,
+                    subject_pose=subject_pose,
+                    subject_expression=subject_expression,
+                    subject_action=v_data.get('subject_action'),
+                    visual_elements=v_data.get('visual_elements'),
+                    text_in_image=v_data.get('text_in_image')
                 ))
 
             # Log warning if fewer variations than requested (no fallback)
@@ -939,7 +1321,20 @@ Use this information as you see fit when crafting your thumbnail concepts and im
                 mood=c_data.get('mood', 'professional'),
                 colors=c_data.get('colors', ['#FF0000', '#FFFFFF']),
                 key_topics=c_data.get('key_topics', []),
-                variations=variations
+                variations=variations,
+                # Subject identification from reference analysis
+                subjects=c_data.get('subjects'),
+                # V2 fields
+                background=c_data.get('background'),
+                lighting=c_data.get('lighting'),
+                equipment=c_data.get('equipment'),
+                framing=c_data.get('framing'),
+                composition=c_data.get('composition'),
+                color_palette=c_data.get('color_palette') or c_data.get('colors'),
+                style=c_data.get('style'),
+                quality=c_data.get('quality'),
+                materials=c_data.get('materials'),
+                clothing_override=c_data.get('clothing_override')
             ))
 
         # Log warning if fewer concepts than requested (no fallback)

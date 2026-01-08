@@ -24,7 +24,7 @@ from database.db import init_db, close_db
 from config import MAX_REFERENCE_FRAMES, SERVER_HOST, SERVER_PORT, DEBUG_MODE
 from job_queue.client import RedisManager
 from job_queue.queue import close_arq_pool
-from i18n.i18n import translate as t, set_language, get_language, SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE
+from i18n.i18n import translate as t, set_language, get_language, get_all_translations, SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE
 
 
 # ============================================================================
@@ -102,6 +102,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # Add i18n globals to Jinja2
 templates.env.globals["t"] = t
 templates.env.globals["get_language"] = get_language
+templates.env.globals["get_all_translations"] = get_all_translations
 templates.env.globals["SUPPORTED_LANGUAGES"] = SUPPORTED_LANGUAGES
 
 

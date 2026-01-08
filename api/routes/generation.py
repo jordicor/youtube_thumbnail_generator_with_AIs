@@ -23,8 +23,7 @@ router = APIRouter()
 
 class GenerationRequest(BaseModel):
     cluster_index: int
-    num_prompts: int = 5
-    num_variations: int = 1
+    num_images: int = 5
     preferred_expression: Optional[str] = None  # smiling, mouth_closed, neutral
     force_transcription: bool = False
     force_prompts: bool = False
@@ -84,8 +83,7 @@ class GenerationStatusResponse(BaseModel):
 class ThumbnailResponse(BaseModel):
     id: int
     filepath: str
-    prompt_index: int
-    variation_index: int
+    image_index: int
     suggested_title: Optional[str] = None
     text_overlay: Optional[str] = None
 
@@ -131,8 +129,7 @@ async def start_generation(
         job = await service.create_generation_job(
             video_id=video_id,
             cluster_id=cluster['id'],
-            num_prompts=request.num_prompts,
-            num_variations=request.num_variations,
+            num_images=request.num_images,
             preferred_expression=request.preferred_expression
         )
 

@@ -96,6 +96,7 @@ export async function load() {
                 </div>
                 <img src="/api/analysis/${state.videoId}/clusters/by-id/${cluster.id}/image"
                      alt="Cluster ${cluster.cluster_index}"
+                     loading="lazy"
                      onerror="this.src='/static/img/placeholder.svg'">
                 <div class="cluster-info">
                     <h4>${displayName}</h4>

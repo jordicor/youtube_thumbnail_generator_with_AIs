@@ -101,7 +101,7 @@
                 <span class="modal-title">{{ t('clusters.merge_title') }}</span>
             </div>
             <div class="modal-body">
-                <p>{{ t('clusters.merge_message', count='<strong id="mergeCount">0</strong>') }}</p>
+                <p>{{ t('clusters.merge_message', count='<strong id="mergeCount">0</strong>') | safe }}</p>
                 <p style="margin-top: 10px;">{{ t('clusters.merge_select_main') }}</p>
                 <div id="mergeTargetOptions" class="merge-target-options" style="margin-top: 15px;"></div>
             </div>
@@ -495,12 +495,8 @@
 
             <div class="form-row">
                 <div class="form-group">
-                    <label for="numPrompts">{{ t('generate_form.concepts_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.concepts_tooltip') }}">&#9432;</span></label>
-                    <input type="number" id="numPrompts" value="5" min="1" max="50">
-                </div>
-                <div class="form-group">
-                    <label for="numVariations">{{ t('generate_form.variations_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.variations_tooltip') }}">&#9432;</span></label>
-                    <input type="number" id="numVariations" value="1" min="1" max="50">
+                    <label for="numImages">{{ t('generate_form.images_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.images_tooltip') }}">&#9432;</span></label>
+                    <input type="number" id="numImages" value="5" min="1" max="50">
                 </div>
                 <div class="form-group">
                     <label for="expression">{{ t('generate_form.expression_label') }}</label>

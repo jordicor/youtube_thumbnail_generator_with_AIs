@@ -719,6 +719,28 @@ class AnalysisService:
         safe_name = sanitize_filename(video_name)
         return Path(OUTPUT_DIR) / safe_name
 
+    def _validate_frame_path(self, frame_path: str, video_output_dir: Path) -> bool:
+        """
+        Validate that a frame path belongs to the video's output directory.
+        Prevents path traversal attacks.
+
+        Args:
+            frame_path: The frame path to validate
+            video_output_dir: The video's output directory (from _get_video_output_dir)
+
+        Returns:
+            True if the path is valid and within the video's directory
+        """
+        try:
+            # Resolve to absolute path
+            resolved_path = Path(frame_path).resolve()
+            video_dir_resolved = video_output_dir.resolve()
+
+            # Check if path is within video's output directory
+            return resolved_path.is_relative_to(video_dir_resolved)
+        except (ValueError, OSError):
+            return False
+
     async def _get_cluster_frame_paths(self, cluster_id: int) -> Set[str]:
         """Get all frame paths belonging to a cluster.
 
@@ -1712,6 +1734,10 @@ class AnalysisService:
         # Get frame IDs from paths, ensure frames exist in video_frames
         frame_ids = []
         for path in frame_paths:
+            # Security: validate path belongs to this video's directory
+            if not self._validate_frame_path(path, output_dir):
+                continue  # Skip invalid paths
+
             frame_id = await self._get_frame_id_by_path(video_id, path)
             if frame_id:
                 frame_ids.append(frame_id)
@@ -1757,6 +1783,9 @@ class AnalysisService:
         reference_ids = set()
         if reference_frame_paths:
             for path in reference_frame_paths[:MAX_REFERENCE_FRAMES]:
+                # Security: validate path belongs to this video's directory
+                if not self._validate_frame_path(path, output_dir):
+                    continue
                 fid = await self._get_frame_id_by_path(video_id, path)
                 if fid:
                     reference_ids.add(fid)
@@ -1825,6 +1854,11 @@ class AnalysisService:
         errors = []
 
         for fp in frame_paths:
+            # Security: validate path belongs to this video's directory
+            if not self._validate_frame_path(fp, output_dir):
+                errors.append({'path': fp, 'error': 'Invalid path'})
+                continue
+
             # Get or create frame in video_frames
             frame_id = await self._get_frame_id_by_path(video_id, fp)
             if not frame_id:

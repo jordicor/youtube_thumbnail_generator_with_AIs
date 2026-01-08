@@ -121,8 +121,13 @@ class VideoService:
         from utils import get_video_info, sanitize_filename, extract_first_frame
         import aiofiles
 
-        # Save file
-        dest_path = Path(VIDEOS_DIR) / file.filename
+        # Security: sanitize filename to prevent path traversal
+        safe_filename = sanitize_filename(file.filename)
+        if not safe_filename:
+            safe_filename = "uploaded_video"
+
+        # Save file with sanitized filename
+        dest_path = Path(VIDEOS_DIR) / safe_filename
         async with aiofiles.open(dest_path, 'wb') as f:
             content = await file.read()
             await f.write(content)
@@ -136,7 +141,7 @@ class VideoService:
             VALUES (?, ?, ?, 'pending')
         """
         cursor = await self.db.execute(query, [
-            file.filename,
+            safe_filename,
             str(dest_path),
             info.get('duration', 0)
         ])

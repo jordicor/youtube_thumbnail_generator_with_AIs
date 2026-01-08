@@ -81,22 +81,20 @@ class GenerationService:
         self,
         video_id: int,
         cluster_id: int,
-        num_prompts: int = 5,
-        num_variations: int = 1,
+        num_images: int = 5,
         preferred_expression: Optional[str] = None
     ) -> dict:
         """Create a new generation job."""
         query = """
             INSERT INTO generation_jobs
-            (video_id, cluster_id, num_prompts, num_variations, preferred_expression, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
+            (video_id, cluster_id, num_images, preferred_expression, status)
+            VALUES (?, ?, ?, ?, 'pending')
         """
 
         cursor = await self.db.execute(query, [
             video_id,
             cluster_id,
-            num_prompts,
-            num_variations,
+            num_images,
             preferred_expression
         ])
         await self.db.commit()
@@ -195,8 +193,8 @@ class GenerationService:
         )
         from utils import VideoOutput
         from transcription import transcribe_video
-        from prompt_generation import generate_thumbnail_concepts
-        from image_generation import generate_thumbnails
+        from prompt_generation import generate_thumbnail_images
+        from image_generation import generate_thumbnails_from_images
 
         try:
             # Get job info
@@ -236,7 +234,9 @@ class GenerationService:
             # Step 2: Generate prompts
             await self.update_job_status(job_id, 'prompting', 30)
 
-            if force_prompts:
+            # Force regeneration if explicitly requested OR if user wants to avoid repeating concepts
+            # (avoiding repetition requires fresh generation to include history context in the LLM call)
+            if force_prompts or prompt_include_history:
                 import shutil
                 prompts_dir = output.output_dir / "prompts"
                 shutil.rmtree(prompts_dir, ignore_errors=True)
@@ -260,36 +260,64 @@ class GenerationService:
                 history_prompts=history_prompts
             )
 
-            # Prepare reference image(s) for prompt generation if requested
-            ref_image_for_prompts = None
-            ref_images_for_prompts = None
+            # Step 2b: Load cluster frames BEFORE prompt generation
+            # So Gran Sabio LLM can analyze the reference images visually
+            from config import GRANSABIO_MAX_REF_IMAGES
+
+            # Load ALL reference frames from cluster (we'll limit later for image generation)
+            cluster_frames_data = await self.get_reference_frames_for_generation(
+                job['cluster_id'],
+                limit=20  # Get plenty, will limit based on context
+            )
+
+            # Convert to Path objects and filter existing files
+            best_frames = [
+                Path(frame['frame_path'])
+                for frame in cluster_frames_data
+                if Path(frame['frame_path']).exists()
+            ]
+
+            # Fallback: if no frames found for cluster, use extracted frames
+            if not best_frames:
+                best_frames = list(output.frames_dir.glob("*.jpg"))[:14]
+
+            # Convert cluster frames to base64 for Gran Sabio LLM analysis
+            # This allows the LLM to visually identify people, outfits, and create proper face_groups
+            cluster_frames_b64 = self._convert_frames_to_base64(
+                best_frames[:GRANSABIO_MAX_REF_IMAGES]
+            )
+
+            # Prepare reference images for prompt generation
+            # Always include cluster frames so Gran Sabio can see who's in the video
+            ref_images_for_prompts = cluster_frames_b64.copy() if cluster_frames_b64 else []
+
+            # Add external reference images if user requested
             if reference_image_use_for_prompts:
                 if reference_image_base64:
-                    ref_image_for_prompts = reference_image_base64
+                    ref_images_for_prompts.insert(0, reference_image_base64)
                 if reference_images_base64:
-                    ref_images_for_prompts = reference_images_base64
+                    ref_images_for_prompts.extend(reference_images_base64)
 
-            thumbnail_concepts = generate_thumbnail_concepts(
+            thumbnail_images = generate_thumbnail_images(
                 transcription=transcription,
                 video_title=video_path.stem,
                 output=output,
-                num_concepts=job['num_prompts'],
-                num_variations_per_concept=job['num_variations'],
+                num_images=job['num_images'],
                 cluster_description=cluster.get('description'),
                 prompt_config=prompt_config,
                 selected_titles=selected_titles,
-                reference_image_base64=ref_image_for_prompts,
-                reference_images_base64=ref_images_for_prompts
+                reference_image_base64=None,  # Included in the list below
+                reference_images_base64=ref_images_for_prompts if ref_images_for_prompts else None
             )
 
-            if not thumbnail_concepts:
+            if not thumbnail_images:
                 await self.update_job_status(job_id, 'error', 0, 'Prompt generation failed')
                 return
 
-            # Step 3: Get best frames from the SELECTED cluster
+            # Step 3: Prepare frames for image generation
             await self.update_job_status(job_id, 'generating', 50)
 
-            # Determine max reference images based on provider and model
+            # Determine max reference images based on IMAGE GENERATION provider and model
             if image_provider == "gemini":
                 model = gemini_model or GEMINI_IMAGE_MODEL
                 model_max = GEMINI_MODEL_MAX_REFS.get(model, 3)
@@ -307,23 +335,8 @@ class GenerationService:
             # Use user-specified limit if provided, but don't exceed model's max
             ref_limit = min(num_reference_images, model_max) if num_reference_images else model_max
 
-            # Load reference frames from the selected cluster
-            # Uses frames marked as references by user, or falls back to top quality
-            cluster_frames_data = await self.get_reference_frames_for_generation(
-                job['cluster_id'],
-                limit=ref_limit
-            )
-
-            # Convert to Path objects and filter existing files
-            best_frames = [
-                Path(frame['frame_path'])
-                for frame in cluster_frames_data
-                if Path(frame['frame_path']).exists()
-            ]
-
-            # Fallback: if no frames found for cluster, use extracted frames
-            if not best_frames:
-                best_frames = list(output.frames_dir.glob("*.jpg"))[:14]
+            # Limit best_frames for image generation (already loaded above)
+            best_frames = best_frames[:ref_limit]
 
             # Handle external reference image for image generation
             has_external_style_ref = False
@@ -376,20 +389,18 @@ class GenerationService:
 
                     # Insert thumbnail if generated successfully
                     if thumbnail_info and thumbnail_info.get('path'):
-                        concept = thumbnail_info.get('concept')
-                        variation = thumbnail_info.get('variation')
+                        img = thumbnail_info.get('image')
                         conn.execute("""
                             INSERT INTO thumbnails
-                            (job_id, prompt_index, variation_index, filepath, prompt_text, suggested_title, text_overlay)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)
+                            VALUES (?, ?, ?, ?, ?, ?)
                         """, [
                             job_id,
-                            thumbnail_info['concept_index'],
-                            thumbnail_info['variation_index'],
+                            thumbnail_info['image_index'],
                             str(thumbnail_info['path']),
-                            variation.image_prompt if variation else None,
-                            concept.suggested_title if concept else None,
-                            variation.text_overlay if variation else None
+                            img.image_prompt if img else None,
+                            img.suggested_title if img else None,
+                            img.text_overlay if img else None
                         ])
 
                 except Exception:
@@ -398,8 +409,8 @@ class GenerationService:
                     if conn:
                         conn.close()
 
-            thumbnail_paths = generate_thumbnails(
-                concepts=thumbnail_concepts,
+            thumbnail_paths = generate_thumbnails_from_images(
+                images=thumbnail_images,
                 best_frames=best_frames,
                 output=output,
                 image_provider=image_provider,
@@ -458,7 +469,7 @@ class GenerationService:
             row = await cursor.fetchone()
             thumbnails_count = row[0] if row else 0
 
-        total_thumbnails = job['num_prompts'] * job['num_variations']
+        total_thumbnails = job['num_images']
 
         return {
             'job_id': job_id,
@@ -474,10 +485,10 @@ class GenerationService:
     async def get_job_thumbnails(self, job_id: int) -> List[dict]:
         """Get all thumbnails for a job."""
         query = """
-            SELECT id, filepath, prompt_index, variation_index, suggested_title, text_overlay
+            SELECT id, filepath, image_index, suggested_title, text_overlay
             FROM thumbnails
             WHERE job_id = ?
-            ORDER BY prompt_index, variation_index
+            ORDER BY image_index
         """
 
         async with self.db.execute(query, [job_id]) as cursor:
@@ -500,7 +511,7 @@ class GenerationService:
     async def get_video_jobs(self, video_id: int) -> List[dict]:
         """Get all generation jobs for a video."""
         query = """
-            SELECT id, cluster_id, num_prompts, num_variations, status, progress, created_at, completed_at
+            SELECT id, cluster_id, num_images, status, progress, created_at, completed_at
             FROM generation_jobs
             WHERE video_id = ?
             ORDER BY created_at DESC
@@ -599,3 +610,52 @@ class GenerationService:
             logger = logging.getLogger(__name__)
             logger.warning(f"Could not save external reference image: {e}")
             return None
+
+    def _convert_frames_to_base64(
+        self,
+        frame_paths: List[Path],
+        max_size: int = 1024
+    ) -> List[str]:
+        """
+        Convert frame paths to base64 strings for Gran Sabio LLM analysis.
+
+        Args:
+            frame_paths: List of Path objects to image files
+            max_size: Maximum dimension for resizing (default 1024)
+
+        Returns:
+            List of base64 encoded strings
+        """
+        import base64
+        from PIL import Image
+        import io
+        import logging
+
+        logger = logging.getLogger(__name__)
+        result = []
+
+        for path in frame_paths:
+            if not path.exists():
+                continue
+            try:
+                img = Image.open(path)
+
+                # Resize if too large
+                if max(img.size) > max_size:
+                    img.thumbnail((max_size, max_size))
+
+                # Convert to RGB if necessary
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+
+                # Convert to base64
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=85)
+                b64 = base64.b64encode(buffer.getvalue()).decode()
+                result.append(b64)
+
+            except Exception as e:
+                logger.warning(f"Could not convert frame {path}: {e}")
+                continue
+
+        return result

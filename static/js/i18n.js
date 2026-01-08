@@ -28,6 +28,25 @@ let translationsCache = {};
 // Current language
 let currentLanguage = DEFAULT_LANGUAGE;
 
+// Process inline cache immediately (before any async code runs)
+if (window.__I18N_CACHE__) {
+    const detectedLang = (function() {
+        const cookieLang = document.cookie.split('; ').find(c => c.startsWith('lang='));
+        if (cookieLang) {
+            const lang = cookieLang.split('=')[1];
+            if (SUPPORTED_LANGUAGES.includes(lang)) return lang;
+        }
+        const storedLang = localStorage.getItem('lang');
+        if (storedLang && SUPPORTED_LANGUAGES.includes(storedLang)) return storedLang;
+        const browserLang = navigator.language.split('-')[0];
+        if (SUPPORTED_LANGUAGES.includes(browserLang)) return browserLang;
+        return DEFAULT_LANGUAGE;
+    })();
+    translationsCache[detectedLang] = window.__I18N_CACHE__;
+    currentLanguage = detectedLang;
+    delete window.__I18N_CACHE__;
+}
+
 // Flag to track if i18n is initialized
 let isInitialized = false;
 

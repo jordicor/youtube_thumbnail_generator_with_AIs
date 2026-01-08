@@ -64,8 +64,7 @@ def process_single_video(
     skip_transcription: bool = False,
     use_composite: bool = False,
     force: bool = False,  # Deprecated, kept for compatibility
-    num_prompts: int = None,
-    num_variations: int = None,
+    num_images: int = None,
     use_pro_model: bool = False,
     force_scenes: bool = False,
     force_faces: bool = False,
@@ -184,8 +183,7 @@ def process_single_video(
                 transcription = video_path.stem
 
         # Use config defaults or override
-        n_prompts = num_prompts if num_prompts else NUM_PROMPT_VARIATIONS
-        n_variations = num_variations if num_variations else NUM_IMAGE_VARIATIONS
+        n_images = num_images if num_images else NUM_PROMPT_VARIATIONS
 
         # Select Gemini model
         # Priority: explicit --gemini-model > --image-pro > default
@@ -204,7 +202,7 @@ def process_single_video(
             logger.info(f"Using Gemini ({selected_gemini_model or GEMINI_IMAGE_MODEL})")
 
         # Step 4: Prompt Generation
-        logger.info(f"\n[Step 4/5] Generating {n_prompts} Thumbnail Prompt Variations...")
+        logger.info(f"\n[Step 4/5] Generating {n_images} Thumbnail Prompts...")
         if force_prompts:
             logger.info("Force mode: Deleting cached prompts...")
             import shutil
@@ -215,26 +213,25 @@ def process_single_video(
             transcription=transcription,
             video_title=video_path.stem,
             output=output,
-            num_variations=n_prompts
+            num_variations=n_images
         )
 
         if not thumbnail_prompts:
             logger.error("Prompt generation failed")
             return False
 
-        logger.success(f"Generated {len(thumbnail_prompts)} prompt variations")
+        logger.success(f"Generated {len(thumbnail_prompts)} prompts")
         for i, p in enumerate(thumbnail_prompts, 1):
             logger.info(f"  Prompt {i}: '{p.suggested_title}'")
 
         # Step 5: Image Generation
-        total_images = n_prompts * n_variations
-        logger.info(f"\n[Step 5/5] Generating {total_images} Thumbnail Images ({n_prompts} prompts × {n_variations} variations)...")
+        logger.info(f"\n[Step 5/5] Generating {n_images} Thumbnail Images...")
 
         thumbnail_paths = generate_thumbnails(
             prompts=thumbnail_prompts,
             best_frames=reference_frames,
             output=output,
-            num_variations_per_prompt=n_variations,
+            num_variations_per_prompt=1,  # One image per prompt (no variations)
             use_composite=use_composite,
             gemini_model=selected_gemini_model,
             openai_model=openai_model,
@@ -252,8 +249,7 @@ def process_single_video(
             "frames_extracted": len(extracted_frames),
             "faces_detected": face_result.frames_with_faces if face_result else 0,
             "reference_frames": len(reference_frames),
-            "num_prompts": len(thumbnail_prompts),
-            "num_variations_per_prompt": n_variations,
+            "num_images": len(thumbnail_prompts),
             "total_thumbnails": len(thumbnail_paths),
             "thumbnail_paths": [str(p) for p in thumbnail_paths],
             "use_composite": use_composite,
@@ -281,8 +277,7 @@ def process_batch(
     use_composite: bool = False,
     force: bool = False,  # Deprecated
     dry_run: bool = False,
-    num_prompts: int = None,
-    num_variations: int = None,
+    num_images: int = None,
     use_pro_model: bool = False,
     force_scenes: bool = False,
     force_faces: bool = False,
@@ -362,8 +357,7 @@ def process_batch(
                 skip_transcription=skip_transcription,
                 use_composite=use_composite,
                 force=force,
-                num_prompts=num_prompts,
-                num_variations=num_variations,
+                num_images=num_images,
                 use_pro_model=use_pro_model,
                 force_scenes=force_scenes,
                 force_faces=force_faces,
@@ -517,17 +511,10 @@ Examples:
     )
 
     parser.add_argument(
-        '--num-prompts',
+        '--num-images',
         type=int,
         default=NUM_PROMPT_VARIATIONS,
-        help=f'Number of different prompt concepts to generate (default: {NUM_PROMPT_VARIATIONS})'
-    )
-
-    parser.add_argument(
-        '--num-variations',
-        type=int,
-        default=NUM_IMAGE_VARIATIONS,
-        help=f'Number of image variations per prompt (default: {NUM_IMAGE_VARIATIONS})'
+        help=f'Number of thumbnail images to generate (default: {NUM_PROMPT_VARIATIONS})'
     )
 
     parser.add_argument(
@@ -605,8 +592,7 @@ Examples:
             skip_transcription=args.skip_transcription,
             use_composite=args.composite,
             force=args.force,
-            num_prompts=args.num_prompts,
-            num_variations=args.num_variations,
+            num_images=args.num_images,
             use_pro_model=args.image_pro,
             force_scenes=args.force_scenes,
             force_faces=args.force_faces,
@@ -632,8 +618,7 @@ Examples:
         use_composite=args.composite,
         force=args.force,
         dry_run=args.dry_run,
-        num_prompts=args.num_prompts,
-        num_variations=args.num_variations,
+        num_images=args.num_images,
         use_pro_model=args.image_pro,
         force_scenes=args.force_scenes,
         force_faces=args.force_faces,

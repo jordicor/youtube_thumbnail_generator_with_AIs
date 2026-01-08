@@ -30,7 +30,7 @@
     "warning": "Aviso",
     "unknown": "Desconocida",
     "info": "Info",
-    "info_tooltip": "Informacion"
+    "info_tooltip": "Clic para ver más información"
   },
 
   "nav": {
@@ -187,22 +187,6 @@
     }
   },
 
-  "create_cluster": {
-    "title": "Crear Cluster - Video {id}",
-    "heading": "Crear Nuevo Cluster",
-    "back": "Volver",
-    "form": {
-      "name": "Nombre del cluster",
-      "name_placeholder": "Ej: Persona 4",
-      "description": "Descripcion (opcional)",
-      "submit": "Crear cluster"
-    },
-    "select_frames": {
-      "title": "Seleccionar Frames",
-      "description": "Elige los frames que pertenecen a esta persona"
-    }
-  },
-
   "generation": {
     "title": "Generar Thumbnails",
     "config": {
@@ -236,13 +220,20 @@
 
   "results": {
     "title": "Resultados - Job {id}",
-    "back": "Volver al video",
-    "loading": "Cargando resultados...",
-    "no_results": "No hay resultados disponibles",
+    "back": "Volver a videos",
+    "loading_info": "Cargando informacion del trabajo...",
+    "loading_thumbnails": "Cargando thumbnails...",
+    "status": "Estado:",
+    "progress": "Progreso:",
+    "thumbnails_count": "Thumbnails:",
+    "download_all_zip": "Descargar todos (ZIP)",
+    "regenerate": "Regenerar",
+    "no_thumbnails_yet": "No hay thumbnails generados aun",
     "thumbnails": {
       "title": "Thumbnails Generados",
       "download": "Descargar",
       "download_all": "Descargar todos",
+      "download_all_zip": "Descargar todos (ZIP)",
       "open": "Abrir en nueva pestana",
       "delete": "Eliminar"
     }
@@ -459,7 +450,8 @@
     "loading": "Cargando clusters...",
     "frame_count_one": "{count} frame",
     "frame_count_other": "{count} frames",
-    "person_label": "Persona {index}"
+    "person_label": "Persona {index}",
+    "references_title": "Referencia IA"
   },
 
   "cluster_frames": {
@@ -526,6 +518,7 @@
 
   "create_cluster": {
     "title": "Crear Nuevo Cluster",
+    "heading": "Crear Nuevo Cluster",
     "back": "Cancelar y volver",
     "name_label": "Nombre del cluster (opcional):",
     "name_placeholder": "Ej: Persona principal, Invitado, etc.",
@@ -671,16 +664,14 @@
     "cluster_label": "Persona/Personaje:",
     "cluster_tooltip": "La IA usara estas imagenes como referencia para generar las miniaturas, manteniendo el mismo rostro, peinado, ropa y aspecto general. Selecciona arriba (con ☆) el personaje que quieras que aparezca en el thumbnail.",
     "no_cluster_selected": "Selecciona un cluster arriba usando la estrella",
-    "concepts_label": "Conceptos:",
-    "concepts_tooltip": "Ideas creativas diferentes que la IA generara basandose en el contenido del video.",
-    "variations_label": "Variaciones:",
-    "variations_tooltip": "Versiones diferentes de cada concepto. Util para elegir la mejor composicion.",
+    "images_label": "Imagenes:",
+    "images_tooltip": "Numero de miniaturas diferentes que la IA generara. Cada imagen sera una idea creativa completamente independiente.",
     "expression_label": "Expresion:",
     "expression_auto": "Automatico",
     "expression_smiling": "Sonriendo",
     "expression_mouth_closed": "Boca cerrada",
     "expression_neutral": "Neutral",
-    "avoid_repeat": "Evitar repetir conceptos previos",
+    "avoid_repeat": "Evitar repetir imagenes previas",
     "reference_image_label": "Imagen de referencia (opcional):",
     "reference_image_tooltip": "Sube una imagen para que la IA la use como inspiracion visual al crear los conceptos y/o como referencia de estilo para la generacion.",
     "select_image": "Seleccionar imagen",
@@ -704,20 +695,6 @@
     "saved_title": "Miniaturas Guardadas",
     "download_all": "Descargar todas",
     "loading": "Cargando miniaturas..."
-  },
-
-  "results": {
-    "title": "Thumbnails Generados",
-    "back": "Volver a videos",
-    "loading_info": "Cargando informacion del trabajo...",
-    "loading_thumbnails": "Cargando thumbnails...",
-    "status": "Estado:",
-    "progress": "Progreso:",
-    "thumbnails_count": "Thumbnails:",
-    "download_all_zip": "Descargar todos (ZIP)",
-    "regenerate": "Regenerar",
-    "download": "Descargar",
-    "no_thumbnails_yet": "No hay thumbnails generados aun"
   },
 
   "languages": {
@@ -749,6 +726,7 @@
       "min_clusters_required": "Se requieren al menos 2 clusters para fusionar",
       "min_one_frame_required": "Se requiere al menos un frame",
       "invalid_filename": "Nombre de archivo invalido",
+      "invalid_file_path": "Ruta de archivo invalida",
       "invalid_file_extension": "Extension de archivo invalida. Permitidas: {extensions}",
       "invalid_file_content": "Contenido de archivo invalido: {error}. La extension era {ext} pero el contenido no coincide con un formato de video.",
       "job_cannot_cancel": "El trabajo no puede ser cancelado",

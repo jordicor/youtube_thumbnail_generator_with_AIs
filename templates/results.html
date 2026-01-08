@@ -80,9 +80,9 @@
                 const card = document.createElement('div');
                 card.className = 'thumbnail-card';
                 card.innerHTML = `
-                    <img src="/api/thumbnails/${thumb.id}" alt="Thumbnail ${thumb.prompt_index}">
+                    <img src="/api/thumbnails/${thumb.id}" alt="Thumbnail ${thumb.image_index}">
                     <div class="thumbnail-info">
-                        <h4>${escapeHtml(thumb.suggested_title) || 'Thumbnail ' + thumb.prompt_index}</h4>
+                        <h4>${escapeHtml(thumb.suggested_title) || 'Thumbnail ' + thumb.image_index}</h4>
                         <p>${escapeHtml(thumb.text_overlay) || ''}</p>
                         <div class="thumbnail-actions">
                             <a href="/api/thumbnails/${thumb.id}" download class="btn btn-primary btn-small">

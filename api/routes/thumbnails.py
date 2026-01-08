@@ -14,6 +14,7 @@ from datetime import datetime
 
 from database.db import get_db
 from i18n.i18n import translate as t
+from config import OUTPUT_DIR
 
 
 router = APIRouter()
@@ -33,10 +34,17 @@ async def get_thumbnail(thumbnail_id: int):
         raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_not_found'))
 
     filepath = row[0]
-    if not Path(filepath).exists():
+    filepath_resolved = Path(filepath).resolve()
+    output_dir_resolved = Path(OUTPUT_DIR).resolve()
+
+    # Security: validate path is within OUTPUT_DIR
+    if not filepath_resolved.is_relative_to(output_dir_resolved):
+        raise HTTPException(status_code=400, detail=t('api.errors.invalid_file_path'))
+
+    if not filepath_resolved.exists():
         raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_file_not_found'))
 
-    return FileResponse(filepath, media_type="image/png")
+    return FileResponse(str(filepath_resolved), media_type="image/png")
 
 
 @router.get("/{thumbnail_id}/info")
@@ -97,7 +105,7 @@ async def get_video_thumbnails(video_id: int, limit: int = 50):
     """
     async with get_db() as db:
         query = """
-            SELECT t.id, t.filepath, t.prompt_index, t.variation_index,
+            SELECT t.id, t.filepath, t.image_index,
                    t.suggested_title, t.text_overlay, t.created_at
             FROM thumbnails t
             JOIN generation_jobs j ON t.job_id = j.id
@@ -136,10 +144,10 @@ async def download_all_thumbnails(job_id: int):
 
         # Get all thumbnails for this job
         query = """
-            SELECT filepath, suggested_title, prompt_index, variation_index
+            SELECT filepath, suggested_title, image_index
             FROM thumbnails
             WHERE job_id = ?
-            ORDER BY prompt_index, variation_index
+            ORDER BY image_index
         """
         async with db.execute(query, [job_id]) as cursor:
             rows = await cursor.fetchall()
@@ -151,15 +159,12 @@ async def download_all_thumbnails(job_id: int):
     zip_buffer = io.BytesIO()
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for filepath, title, prompt_idx, var_idx in rows:
+        for filepath, title, image_idx in rows:
             file_path = Path(filepath)
             if file_path.exists():
                 # Create a clean filename
-                safe_title = (title or f"thumbnail_{prompt_idx}").replace('/', '_').replace('\\', '_')[:50]
-                if var_idx > 0:
-                    filename = f"{prompt_idx + 1:02d}_{safe_title}_v{var_idx + 1}{file_path.suffix}"
-                else:
-                    filename = f"{prompt_idx + 1:02d}_{safe_title}{file_path.suffix}"
+                safe_title = (title or f"thumbnail_{image_idx}").replace('/', '_').replace('\\', '_')[:50]
+                filename = f"{image_idx + 1:02d}_{safe_title}{file_path.suffix}"
 
                 zip_file.write(file_path, filename)
 
@@ -197,11 +202,11 @@ async def download_all_video_thumbnails(video_id: int):
 
         # Get all thumbnails for this video
         query = """
-            SELECT t.filepath, t.suggested_title, t.prompt_index, t.variation_index, j.id as job_id
+            SELECT t.filepath, t.suggested_title, t.image_index, j.id as job_id
             FROM thumbnails t
             JOIN generation_jobs j ON t.job_id = j.id
             WHERE j.video_id = ?
-            ORDER BY j.created_at DESC, t.prompt_index, t.variation_index
+            ORDER BY j.created_at DESC, t.image_index
         """
         async with db.execute(query, [video_id]) as cursor:
             rows = await cursor.fetchall()
@@ -213,15 +218,12 @@ async def download_all_video_thumbnails(video_id: int):
     zip_buffer = io.BytesIO()
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for filepath, title, prompt_idx, var_idx, job_id in rows:
+        for filepath, title, image_idx, job_id in rows:
             file_path = Path(filepath)
             if file_path.exists():
                 # Create a clean filename with job prefix
-                safe_title = (title or f"thumbnail_{prompt_idx}").replace('/', '_').replace('\\', '_')[:50]
-                if var_idx > 0:
-                    filename = f"job{job_id}/{prompt_idx + 1:02d}_{safe_title}_v{var_idx + 1}{file_path.suffix}"
-                else:
-                    filename = f"job{job_id}/{prompt_idx + 1:02d}_{safe_title}{file_path.suffix}"
+                safe_title = (title or f"thumbnail_{image_idx}").replace('/', '_').replace('\\', '_')[:50]
+                filename = f"job{job_id}/{image_idx + 1:02d}_{safe_title}{file_path.suffix}"
 
                 zip_file.write(file_path, filename)
 

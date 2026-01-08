@@ -232,7 +232,7 @@ async def stream_generation_status(job_id: int, request: Request):
                                     "job_id": job_id,
                                     "thumbnail_id": thumb['id'],
                                     "filepath": thumb['filepath'],
-                                    "prompt_index": thumb.get('prompt_index'),
+                                    "image_index": thumb.get('image_index'),
                                     "suggested_title": thumb.get('suggested_title'),
                                     "text_overlay": thumb.get('text_overlay')
                                 },

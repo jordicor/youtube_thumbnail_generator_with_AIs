@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from database.db import get_db
 from services.analysis_service import AnalysisService
-from config import MAX_REFERENCE_FRAMES
+from config import MAX_REFERENCE_FRAMES, OUTPUT_DIR
 from job_queue.queue import enqueue_analysis
 from i18n.i18n import translate as t
 
@@ -362,10 +362,17 @@ async def get_frame_image(video_id: int, cluster_index: int, frame_id: int):
                 raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))
             frame_path = row[0]
 
-    if not Path(frame_path).exists():
+    frame_path_resolved = Path(frame_path).resolve()
+    output_dir_resolved = Path(OUTPUT_DIR).resolve()
+
+    # Security: validate path is within OUTPUT_DIR
+    if not frame_path_resolved.is_relative_to(output_dir_resolved):
+        raise HTTPException(status_code=400, detail=t('api.errors.invalid_file_path'))
+
+    if not frame_path_resolved.exists():
         raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))
 
-    return FileResponse(frame_path, media_type="image/jpeg")
+    return FileResponse(str(frame_path_resolved), media_type="image/jpeg")
 
 
 @router.put("/{video_id}/clusters/{cluster_index}/frames/references")
@@ -533,8 +540,8 @@ async def get_cluster_frame_image_from_disk(
     Serve a specific frame image from disk.
     Used by the file explorer UI to display images.
     """
-    # Security: prevent path traversal attacks
-    if ".." in filename or "/" in filename or "\\" in filename:
+    # Security: prevent path traversal - validate filename has no path components
+    if Path(filename).name != filename:
         raise HTTPException(status_code=400, detail=t('api.errors.invalid_filename'))
 
     async with get_db() as db:
@@ -546,7 +553,14 @@ async def get_cluster_frame_image_from_disk(
         if frame_path is None:
             raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))
 
-    return FileResponse(str(frame_path), media_type="image/jpeg")
+    # Security: verify resolved path is within OUTPUT_DIR
+    frame_path_resolved = Path(frame_path).resolve()
+    output_dir_resolved = Path(OUTPUT_DIR).resolve()
+
+    if not frame_path_resolved.is_relative_to(output_dir_resolved):
+        raise HTTPException(status_code=400, detail=t('api.errors.invalid_file_path'))
+
+    return FileResponse(str(frame_path_resolved), media_type="image/jpeg")
 
 
 @router.delete("/{video_id}/clusters/{cluster_index}/frames/disk")
@@ -618,8 +632,8 @@ async def get_video_frame_image(video_id: int, filename: str):
     Serve a specific frame image from the video's frames/ directory.
     Used for displaying frames in the manual cluster creation UI.
     """
-    # Security: prevent path traversal attacks
-    if ".." in filename or "/" in filename or "\\" in filename:
+    # Security: prevent path traversal - validate filename has no path components
+    if Path(filename).name != filename:
         raise HTTPException(status_code=400, detail=t('api.errors.invalid_filename'))
 
     async with get_db() as db:
@@ -630,7 +644,12 @@ async def get_video_frame_image(video_id: int, filename: str):
             raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
         output_dir = service._get_video_output_dir(video)
-        frame_path = output_dir / "frames" / filename
+        frame_path = (output_dir / "frames" / filename).resolve()
+        output_dir_resolved = output_dir.resolve()
+
+        # Security: verify final path is within video's output directory
+        if not frame_path.is_relative_to(output_dir_resolved):
+            raise HTTPException(status_code=400, detail=t('api.errors.invalid_file_path'))
 
         if not frame_path.exists():
             raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))

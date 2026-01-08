@@ -30,7 +30,7 @@
     "warning": "Warning",
     "unknown": "Unknown",
     "info": "Info",
-    "info_tooltip": "Information"
+    "info_tooltip": "Click for expanded info"
   },
 
   "nav": {
@@ -187,22 +187,6 @@
     }
   },
 
-  "create_cluster": {
-    "title": "Create Cluster - Video {id}",
-    "heading": "Create New Cluster",
-    "back": "Back",
-    "form": {
-      "name": "Cluster name",
-      "name_placeholder": "E.g.: Person 4",
-      "description": "Description (optional)",
-      "submit": "Create cluster"
-    },
-    "select_frames": {
-      "title": "Select Frames",
-      "description": "Choose the frames that belong to this person"
-    }
-  },
-
   "generation": {
     "title": "Generate Thumbnails",
     "config": {
@@ -236,13 +220,20 @@
 
   "results": {
     "title": "Results - Job {id}",
-    "back": "Back to video",
-    "loading": "Loading results...",
-    "no_results": "No results available",
+    "back": "Back to videos",
+    "loading_info": "Loading job information...",
+    "loading_thumbnails": "Loading thumbnails...",
+    "status": "Status:",
+    "progress": "Progress:",
+    "thumbnails_count": "Thumbnails:",
+    "download_all_zip": "Download all (ZIP)",
+    "regenerate": "Regenerate",
+    "no_thumbnails_yet": "No thumbnails generated yet",
     "thumbnails": {
       "title": "Generated Thumbnails",
       "download": "Download",
       "download_all": "Download all",
+      "download_all_zip": "Download all (ZIP)",
       "open": "Open in new tab",
       "delete": "Delete"
     }
@@ -459,7 +450,8 @@
     "loading": "Loading clusters...",
     "frame_count_one": "{count} frame",
     "frame_count_other": "{count} frames",
-    "person_label": "Person {index}"
+    "person_label": "Person {index}",
+    "references_title": "AI Reference"
   },
 
   "cluster_frames": {
@@ -526,6 +518,7 @@
 
   "create_cluster": {
     "title": "Create New Cluster",
+    "heading": "Create New Cluster",
     "back": "Cancel and go back",
     "name_label": "Cluster name (optional):",
     "name_placeholder": "E.g.: Main person, Guest, etc.",
@@ -671,16 +664,14 @@
     "cluster_label": "Person/Character:",
     "cluster_tooltip": "The AI will use these images as reference to generate thumbnails, keeping the same face, hairstyle, clothes and general appearance. Select above (with ☆) the character you want to appear in the thumbnail.",
     "no_cluster_selected": "Select a cluster above using the star",
-    "concepts_label": "Concepts:",
-    "concepts_tooltip": "Different creative ideas that the AI will generate based on the video content.",
-    "variations_label": "Variations:",
-    "variations_tooltip": "Different versions of each concept. Useful for choosing the best composition.",
+    "images_label": "Images:",
+    "images_tooltip": "Number of different thumbnails the AI will generate. Each image will be a completely independent creative idea.",
     "expression_label": "Expression:",
     "expression_auto": "Automatic",
     "expression_smiling": "Smiling",
     "expression_mouth_closed": "Mouth closed",
     "expression_neutral": "Neutral",
-    "avoid_repeat": "Avoid repeating previous concepts",
+    "avoid_repeat": "Avoid repeating previous images",
     "reference_image_label": "Reference image (optional):",
     "reference_image_tooltip": "Upload an image for the AI to use as visual inspiration when creating concepts and/or as style reference for generation.",
     "select_image": "Select image",
@@ -704,20 +695,6 @@
     "saved_title": "Saved Thumbnails",
     "download_all": "Download all",
     "loading": "Loading thumbnails..."
-  },
-
-  "results": {
-    "title": "Generated Thumbnails",
-    "back": "Back to videos",
-    "loading_info": "Loading job information...",
-    "loading_thumbnails": "Loading thumbnails...",
-    "status": "Status:",
-    "progress": "Progress:",
-    "thumbnails_count": "Thumbnails:",
-    "download_all_zip": "Download all (ZIP)",
-    "regenerate": "Regenerate",
-    "download": "Download",
-    "no_thumbnails_yet": "No thumbnails generated yet"
   },
 
   "languages": {
@@ -749,6 +726,7 @@
       "min_clusters_required": "At least 2 clusters are required for merging",
       "min_one_frame_required": "At least one frame is required",
       "invalid_filename": "Invalid filename",
+      "invalid_file_path": "Invalid file path",
       "invalid_file_extension": "Invalid file extension. Allowed: {extensions}",
       "invalid_file_content": "Invalid file content: {error}. File extension was {ext} but content doesn't match a video format.",
       "job_cannot_cancel": "Job cannot be cancelled",

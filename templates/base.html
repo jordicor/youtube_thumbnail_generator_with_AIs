@@ -55,7 +55,8 @@
         </div>
     </footer>
 
-    <!-- i18n must load first -->
+    <!-- i18n translations (inline to prevent race condition) -->
+    <script>window.__I18N_CACHE__ = {{ get_all_translations() | tojson | safe }};</script>
     <script src="/static/js/i18n.js"></script>
     <script src="/static/js/app.js"></script>
     <script>
