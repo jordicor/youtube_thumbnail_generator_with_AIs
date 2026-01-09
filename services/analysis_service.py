@@ -1773,11 +1773,14 @@ class AnalysisService:
         desc_val = description.strip()[:2000] if description and description.strip() else None
 
         # Create cluster
+        num_frames = len(frame_ids)  # Use frame_ids count (always accurate, even if metadata fetch fails)
+        representative_frame_path = frames_data[0]['frame_path'] if frames_data else frame_paths[0]
+
         cursor = await self.db.execute("""
             INSERT INTO clusters
-                (video_id, cluster_index, label, description, view_mode, representative_frame_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, [video_id, next_index, label_val, desc_val, view_mode, representative_frame_id])
+                (video_id, cluster_index, label, description, view_mode, representative_frame_id, num_frames, representative_frame)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, [video_id, next_index, label_val, desc_val, view_mode, representative_frame_id, num_frames, representative_frame_path])
 
         cluster_id = cursor.lastrowid
 
