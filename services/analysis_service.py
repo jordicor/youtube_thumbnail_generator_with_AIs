@@ -285,9 +285,10 @@ class AnalysisService:
 
             # === Create 'person' cluster ===
             cursor = await self.db.execute("""
-                INSERT INTO clusters (video_id, cluster_index, view_mode, representative_frame_id)
-                VALUES (?, ?, 'person', ?)
-            """, [video_id, cluster_idx, rep_frame_id])
+                INSERT INTO clusters (video_id, cluster_index, view_mode, representative_frame_id,
+                                      num_frames, representative_frame)
+                VALUES (?, ?, 'person', ?, ?, ?)
+            """, [video_id, cluster_idx, rep_frame_id, len(frames_with_quality), representative_path])
             person_cluster_id = cursor.lastrowid
 
             # Assign all frames to person cluster
@@ -318,14 +319,15 @@ class AnalysisService:
                 # Sort by quality
                 scene_frames.sort(key=lambda f: f['quality_score'], reverse=True)
                 scene_rep_id = scene_frames[0]['frame_id']
+                scene_rep_path = scene_frames[0]['frame_path']
 
                 # Create person_scene cluster
                 cursor = await self.db.execute("""
                     INSERT INTO clusters (video_id, cluster_index, view_mode, scene_index,
-                                          representative_frame_id)
-                    VALUES (?, ?, 'person_scene', ?, ?)
+                                          representative_frame_id, num_frames, representative_frame)
+                    VALUES (?, ?, 'person_scene', ?, ?, ?, ?)
                 """, [video_id, person_scene_index, scene_idx if scene_idx != -1 else None,
-                      scene_rep_id])
+                      scene_rep_id, len(scene_frames), scene_rep_path])
                 scene_cluster_id = cursor.lastrowid
                 person_scene_index += 1
 

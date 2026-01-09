@@ -119,12 +119,11 @@ def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dic
         'timestamps_granularity': 'word',  # Get word-level timestamps
     }
 
-    # Add keyterms if configured (Scribe v2 only)
+    # Parse keyterms if configured (Scribe v2 only)
+    keyterms = []
     if ELEVENLABS_KEYTERMS:
         keyterms = [k.strip() for k in ELEVENLABS_KEYTERMS.split(',') if k.strip()]
         if keyterms:
-            # API expects JSON array format
-            data['keyterms'] = json.dumps(keyterms)
             logger.info(f"Using {len(keyterms)} keyterms for improved recognition")
 
     # Add entity detection if configured (Scribe v2 only, additional cost)
@@ -140,10 +139,16 @@ def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dic
                 'file': (audio_path.name, audio_file, 'audio/mpeg')
             }
 
+            # Convert data to list of tuples to support multiple keyterms fields
+            # ElevenLabs API expects each keyterm as a separate form field
+            data_tuples = list(data.items())
+            for term in keyterms:
+                data_tuples.append(('keyterms', term))
+
             response = requests.post(
                 ELEVENLABS_API_URL,
                 headers=headers,
-                data=data,
+                data=data_tuples,
                 files=files,
                 timeout=900  # 15 minutes
             )

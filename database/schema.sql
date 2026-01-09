@@ -70,10 +70,12 @@ CREATE TABLE IF NOT EXISTS clusters (
     cluster_type TEXT DEFAULT 'person',  -- 'person' or 'person_scene'
     parent_cluster_id INTEGER DEFAULT NULL,  -- FK to parent cluster (for person_scene)
     scene_index INTEGER DEFAULT NULL,  -- Scene number (only for person_scene clusters)
+    view_mode TEXT,                   -- 'person' or 'person_scene' (V2 architecture)
+    representative_frame_id INTEGER REFERENCES video_frames(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
     FOREIGN KEY (parent_cluster_id) REFERENCES clusters(id) ON DELETE CASCADE,
-    UNIQUE(video_id, cluster_index)
+    UNIQUE(video_id, cluster_index, view_mode)
 );
 
 -- =============================================================================
