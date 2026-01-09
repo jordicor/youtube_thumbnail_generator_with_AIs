@@ -423,6 +423,7 @@ def call_gransabio(
             gen_kwargs["json_output"] = True
             gen_kwargs["json_schema"] = json_schema
             gen_kwargs["json_retry_without_iteration"] = True
+            gen_kwargs["content_type"] = "json"  # Avoid conflict with default "article"
         else:
             gen_kwargs["json_output"] = False
 
