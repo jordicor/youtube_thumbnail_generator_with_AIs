@@ -21,6 +21,9 @@ from config import (
     TRANSCRIPTION_LANGUAGE,
     ELEVENLABS_API_KEY,
     ELEVENLABS_API_URL,
+    ELEVENLABS_MODEL,
+    ELEVENLABS_KEYTERMS,
+    ELEVENLABS_ENTITY_DETECTION,
 )
 from utils import setup_logger, VideoOutput
 
@@ -88,6 +91,11 @@ def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dic
     """
     Transcribe audio using ElevenLabs API with diarization enabled.
 
+    Uses Scribe v2 by default, which supports:
+    - Keyterm prompting (up to 100 terms) for better recognition of specific words
+    - Entity detection (56 types) with exact timestamps
+    - Up to 48 speakers for diarization
+
     Returns:
         Tuple of (text, full_response_dict)
         - text: Plain text transcription
@@ -96,8 +104,8 @@ def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dic
 
     audio_size_mb = audio_path.stat().st_size / (1024 * 1024)
 
-    if audio_size_mb > 1000:
-        logger.error(f"Audio file too large for ElevenLabs: {audio_size_mb:.2f} MB")
+    if audio_size_mb > 3000:  # Scribe v2 supports up to 3GB
+        logger.error(f"Audio file too large for ElevenLabs: {audio_size_mb:.2f} MB (max 3GB)")
         return None, None
 
     headers = {
@@ -105,13 +113,26 @@ def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dic
     }
 
     data = {
-        'model_id': 'scribe_v1',
+        'model_id': ELEVENLABS_MODEL,
         'language_code': TRANSCRIPTION_LANGUAGE,
         'diarize': 'true',  # Enable diarization for word-level timestamps & speaker ID
         'timestamps_granularity': 'word',  # Get word-level timestamps
     }
 
-    logger.info(f"Uploading audio ({audio_size_mb:.2f} MB) to ElevenLabs API (diarization enabled)...")
+    # Add keyterms if configured (Scribe v2 only)
+    if ELEVENLABS_KEYTERMS:
+        keyterms = [k.strip() for k in ELEVENLABS_KEYTERMS.split(',') if k.strip()]
+        if keyterms:
+            # API expects JSON array format
+            data['keyterms'] = json.dumps(keyterms)
+            logger.info(f"Using {len(keyterms)} keyterms for improved recognition")
+
+    # Add entity detection if configured (Scribe v2 only, additional cost)
+    if ELEVENLABS_ENTITY_DETECTION:
+        data['entity_detection'] = ELEVENLABS_ENTITY_DETECTION
+        logger.info(f"Entity detection enabled: {ELEVENLABS_ENTITY_DETECTION}")
+
+    logger.info(f"Uploading audio ({audio_size_mb:.2f} MB) to ElevenLabs API ({ELEVENLABS_MODEL}, diarization enabled)...")
 
     try:
         with open(audio_path, 'rb') as audio_file:
