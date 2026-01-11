@@ -541,6 +541,7 @@ def build_image_prompt_v3(
     Build a V3 optimized JSON prompt from ThumbnailImage.
 
     V3 structure with hard constraints for identity preservation:
+    - style_directive: Mandatory style from style_analysis (if provided)
     - generation_constraints: HARD restrictions (face source, forbidden actions)
     - clone_rules: Instructions for face/outfit cloning with enforcement
     - face_groups: Real people with physical descriptions
@@ -556,6 +557,23 @@ def build_image_prompt_v3(
         dict ready to serialize to JSON for image generation
     """
     prompt_dict = {}
+
+    # Style directive FIRST - if style_analysis exists, this takes priority
+    has_style_analysis = image.style_analysis and isinstance(image.style_analysis, dict)
+    if has_style_analysis:
+        style = image.style_analysis
+        prompt_dict["style_directive"] = {
+            "mandatory": True,
+            "art_type": style.get("art_type", "photorealistic"),
+            "art_type_details": style.get("art_type_details"),
+            "color_mood": style.get("color_mood"),
+            "visual_effects": style.get("visual_effects"),
+            "rendering_style": style.get("rendering_style"),
+            "composition_style": style.get("composition_style"),
+            "line_work": style.get("line_work"),
+            "overall_aesthetic": style.get("overall_aesthetic"),
+            "instruction": "Generate the image in THIS style. The FIRST reference image shows the target style. Do NOT default to photorealistic if a different style is specified."
+        }
 
     # Check if we have identity data (V3 characters or legacy subjects)
     has_identity_data = image.characters or image.subjects
@@ -581,11 +599,22 @@ def build_image_prompt_v3(
     # Scene with character_directions for active characters only
     prompt_dict["scene"] = _build_scene_v3(image)
 
-    # Output settings
-    prompt_dict["output"] = {
-        "quality": image.quality or "8K photorealistic YouTube thumbnail",
-        "aspect_ratio": "16:9"
-    }
+    # Output settings - adapt quality based on style_analysis if present
+    if has_style_analysis:
+        # Use style-appropriate quality descriptor
+        art_type = image.style_analysis.get("art_type", "")
+        overall_aesthetic = image.style_analysis.get("overall_aesthetic", "")
+        quality = image.quality or overall_aesthetic or f"high quality {art_type} style"
+        prompt_dict["output"] = {
+            "quality": quality,
+            "aspect_ratio": "16:9",
+            "style": art_type  # Reinforce the style in output
+        }
+    else:
+        prompt_dict["output"] = {
+            "quality": image.quality or "8K photorealistic YouTube thumbnail",
+            "aspect_ratio": "16:9"
+        }
 
     # Optional: text_in_image (different from text_overlay which is for UI)
     if image.text_in_image:
@@ -1867,23 +1896,59 @@ def generate_thumbnails_from_images(
 
         # Add note about external style reference if present
         if has_external_style_ref and best_frames:
-            style_ref_note = """
-═══════════════════════════════════════════════════════════════════════════════
-STYLE REFERENCE (INSPIRATION ONLY - DO NOT COPY EXACTLY):
-═══════════════════════════════════════════════════════════════════════════════
-The FIRST reference image is for STYLE INSPIRATION only:
-- Use it as a loose guide for colors, mood, or aesthetic if relevant
-- The SCENE DESCRIPTION BELOW takes PRIORITY over the style reference
-- Do NOT replicate the style reference exactly - use it as inspiration only
-- Do NOT try to clone any person from the style reference
+            # Check if we have style_analysis from the ThumbnailImage
+            if img.style_analysis and isinstance(img.style_analysis, dict):
+                # Build a SPECIFIC style directive with analyzed characteristics
+                sa = img.style_analysis
+                art_type = sa.get("art_type", "unknown style")
+                art_details = sa.get("art_type_details", "")
+                color_mood = sa.get("color_mood", "")
+                visual_effects = sa.get("visual_effects", [])
+                rendering_style = sa.get("rendering_style", "")
+                overall_aesthetic = sa.get("overall_aesthetic", "")
 
-PRIORITY ORDER:
-1. HIGHEST: The scene description below (image prompt)
-2. SECOND: Identity of the person from reference images 2 onwards
-3. LOWEST: Style inspiration from first reference (use loosely)
+                effects_str = ", ".join(visual_effects) if isinstance(visual_effects, list) else str(visual_effects or "none")
 
-The remaining reference images show the actual person who must appear in the
-thumbnail. Clone their identity ONLY from reference images 2 onwards.
+                style_ref_note = f"""
+═══════════════════════════════════════════════════════════════════════════════
+MANDATORY STYLE DIRECTIVE - GENERATE IN THIS SPECIFIC STYLE:
+═══════════════════════════════════════════════════════════════════════════════
+The FIRST reference image defines the target visual style. You MUST generate
+the image in this style:
+
+  ART TYPE: {art_type}
+  DETAILS: {art_details}
+  COLOR MOOD: {color_mood}
+  VISUAL EFFECTS: {effects_str}
+  RENDERING: {rendering_style}
+  OVERALL: {overall_aesthetic}
+
+CRITICAL INSTRUCTIONS:
+1. DO NOT generate photorealistic if the style is cartoon/anime/kawaii
+2. The characters from reference images 2 onwards must appear IN THIS STYLE
+3. Apply the color palette, visual effects, and rendering style specified above
+4. The scene description below tells you WHAT happens, but THIS determines HOW it looks
+
+The remaining reference images (2nd onwards) show REAL PEOPLE whose identity
+you must preserve, but render them in the style specified above.
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+            else:
+                # Fallback to generic note if no style_analysis available
+                style_ref_note = """
+═══════════════════════════════════════════════════════════════════════════════
+STYLE REFERENCE (FIRST IMAGE):
+═══════════════════════════════════════════════════════════════════════════════
+The FIRST reference image is a STYLE GUIDE. Analyze its visual characteristics
+and apply them to the generated image:
+- Art style (photorealistic, cartoon, anime, kawaii, illustration, etc.)
+- Color palette and mood
+- Visual effects (sparkles, glows, action lines, etc.)
+- Rendering style (2D, 3D, cel-shaded, etc.)
+
+Generate the image in the SAME STYLE as the first reference image.
+The remaining reference images show people whose identity you must preserve.
 ═══════════════════════════════════════════════════════════════════════════════
 
 """

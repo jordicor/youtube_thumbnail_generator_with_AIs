@@ -4,7 +4,7 @@
 
 > **From 100 videos uploaded in 3 years... to batch-processing 178 videos in days.**
 >
-> *Built in one week with Claude Code during my "vacation" from entrepreneurship.*
+> *First version shipped in one week with Claude Code during my "vacation" from entrepreneurship.*
 
 ---
 
@@ -30,7 +30,7 @@ Then came the AI revolution of late 2025. Models could finally:
 - Preserve facial identity from reference photos
 - Understand complex creative prompts
 
-**So I built this tool in 8 days during the holidays** (December 27, 2025 - January 4, 2026) using Claude Code. Not even consecutive days—New Year's happened in the middle. And yet here we are: complete web interface, face detection pipeline, multi-provider AI integration. I'm genuinely amazed at how fast we can ship full applications now.
+**So I shipped the first working version in 8 days during the holidays** (December 27, 2025 - January 4, 2026) using Claude Code. Not even consecutive days—New Year's happened in the middle. And yet here we are: complete web interface, face detection pipeline, multi-provider AI integration. I'm genuinely amazed at how fast we can ship full applications now.
 
 It automates what used to take me hours per video into a streamlined, AI-powered pipeline.
 
@@ -351,7 +351,7 @@ MIT License - Use freely, attribution appreciated.
 ## Acknowledgments
 
 - **Mel (FocusingsVlogs)** for trusting me with her content archive
-- **Claude Code** for making a week-long dev sprint possible
+- **Claude Code** for making the initial week-long dev sprint possible
 - **ElevenLabs** for their excellent speech-to-text API with speaker diarization
 - The open-source community behind InsightFace, PySceneDetect, and Whisper
 

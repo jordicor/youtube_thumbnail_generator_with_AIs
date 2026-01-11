@@ -5,6 +5,7 @@ Uses LLM (Claude/GPT) to analyze transcription and generate
 thumbnail prompts and titles.
 """
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Optional
@@ -76,6 +77,9 @@ class ThumbnailImage:
     # V3 fields - characters dict replaces subjects array
     characters: Optional[dict] = None              # {"person_01": {"belongs_to_face": "group_A", "outfit": "...", "identify_in_references": "..."}}
     environment_effects: Optional[str] = None      # Visual effects: glows, holographic elements, particles, etc.
+
+    # Style reference analysis (extracted from user's style reference image)
+    style_analysis: Optional[dict] = None          # {"art_type": "kawaii/chibi", "color_palette": [...], "visual_effects": [...], ...}
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -913,16 +917,46 @@ def create_fallback_image(
     )
 
 
-def save_images(images: list[ThumbnailImage], output: VideoOutput):
-    """Save generated images to files"""
+def compute_style_reference_hash(
+    reference_images_base64: Optional[list[str]],
+    has_style_reference: bool
+) -> Optional[str]:
+    """
+    Compute a hash of the style reference image for cache validation.
+
+    Args:
+        reference_images_base64: List of reference images (first one is style ref if has_style_reference=True)
+        has_style_reference: Whether the first image is a style reference
+
+    Returns:
+        MD5 hash of the style reference image, or None if no style reference
+    """
+    if not has_style_reference or not reference_images_base64:
+        return None
+
+    # The style reference is always the first image in the list
+    style_image_b64 = reference_images_base64[0]
+    return hashlib.md5(style_image_b64.encode()).hexdigest()
+
+
+def save_images(
+    images: list[ThumbnailImage],
+    output: VideoOutput,
+    style_reference_hash: Optional[str] = None
+):
+    """Save generated images to files with cache metadata."""
 
     prompts_dir = output.output_dir / "prompts"
     prompts_dir.mkdir(exist_ok=True)
 
-    # Save full images structure
+    # Save full images structure with cache metadata
     images_file = prompts_dir / "images.json"
+    cache_data = {
+        "style_reference_hash": style_reference_hash,
+        "images": [img.to_dict() for img in images]
+    }
     with open(images_file, 'w', encoding='utf-8') as f:
-        json.dump([img.to_dict() for img in images], f, indent=2, ensure_ascii=False)
+        json.dump(cache_data, f, indent=2, ensure_ascii=False)
 
     # Also save individual prompts for compatibility
     for img in images:
@@ -976,7 +1010,8 @@ def generate_thumbnail_images(
     prompt_config: Optional["PromptGenerationConfig"] = None,
     selected_titles: Optional[list[str]] = None,
     reference_image_base64: Optional[str] = None,
-    reference_images_base64: Optional[list[str]] = None
+    reference_images_base64: Optional[list[str]] = None,
+    has_style_reference: bool = False
 ) -> list[ThumbnailImage]:
     """
     Generate thumbnail images (flat structure, no variations).
@@ -991,6 +1026,7 @@ def generate_thumbnail_images(
         selected_titles: Optional list of user-selected titles to guide image generation
         reference_image_base64: Optional single external reference image for visual inspiration
         reference_images_base64: Optional list of reference images (max 20)
+        has_style_reference: If True, the first reference image is a style guide
 
     Returns:
         List of ThumbnailImage objects
@@ -998,7 +1034,10 @@ def generate_thumbnail_images(
 
     logger.info(f"Generating {num_images} thumbnail images...")
 
-    # Check cache - look for images.json with matching count
+    # Compute current style reference hash for cache validation
+    current_style_hash = compute_style_reference_hash(reference_images_base64, has_style_reference)
+
+    # Check cache - look for images.json with matching count and style hash
     prompts_dir = output.output_dir / "prompts"
     images_file = prompts_dir / "images.json"
 
@@ -1007,12 +1046,26 @@ def generate_thumbnail_images(
             with open(images_file, 'r', encoding='utf-8') as f:
                 cached_data = json.load(f)
 
-            # Check if cache matches requested count
-            if len(cached_data) == num_images:
-                logger.info(f"Loading cached images ({num_images})...")
+            # Handle both new format (dict with metadata) and legacy format (list)
+            if isinstance(cached_data, dict):
+                cached_hash = cached_data.get('style_reference_hash')
+                images_list = cached_data.get('images', [])
+            else:
+                # Legacy format: plain list, no hash
+                cached_hash = None
+                images_list = cached_data
+
+            # Validate cache: count must match AND style reference hash must match
+            cache_valid = (
+                len(images_list) == num_images and
+                cached_hash == current_style_hash
+            )
+
+            if cache_valid:
+                logger.info(f"Loading cached images ({num_images}, style_hash={cached_hash[:8] if cached_hash else 'none'})...")
 
                 images = []
-                for img_data in cached_data:
+                for img_data in images_list:
                     images.append(ThumbnailImage(
                         image_index=img_data.get('image_index', 0),
                         concept_name=img_data.get('concept_name', ''),
@@ -1041,11 +1094,16 @@ def generate_thumbnail_images(
                         materials=img_data.get('materials'),
                         clothing_override=img_data.get('clothing_override'),
                         face_groups=img_data.get('face_groups'),
-                        style_source=img_data.get('style_source')
+                        style_source=img_data.get('style_source'),
+                        style_analysis=img_data.get('style_analysis')
                     ))
                 return images
             else:
-                logger.info(f"Cache has {len(cached_data)} images but {num_images} requested. Regenerating...")
+                # Log reason for cache miss
+                if len(images_list) != num_images:
+                    logger.info(f"Cache has {len(images_list)} images but {num_images} requested. Regenerating...")
+                elif cached_hash != current_style_hash:
+                    logger.info(f"Style reference changed (cached={cached_hash[:8] if cached_hash else 'none'}, current={current_style_hash[:8] if current_style_hash else 'none'}). Regenerating...")
         except Exception as e:
             logger.warning(f"Could not load cached images: {e}")
 
@@ -1066,7 +1124,8 @@ def generate_thumbnail_images(
         thumbnail_style=f"Style guidance:\n{THUMBNAIL_STYLE}",
         selected_titles=selected_titles,
         reference_image_base64=reference_image_base64,
-        reference_images_base64=reference_images_base64
+        reference_images_base64=reference_images_base64,
+        has_style_reference=has_style_reference
     )
 
     if data:
@@ -1127,7 +1186,8 @@ def generate_thumbnail_images(
                 face_groups=img_data.get('face_groups'),
                 style_source=img_data.get('style_source'),
                 characters=characters,
-                environment_effects=environment_effects
+                environment_effects=environment_effects,
+                style_analysis=img_data.get('style_analysis')
             ))
 
         if len(images) < num_images:
@@ -1137,8 +1197,8 @@ def generate_thumbnail_images(
         logger.error("Unexpected response format (not a list) - no fallback available")
         return None
 
-    # Save images
-    save_images(images, output)
+    # Save images with style reference hash for cache validation
+    save_images(images, output, style_reference_hash=current_style_hash)
 
     logger.success(f"Generated {len(images)} thumbnail images")
 

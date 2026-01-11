@@ -260,64 +260,8 @@ class GenerationService:
                 history_prompts=history_prompts
             )
 
-            # Step 2b: Load cluster frames BEFORE prompt generation
-            # So Gran Sabio LLM can analyze the reference images visually
-            from config import GRANSABIO_MAX_REF_IMAGES
-
-            # Load ALL reference frames from cluster (we'll limit later for image generation)
-            cluster_frames_data = await self.get_reference_frames_for_generation(
-                job['cluster_id'],
-                limit=20  # Get plenty, will limit based on context
-            )
-
-            # Convert to Path objects and filter existing files
-            best_frames = [
-                Path(frame['frame_path'])
-                for frame in cluster_frames_data
-                if Path(frame['frame_path']).exists()
-            ]
-
-            # Fallback: if no frames found for cluster, use extracted frames
-            if not best_frames:
-                best_frames = list(output.frames_dir.glob("*.jpg"))[:14]
-
-            # Convert cluster frames to base64 for Gran Sabio LLM analysis
-            # This allows the LLM to visually identify people, outfits, and create proper face_groups
-            cluster_frames_b64 = self._convert_frames_to_base64(
-                best_frames[:GRANSABIO_MAX_REF_IMAGES]
-            )
-
-            # Prepare reference images for prompt generation
-            # Always include cluster frames so Gran Sabio can see who's in the video
-            ref_images_for_prompts = cluster_frames_b64.copy() if cluster_frames_b64 else []
-
-            # Add external reference images if user requested
-            if reference_image_use_for_prompts:
-                if reference_image_base64:
-                    ref_images_for_prompts.insert(0, reference_image_base64)
-                if reference_images_base64:
-                    ref_images_for_prompts.extend(reference_images_base64)
-
-            thumbnail_images = generate_thumbnail_images(
-                transcription=transcription,
-                video_title=video_path.stem,
-                output=output,
-                num_images=job['num_images'],
-                cluster_description=cluster.get('description'),
-                prompt_config=prompt_config,
-                selected_titles=selected_titles,
-                reference_image_base64=None,  # Included in the list below
-                reference_images_base64=ref_images_for_prompts if ref_images_for_prompts else None
-            )
-
-            if not thumbnail_images:
-                await self.update_job_status(job_id, 'error', 0, 'Prompt generation failed')
-                return
-
-            # Step 3: Prepare frames for image generation
-            await self.update_job_status(job_id, 'generating', 50)
-
-            # Determine max reference images based on IMAGE GENERATION provider and model
+            # Step 2b: Calculate reference limit FIRST (before loading frames)
+            # This ensures both prompt LLM and image generator see the SAME frames
             if image_provider == "gemini":
                 model = gemini_model or GEMINI_IMAGE_MODEL
                 model_max = GEMINI_MODEL_MAX_REFS.get(model, 3)
@@ -335,10 +279,67 @@ class GenerationService:
             # Use user-specified limit if provided, but don't exceed model's max
             ref_limit = min(num_reference_images, model_max) if num_reference_images else model_max
 
-            # Limit best_frames for image generation (already loaded above)
-            best_frames = best_frames[:ref_limit]
+            # Load reference frames from cluster with the SAME limit that image generator will use
+            cluster_frames_data = await self.get_reference_frames_for_generation(
+                job['cluster_id'],
+                limit=ref_limit
+            )
+
+            # Convert to Path objects and filter existing files
+            best_frames = [
+                Path(frame['frame_path'])
+                for frame in cluster_frames_data
+                if Path(frame['frame_path']).exists()
+            ]
+
+            # Fallback: if no frames found for cluster, use extracted frames
+            if not best_frames:
+                best_frames = list(output.frames_dir.glob("*.jpg"))[:ref_limit]
+
+            # Convert cluster frames to base64 for Gran Sabio LLM analysis
+            # LLM sees exactly the same frames that image generator will use
+            cluster_frames_b64 = self._convert_frames_to_base64(best_frames)
+
+            # Prepare reference images for prompt generation
+            # Always include cluster frames so Gran Sabio can see who's in the video
+            ref_images_for_prompts = cluster_frames_b64.copy() if cluster_frames_b64 else []
+
+            # Add external reference image to prompt generation if user uploaded one
+            # With simplified UI: use_for_prompts is always True when image is present
+            should_include_external = reference_image_use_for_prompts or reference_image_include_in_refs
+            if should_include_external:
+                if reference_image_base64:
+                    ref_images_for_prompts.insert(0, reference_image_base64)
+                if reference_images_base64:
+                    ref_images_for_prompts.extend(reference_images_base64)
+
+            # Determine if we have an external style reference image
+            # (user uploaded a style guide, inserted at position 0 of ref_images_for_prompts)
+            has_external_style_ref_for_prompts = should_include_external and bool(reference_image_base64)
+
+            thumbnail_images = generate_thumbnail_images(
+                transcription=transcription,
+                video_title=video_path.stem,
+                output=output,
+                num_images=job['num_images'],
+                cluster_description=cluster.get('description'),
+                prompt_config=prompt_config,
+                selected_titles=selected_titles,
+                reference_image_base64=None,  # Included in the list below
+                reference_images_base64=ref_images_for_prompts if ref_images_for_prompts else None,
+                has_style_reference=has_external_style_ref_for_prompts
+            )
+
+            if not thumbnail_images:
+                await self.update_job_status(job_id, 'error', 0, 'Prompt generation failed')
+                return
+
+            # Step 3: Generate thumbnail images
+            await self.update_job_status(job_id, 'generating', 50)
 
             # Handle external reference image for image generation
+            # With simplified UI: include_in_refs is True unless user chose to skip it
+            # in the conflict resolution modal. Frontend ensures cluster + 1 fits model_max.
             has_external_style_ref = False
             if reference_image_base64 and reference_image_include_in_refs:
                 external_ref_path = self._save_temp_reference_image(
@@ -346,13 +347,19 @@ class GenerationService:
                     output.output_dir
                 )
                 if external_ref_path:
-                    # If we're at the limit, remove the last cluster frame to make room
-                    if len(best_frames) >= ref_limit:
-                        best_frames = best_frames[:-1]
-
-                    # Add external reference at the beginning (highest priority)
-                    best_frames.insert(0, external_ref_path)
-                    has_external_style_ref = True
+                    # Add external reference if it fits (frontend should have validated this)
+                    if len(best_frames) < model_max:
+                        # Add external reference at the beginning (highest priority)
+                        best_frames.insert(0, external_ref_path)
+                        has_external_style_ref = True
+                    else:
+                        # Fallback: if somehow we're at limit, log warning but continue
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(
+                            f"External style reference not added: already at model limit "
+                            f"({len(best_frames)}/{model_max} refs)"
+                        )
 
             # Step 4: Generate thumbnails with progress callback
             # Create a sync callback that updates DB directly (since generate_thumbnails is sync)

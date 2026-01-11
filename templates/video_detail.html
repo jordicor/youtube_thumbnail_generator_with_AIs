@@ -112,6 +112,30 @@
         </div>
     </div>
 
+    <!-- Reference Limit Conflict Modal -->
+    <div id="refConflictModal" class="modal-overlay">
+        <div class="modal-dialog modal-warning">
+            <div class="modal-header">
+                <span class="modal-icon">&#9888;</span>
+                <span class="modal-title">{{ t('generate_form.ref_conflict_title') }}</span>
+            </div>
+            <div class="modal-body">
+                <p id="refConflictMessage"></p>
+            </div>
+            <div class="modal-footer" style="flex-direction: column; gap: 10px;">
+                <button class="btn btn-primary" id="refConflictReduceCluster" style="width: 100%;">
+                    {{ t('generate_form.ref_conflict_reduce_cluster') }}
+                </button>
+                <button class="btn btn-secondary" id="refConflictRemoveStyle" style="width: 100%;">
+                    {{ t('generate_form.ref_conflict_remove_style') }}
+                </button>
+                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('refConflictModal')" style="width: 100%;">
+                    {{ t('common.cancel') }}
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- AI Configuration Chips Bar -->
     <div class="ai-config-bar" id="aiConfigBar">
         <span class="ai-config-bar-label">{{ t('ai_config.bar_label') }}</span>
@@ -540,14 +564,10 @@
                 </div>
 
                 <div id="referenceImageOptions" class="reference-image-options" style="display: none; margin-top: 10px;">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="useRefForPrompts" checked>
-                        <span>{{ t('generate_form.analyze_for_prompts') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.analyze_tooltip') }}">&#9432;</span></span>
-                    </label>
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="includeRefInImages">
-                        <span>{{ t('generate_form.include_as_ref') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.include_tooltip') }}">&#9432;</span></span>
-                    </label>
+                    <span class="reference-image-info">
+                        &#10003; {{ t('generate_form.style_ref_always_used') }}
+                    </span>
+                    <span id="styleRefWarning" class="style-ref-warning" style="display: none;"></span>
                 </div>
             </div>
 

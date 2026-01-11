@@ -4279,3 +4279,32 @@ body {
     gap: 4px;
 }
 
+/* Reference Image Info Message */
+.reference-image-info {
+    display: block;
+    color: var(--success);
+    font-size: 0.85rem;
+    padding: 4px 0;
+}
+
+/* Style Reference Warning */
+.style-ref-warning {
+    display: block;
+    color: var(--warning);
+    font-size: 0.85rem;
+    margin-top: 6px;
+    padding: 4px 8px;
+    background: rgba(255, 170, 68, 0.1);
+    border-radius: 4px;
+    border-left: 3px solid var(--warning);
+}
+
+/* Warning Modal Style */
+.modal-dialog.modal-warning {
+    border-top: 4px solid var(--warning);
+}
+
+.modal-dialog.modal-warning .modal-icon {
+    color: var(--warning);
+}
+

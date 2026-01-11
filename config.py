@@ -71,7 +71,6 @@ GRANSABIO_CLIENT_PATH = os.getenv("GRANSABIO_CLIENT_PATH", "")
 # Gran Sabio Vision Settings (for sending reference images to LLM)
 GRANSABIO_USERNAME = os.getenv("GRANSABIO_USERNAME", "thumbnail_generator")
 GRANSABIO_IMAGE_DETAIL = os.getenv("GRANSABIO_IMAGE_DETAIL", "auto")  # low, high, auto
-GRANSABIO_MAX_REF_IMAGES = int(os.getenv("GRANSABIO_MAX_REF_IMAGES", "20"))  # Max frames to send to LLM
 
 # =============================================================================
 # VIDEO PROCESSING SETTINGS
@@ -169,6 +168,19 @@ USE_LOCAL_WHISPER = os.getenv("USE_LOCAL_WHISPER", "false").lower() == "true"
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo")
 TRANSCRIPTION_LANGUAGE = os.getenv("TRANSCRIPTION_LANGUAGE", "es")
 ELEVENLABS_API_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+
+# ElevenLabs Scribe model: scribe_v1, scribe_v2
+# scribe_v2 offers keyterm prompting, entity detection, and improved accuracy
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "scribe_v2")
+
+# Keyterms to bias transcription (comma-separated, max 100 terms, each <50 chars)
+# Useful for channel names, product names, technical jargon, proper nouns
+# Example: "MiCanal,ProductoX,TérminoTécnico"
+ELEVENLABS_KEYTERMS = os.getenv("ELEVENLABS_KEYTERMS", "")
+
+# Entity detection: detect entities with exact timestamps (additional cost)
+# Options: "" (disabled), "all", "pii", "phi", "pci", or array like "pii,pci"
+ELEVENLABS_ENTITY_DETECTION = os.getenv("ELEVENLABS_ENTITY_DETECTION", "")
 
 # =============================================================================
 # THUMBNAIL GENERATION SETTINGS

@@ -9,9 +9,10 @@ AI provider selection, thinking mode support, and prompt history.
 import sys
 import json
 import time
+import base64
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from dataclasses import dataclass
 
 from config import (
@@ -19,7 +20,6 @@ from config import (
     GRANSABIO_CLIENT_PATH,
     GRANSABIO_USERNAME,
     GRANSABIO_IMAGE_DETAIL,
-    GRANSABIO_MAX_REF_IMAGES,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,9 +115,50 @@ def get_gransabio_client():
         return None
 
 
+def detect_image_type(image_base64: str) -> Tuple[str, str]:
+    """
+    Detect image type from base64 data by examining magic bytes.
+
+    Args:
+        image_base64: Base64-encoded image data (without data: prefix)
+
+    Returns:
+        Tuple of (mime_type, extension) e.g. ("image/png", ".png")
+    """
+    try:
+        # Decode first few bytes to check magic numbers
+        raw_bytes = base64.b64decode(image_base64[:32])
+
+        # PNG: 89 50 4E 47 0D 0A 1A 0A
+        if raw_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            return ("image/png", ".png")
+
+        # JPEG: FF D8 FF
+        if raw_bytes[:3] == b'\xff\xd8\xff':
+            return ("image/jpeg", ".jpg")
+
+        # GIF: GIF87a or GIF89a
+        if raw_bytes[:6] in (b'GIF87a', b'GIF89a'):
+            return ("image/gif", ".gif")
+
+        # WebP: RIFF....WEBP
+        if raw_bytes[:4] == b'RIFF' and raw_bytes[8:12] == b'WEBP':
+            return ("image/webp", ".webp")
+
+        # BMP: BM
+        if raw_bytes[:2] == b'BM':
+            return ("image/bmp", ".bmp")
+
+    except Exception:
+        pass
+
+    # Default to JPEG if detection fails
+    return ("image/jpeg", ".jpg")
+
+
 def upload_image_to_gransabio(
     image_base64: str,
-    filename: str = "reference_frame.jpg",
+    filename: Optional[str] = None,
     username: Optional[str] = None
 ) -> Optional[str]:
     """
@@ -129,7 +170,7 @@ def upload_image_to_gransabio(
 
     Args:
         image_base64: Base64-encoded image data (without data: prefix)
-        filename: Filename to use for the upload
+        filename: Optional filename (auto-detected if not provided)
         username: User namespace for the attachment
 
     Returns:
@@ -143,16 +184,27 @@ def upload_image_to_gransabio(
     # Use configured username if not specified
     upload_username = username or GRANSABIO_USERNAME
 
+    # Detect image type from content
+    content_type, extension = detect_image_type(image_base64)
+
+    # Generate filename if not provided, ensuring correct extension
+    if filename:
+        # Replace extension if filename was provided with wrong one
+        base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
+        actual_filename = f"{base_name}{extension}"
+    else:
+        actual_filename = f"reference_frame{extension}"
+
     try:
         result = client.upload_attachment_base64(
             username=upload_username,
             content_base64=image_base64,
-            filename=filename,
-            content_type="image/jpeg"
+            filename=actual_filename,
+            content_type=content_type
         )
         upload_id = result.get("upload_id")
         if upload_id:
-            logger.info(f"Image uploaded to Gran Sabio: {upload_id[:16]}...")
+            logger.info(f"Image uploaded to Gran Sabio ({content_type}): {upload_id[:16]}...")
             return upload_id
         else:
             logger.warning("Gran Sabio returned empty upload_id")
@@ -457,13 +509,19 @@ def build_analysis_prompt_images(
     include_history: bool = False,
     thumbnail_style: str = "",
     selected_titles: Optional[List[str]] = None,
-    has_reference_image: bool = False
+    has_reference_image: bool = False,
+    has_style_reference: bool = False
 ) -> str:
     """
     Build the analysis prompt for flat image generation (no variations).
 
     This is the new simplified format where each image is completely independent.
     No concept/variation hierarchy - just N unique images.
+
+    Args:
+        has_style_reference: If True, the FIRST reference image is a style guide
+                            (not a person to clone) and should be analyzed for
+                            visual style characteristics.
     """
 
     # Build context section
@@ -522,13 +580,64 @@ SELECTED TITLES (GUIDE YOUR IMAGES TO MATCH THESE):
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+    # Build style reference analysis section (when external style image is provided)
+    style_reference_section = ""
+    if has_style_reference:
+        style_reference_section = """
+═══════════════════════════════════════════════════════════════════════════════
+STYLE REFERENCE ANALYSIS (FIRST IMAGE IS A STYLE GUIDE)
+═══════════════════════════════════════════════════════════════════════════════
+The FIRST reference image is NOT a person to clone - it's a VISUAL STYLE GUIDE.
+Analyze it thoroughly and extract these characteristics into a "style_analysis" object:
+
+{
+  "art_type": "...",           // E.g.: "photorealistic", "anime", "kawaii/chibi", "cartoon",
+                               // "3D render", "pixel art", "illustration", "oil painting", etc.
+  "art_type_details": "...",   // Specific sub-style details, e.g.: "super-deformed chibi with
+                               // oversized head and small body", "shonen anime style",
+                               // "Disney-style cartoon", "Pixar 3D render", etc.
+  "color_palette": ["#...", "#..."],  // 3-5 dominant colors from the style reference
+  "color_mood": "...",         // E.g.: "soft pastels, warm and cozy", "vibrant neon",
+                               // "muted earth tones", "high contrast black and white"
+  "visual_effects": [...],     // Array of effects: "sparkles", "glows", "action lines",
+                               // "onomatopoeia text", "halftone dots", "lens flare",
+                               // "bokeh", "film grain", "vignette", etc. Use null if none.
+  "rendering_style": "...",    // E.g.: "2D flat colors", "2D cel-shaded", "3D rendered with
+                               // soft lighting", "watercolor texture", "digital painting"
+  "composition_style": "...",  // E.g.: "centered subject", "dynamic diagonal", "rule of thirds",
+                               // "symmetric", "cluttered maximalist", "minimal clean"
+  "line_work": "...",          // E.g.: "thick black outlines", "no outlines", "soft edges",
+                               // "sketchy/rough lines", "clean vector lines". Use null if N/A.
+  "overall_aesthetic": "..."   // Brief summary: "Cute kawaii 3D render with soft pastels,
+                               // sparkle effects, and chibi proportions"
+}
+
+CRITICAL INSTRUCTIONS:
+1. The "style" field in EACH generated image MUST match the analyzed art_type
+2. DO NOT default to "photorealistic" - use the actual style from the reference
+3. The generated images should FEEL like they belong in the same visual world
+4. If the style is cartoon/anime/illustration, the thumbnails should be in that style
+
+The remaining reference images (2nd onwards) show REAL PEOPLE to clone.
+Apply the analyzed style TO these people when generating thumbnails.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
     # Build subject analysis section - V3 format
     subject_analysis_section = ""
     if has_reference_image:
+        # Adjust instructions based on whether first image is style reference
+        people_image_note = ""
+        if has_style_reference:
+            people_image_note = """
+NOTE: The FIRST reference image is a style guide (already analyzed above).
+The REMAINING reference images (2nd onwards) contain the REAL PEOPLE to clone.
+"""
+        # Use string concatenation instead of f-string to avoid escaping JSON braces
         subject_analysis_section = """
 ═══════════════════════════════════════════════════════════════════════════════
 REFERENCE IMAGE ANALYSIS - CREATE IDENTITY MAPPING (V3 FORMAT)
-═══════════════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════════""" + people_image_note + """
 The reference images contain REAL PEOPLE. Create a mapping so the image AI
 knows which face to clone and how to identify each person.
 
@@ -595,7 +704,7 @@ VIDEO TITLE: {video_title}
 {context_section}
 TRANSCRIPTION (excerpt):
 {transcription}
-{history_section}{selected_titles_section}{subject_analysis_section}{custom_section}
+{history_section}{selected_titles_section}{style_reference_section}{subject_analysis_section}{custom_section}
 ═══════════════════════════════════════════════════════════════════════════════
 TASK: Generate {num_images} unique thumbnail images
 ═══════════════════════════════════════════════════════════════════════════════
@@ -607,6 +716,8 @@ Each IMAGE is a completely independent creative idea. Provide maximum variety:
 
 For EACH image, provide:
 - **image_index**: 1, 2, 3... (sequential number)
+- **style_analysis**: Object with art_type, art_type_details, color_palette, color_mood, visual_effects,
+  rendering_style, composition_style, line_work, overall_aesthetic (REQUIRED if style reference provided)
 - **face_groups**: Object with physical_description and characters_with_this_face (REQUIRED if references provided)
 - **characters**: Dict mapping person_XX to outfit/identify_in_references (REQUIRED if references provided)
 - **style_source**: Which character's outfit to use in final image
@@ -628,14 +739,26 @@ For EACH image, provide:
 - **equipment**: Camera/lens (e.g., "DSLR 85mm f/1.8")
 - **framing**: Shot type (e.g., "medium close-up")
 - **composition**: Composition rules (e.g., "rule of thirds")
-- **style**: Visual style (default: "photorealistic YouTube thumbnail")
-- **quality**: Quality descriptor (default: "8K, photorealistic, sharp focus")
+- **style**: Visual style - MUST match style_analysis.art_type if style reference provided
+- **quality**: Quality descriptor - adapt to match the style (e.g., "clean kawaii 3D render" not "8K photorealistic")
 - **text_overlay**: Short text for UI overlay (2-5 words) - NOT rendered in image
 
 Respond in JSON format:
 [
     {{
         "image_index": 1,
+
+        "style_analysis": {{
+            "art_type": "kawaii/chibi",
+            "art_type_details": "super-deformed chibi with oversized head (1:2 ratio), small body, large expressive eyes",
+            "color_palette": ["#FFE4E1", "#FFB6C1", "#E6E6FA", "#87CEEB", "#F5F5DC"],
+            "color_mood": "soft pastels, warm and cozy, gentle lighting",
+            "visual_effects": ["sparkles", "soft glow", "subtle light particles"],
+            "rendering_style": "3D rendered with soft cel-shading and ambient occlusion",
+            "composition_style": "centered subject, clean minimal background",
+            "line_work": "no hard outlines, soft edges blending into background",
+            "overall_aesthetic": "Cute kawaii 3D chibi render with soft pastel colors, sparkle effects, and cozy atmosphere"
+        }},
 
         "face_groups": {{
             "group_A": {{
@@ -673,11 +796,11 @@ Respond in JSON format:
         "background": "modern studio, colorful lights",
         "lighting": "dramatic side lighting, warm tone",
         "environment_effects": null,
-        "equipment": "DSLR 85mm f/1.8",
+        "equipment": null,
         "framing": "medium close-up",
         "composition": "subject left third, space for text",
-        "style": "photorealistic YouTube thumbnail",
-        "quality": "8K, photorealistic, sharp focus",
+        "style": "kawaii/chibi 3D render",
+        "quality": "clean kawaii 3D render with soft lighting and sparkle effects",
         "text_overlay": "..."
     }}
 ]
@@ -686,6 +809,11 @@ IMPORTANT: If only ONE person appears in references (no costume changes), still 
 - face_groups with group_A containing physical_description and characters_with_this_face: ["person_01"]
 - characters with person_01 entry including outfit and identify_in_references
 - style_source: "person_01"
+
+IMPORTANT: If a style_analysis is provided (style reference image was given):
+- The "style" field MUST reflect the analyzed art_type (e.g., "kawaii/chibi 3D render")
+- The "quality" field MUST be adapted to the style (NOT "8K photorealistic" for cartoon styles)
+- Include visual_effects from style_analysis in environment_effects if appropriate
 
 Generate exactly {num_images} unique images with MAXIMUM VARIETY between them.
 
@@ -751,9 +879,9 @@ def generate_with_gransabio(
         if reference_images_base64:
             images_to_upload.extend(reference_images_base64)
 
-        # Limit to configured max (default 5) or absolute max of 20 (Gran Sabio server limit)
-        max_images = min(GRANSABIO_MAX_REF_IMAGES, 20)
-        images_to_upload = images_to_upload[:max_images]
+        # Safety limit: Gran Sabio server accepts max 20 images
+        # (actual limit is already applied by generation_service based on user config)
+        images_to_upload = images_to_upload[:20]
 
         # Upload images and build references
         if images_to_upload:
@@ -914,7 +1042,8 @@ def generate_thumbnail_images_gransabio(
     thumbnail_style: str = "",
     selected_titles: Optional[List[str]] = None,
     reference_image_base64: Optional[str] = None,
-    reference_images_base64: Optional[List[str]] = None
+    reference_images_base64: Optional[List[str]] = None,
+    has_style_reference: bool = False
 ) -> Optional[list]:
     """
     Generate thumbnail images using Gran Sabio LLM (flat structure, no variations).
@@ -929,6 +1058,7 @@ def generate_thumbnail_images_gransabio(
         selected_titles: Optional list of user-selected titles
         reference_image_base64: Optional single base64-encoded reference image
         reference_images_base64: Optional list of base64-encoded images (max 20)
+        has_style_reference: If True, the first image in references is a style guide
 
     Returns:
         List of image dictionaries or None on failure
@@ -950,6 +1080,7 @@ def generate_thumbnail_images_gransabio(
         include_history=config.include_history,
         thumbnail_style=thumbnail_style,
         selected_titles=selected_titles,
+        has_style_reference=has_style_reference,
         has_reference_image=has_reference
     )
 

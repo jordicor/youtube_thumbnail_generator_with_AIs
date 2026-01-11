@@ -5,7 +5,7 @@
  */
 
 import { state, resetGenerationState } from './state.js';
-import { getTextConfig, getImageConfig } from './ai-config.js';
+import { getTextConfig, getImageConfig, getCurrentModelMaxRefs, getCurrentModelName } from './ai-config.js';
 import { getSelectedArray as getSelectedTitles } from './titles.js';
 import { addNewToGallery } from './thumbnails.js';
 
@@ -15,6 +15,9 @@ let referenceImageData = null;
 // Store submit button state for restoration
 let submitBtn = null;
 let originalBtnText = null;
+
+// Store conflict resolution promise
+let conflictResolve = null;
 
 /**
  * Restore the submit button to its original state.
@@ -27,14 +30,98 @@ function restoreSubmitButton() {
 }
 
 // =========================================================================
+// REFERENCE CONFLICT HANDLING
+// =========================================================================
+
+/**
+ * Check if adding the style reference would exceed the model's limit.
+ * Reference images are always used when present (simplified UX).
+ * @returns {Promise<{proceed: boolean, adjustedNumRefs?: number, skipStyleRef?: boolean}>}
+ */
+async function checkReferenceConflict() {
+    // No reference image = no conflict possible
+    if (!referenceImageData) {
+        return { proceed: true };
+    }
+
+    const imageConfig = getImageConfig();
+    const numClusterRefs = imageConfig.num_reference_images || 0;
+    const modelMax = getCurrentModelMaxRefs();
+    const totalWithStyle = numClusterRefs + 1;
+
+    if (totalWithStyle <= modelMax) {
+        // No conflict, everything fits
+        return { proceed: true };
+    }
+
+    // Conflict! Show modal and wait for user decision
+    const modelName = getCurrentModelName();
+
+    // Update modal message
+    const messageEl = document.getElementById('refConflictMessage');
+    messageEl.textContent = t('generate_form.ref_conflict_message', {
+        model: modelName,
+        max: modelMax,
+        cluster: numClusterRefs,
+        total: totalWithStyle
+    });
+
+    // Update button text with the count
+    const reduceBtn = document.getElementById('refConflictReduceCluster');
+    reduceBtn.textContent = t('generate_form.ref_conflict_reduce_cluster', {
+        count: modelMax - 1
+    });
+
+    // Show modal
+    document.getElementById('refConflictModal').classList.add('visible');
+
+    // Return a promise that resolves when user makes a choice
+    return new Promise((resolve) => {
+        conflictResolve = resolve;
+
+        // Setup button handlers
+        reduceBtn.onclick = () => {
+            document.getElementById('refConflictModal').classList.remove('visible');
+            // Update the num refs input to model_max - 1
+            document.getElementById('imageAiNumRefs').value = modelMax - 1;
+            resolve({ proceed: true, adjustedNumRefs: modelMax - 1 });
+        };
+
+        document.getElementById('refConflictRemoveStyle').onclick = () => {
+            document.getElementById('refConflictModal').classList.remove('visible');
+            // User chose to not include the style reference
+            resolve({ proceed: true, skipStyleRef: true });
+        };
+    });
+}
+
+/**
+ * Setup modal close handler to cancel generation if modal is closed.
+ */
+function setupRefConflictModalClose() {
+    const modal = document.getElementById('refConflictModal');
+    const cancelBtn = modal.querySelector('.btn-cancel');
+
+    cancelBtn.onclick = () => {
+        modal.classList.remove('visible');
+        if (conflictResolve) {
+            conflictResolve({ proceed: false });
+            conflictResolve = null;
+        }
+    };
+}
+
+// =========================================================================
 // GENERATION REQUEST
 // =========================================================================
 
 /**
  * Build the generation request object from form inputs.
+ * @param {Object} options - Options from conflict resolution
+ * @param {boolean} options.skipStyleRef - If true, don't include style ref in image generation
  * @returns {Object} Generation request payload
  */
-export function getRequest() {
+export function getRequest(options = {}) {
     const imageAiConfig = getImageConfig();
     const textAiConfig = getTextConfig();
 
@@ -81,14 +168,13 @@ export function getRequest() {
         request.selected_titles = selectedTitles;
     }
 
-    // Include reference image if provided
+    // Include reference image if provided (always used for prompts, optionally for image gen)
     if (referenceImageData) {
-        const useForPrompts = document.getElementById('useRefForPrompts');
-        const includeInImages = document.getElementById('includeRefInImages');
-
         request.reference_image_base64 = referenceImageData.base64;
-        request.reference_image_use_for_prompts = useForPrompts ? useForPrompts.checked : false;
-        request.reference_image_include_in_refs = includeInImages ? includeInImages.checked : false;
+        // Always send to prompt LLM for analysis
+        request.reference_image_use_for_prompts = true;
+        // Include in image generation unless user chose to skip (conflict resolution)
+        request.reference_image_include_in_refs = !options.skipStyleRef;
     }
 
     return request;
@@ -105,12 +191,25 @@ export function setupForm() {
     // Setup reference image handler
     setupReferenceImageHandler();
 
+    // Setup conflict modal close handler
+    setupRefConflictModalClose();
+
+    // Listen for image config changes to update warning
+    document.addEventListener('imageConfigChanged', updateStyleRefWarning);
+
     document.getElementById('generateForm').addEventListener('submit', async (e) => {
         e.preventDefault();
 
         const clusterIndex = document.getElementById('clusterSelect').value;
         if (!clusterIndex) {
             ThumbnailApp.showToast(t('generate_form.no_cluster_selected'), 'error');
+            return;
+        }
+
+        // Check for reference limit conflict before proceeding
+        const conflictResult = await checkReferenceConflict();
+        if (!conflictResult.proceed) {
+            // User cancelled
             return;
         }
 
@@ -129,7 +228,7 @@ export function setupForm() {
         // Close any existing SSE connection
         resetGenerationState();
 
-        const request = getRequest();
+        const request = getRequest({ skipStyleRef: conflictResult.skipStyleRef });
 
         try {
             const response = await fetch(`/api/generation/${state.videoId}/start`, {
@@ -371,6 +470,9 @@ function setupReferenceImageHandler() {
 
             // Update placeholder to show reference-related examples
             updateInstructionsPlaceholder(true);
+
+            // Check for conflicts
+            updateStyleRefWarning();
         };
 
         reader.onerror = () => {
@@ -379,6 +481,34 @@ function setupReferenceImageHandler() {
 
         reader.readAsDataURL(file);
     });
+}
+
+/**
+ * Update the warning message for style reference conflicts.
+ * Called when reference image is added or num refs/model changes.
+ * Shows warning if adding the style ref would exceed model limits.
+ */
+export function updateStyleRefWarning() {
+    const warningEl = document.getElementById('styleRefWarning');
+    if (!warningEl) return;
+
+    // No warning if no reference image
+    if (!referenceImageData) {
+        warningEl.style.display = 'none';
+        return;
+    }
+
+    const imageConfig = getImageConfig();
+    const numClusterRefs = imageConfig.num_reference_images || 0;
+    const modelMax = getCurrentModelMaxRefs();
+    const totalWithStyle = numClusterRefs + 1;
+
+    if (totalWithStyle > modelMax) {
+        warningEl.textContent = t('generate_form.ref_conflict_warning', { max: modelMax });
+        warningEl.style.display = 'block';
+    } else {
+        warningEl.style.display = 'none';
+    }
 }
 
 /**
@@ -399,12 +529,9 @@ export function clearReferenceImage() {
     const optionsEl = document.getElementById('referenceImageOptions');
     if (optionsEl) optionsEl.style.display = 'none';
 
-    // Reset checkboxes to defaults
-    const useForPrompts = document.getElementById('useRefForPrompts');
-    if (useForPrompts) useForPrompts.checked = true;
-
-    const includeInImages = document.getElementById('includeRefInImages');
-    if (includeInImages) includeInImages.checked = false;
+    // Hide warning if visible
+    const warningEl = document.getElementById('styleRefWarning');
+    if (warningEl) warningEl.style.display = 'none';
 
     // Restore default placeholder
     updateInstructionsPlaceholder(false);

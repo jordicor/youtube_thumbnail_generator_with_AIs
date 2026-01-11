@@ -323,6 +323,9 @@ export function updateRefMax(setToMax = false) {
     }
 
     updateChipDisplays();
+
+    // Dispatch event for style reference warning update
+    document.dispatchEvent(new CustomEvent('imageConfigChanged'));
 }
 
 // =========================================================================
@@ -412,6 +415,47 @@ export function getImageConfig() {
     }
 
     return config;
+}
+
+/**
+ * Get the maximum number of reference images for the current image model.
+ * @returns {number} Maximum reference images allowed
+ */
+export function getCurrentModelMaxRefs() {
+    const provider = document.getElementById('imageAiProvider').value;
+
+    let model = '';
+    if (provider === 'gemini') {
+        model = document.getElementById('imageAiGeminiModel').value;
+    } else if (provider === 'poe') {
+        model = document.getElementById('imageAiPoeModel').value;
+    } else if (provider === 'openai') {
+        model = document.getElementById('imageAiOpenaiModel').value;
+    } else if (provider === 'replicate') {
+        model = 'flux-1.1-pro';
+    }
+
+    const providerRefs = MODEL_MAX_REFS[provider] || {};
+    return providerRefs[model] || 1;
+}
+
+/**
+ * Get the current model name for display purposes.
+ * @returns {string} Current model name
+ */
+export function getCurrentModelName() {
+    const provider = document.getElementById('imageAiProvider').value;
+
+    if (provider === 'gemini') {
+        return document.getElementById('imageAiGeminiModel').value;
+    } else if (provider === 'poe') {
+        return document.getElementById('imageAiPoeModel').value;
+    } else if (provider === 'openai') {
+        return document.getElementById('imageAiOpenaiModel').value;
+    } else if (provider === 'replicate') {
+        return 'flux-1.1-pro';
+    }
+    return provider;
 }
 
 // =========================================================================
