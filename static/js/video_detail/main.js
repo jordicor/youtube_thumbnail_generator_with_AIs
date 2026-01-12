@@ -11,6 +11,7 @@ import * as Titles from './titles.js';
 import * as Descriptions from './descriptions.js';
 import * as Thumbnails from './thumbnails.js';
 import * as Generation from './generation.js';
+import * as QueueIndicator from './queue-indicator.js';
 
 // =========================================================================
 // PAGE-LEVEL FUNCTIONS
@@ -99,6 +100,238 @@ function formatTranscriptionWithColors(text) {
 }
 
 // =========================================================================
+// ANALYSIS OVERLAY (Phase 2 - Task Queue UX)
+// =========================================================================
+
+/**
+ * Analysis overlay DOM elements
+ */
+const analysisOverlay = {
+    container: null,
+    progressFill: null,
+    step: null,
+    percent: null,
+    cancelBtn: null
+};
+
+/**
+ * Wait for TaskQueue to be ready.
+ * @param {number} maxWait - Maximum wait time in ms
+ * @returns {Promise<boolean>} True if TaskQueue is ready
+ */
+async function waitForTaskQueue(maxWait = 3000) {
+    const start = Date.now();
+    while (!window.TaskQueue?.tasks && Date.now() - start < maxWait) {
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return !!window.TaskQueue?.tasks;
+}
+
+/**
+ * Check if there's an active analysis task for this video.
+ * @returns {Object|null} The analysis task or null
+ */
+function getActiveAnalysisTask() {
+    if (!window.TaskQueue?.tasks) return null;
+
+    for (const task of window.TaskQueue.tasks.values()) {
+        if (task.type === 'analysis' && task.video_id === state.videoId) {
+            return task;
+        }
+    }
+    return null;
+}
+
+/**
+ * Show the analysis overlay with current task data.
+ * @param {Object} task - The analysis task
+ */
+function showAnalysisOverlay(task) {
+    if (!analysisOverlay.container) return;
+
+    analysisOverlay.container.classList.remove('hidden');
+    updateAnalysisOverlay(task);
+}
+
+/**
+ * Hide the analysis overlay.
+ */
+function hideAnalysisOverlay() {
+    if (!analysisOverlay.container) return;
+    analysisOverlay.container.classList.add('hidden');
+}
+
+/**
+ * Update the analysis overlay with task progress.
+ * @param {Object} task - The analysis task
+ */
+function updateAnalysisOverlay(task) {
+    if (!analysisOverlay.container) return;
+
+    const progress = task.progress || 0;
+    const step = task.current_step || t('analysis_overlay.starting');
+
+    analysisOverlay.progressFill.style.width = `${progress}%`;
+    analysisOverlay.step.textContent = step;
+    analysisOverlay.percent.textContent = `${progress}%`;
+}
+
+/**
+ * Cancel the analysis task.
+ */
+async function cancelAnalysis() {
+    const task = getActiveAnalysisTask();
+    if (!task) return;
+
+    const confirmed = await showModal({
+        title: t('task_queue.cancel_title'),
+        message: t('task_queue.cancel_confirm'),
+        type: 'warning',
+        confirmText: t('common.cancel'),
+        cancelText: t('common.close'),
+        showCancel: true
+    });
+
+    if (confirmed) {
+        try {
+            const response = await fetch(`/api/tasks/analysis/${task.id}/cancel`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.detail || 'Failed to cancel');
+            }
+        } catch (error) {
+            console.error('Error cancelling analysis:', error);
+            if (window.showToast) {
+                showToast(error.message, 'error');
+            }
+        }
+    }
+}
+
+/**
+ * Reload all page content after analysis completes.
+ */
+function reloadPageContent() {
+    loadVideoInfo();
+    loadTranscription();
+    Clusters.load();
+    Thumbnails.loadExisting();
+}
+
+/**
+ * Initialize analysis overlay and check for active analysis.
+ */
+async function initAnalysisOverlay() {
+    // Cache DOM elements
+    analysisOverlay.container = document.getElementById('analysisOverlay');
+    analysisOverlay.progressFill = document.getElementById('analysisProgressFill');
+    analysisOverlay.step = document.getElementById('analysisStep');
+    analysisOverlay.percent = document.getElementById('analysisPercent');
+    analysisOverlay.cancelBtn = document.getElementById('cancelAnalysisBtn');
+
+    if (!analysisOverlay.container) return;
+
+    // Bind cancel button
+    analysisOverlay.cancelBtn?.addEventListener('click', cancelAnalysis);
+
+    // Wait for TaskQueue to be ready
+    const ready = await waitForTaskQueue();
+    if (!ready) {
+        console.warn('TaskQueue not ready, skipping analysis overlay check');
+        return;
+    }
+
+    // Check if there's an active analysis task for this video
+    const task = getActiveAnalysisTask();
+    if (task) {
+        showAnalysisOverlay(task);
+    }
+
+    // Subscribe to TaskQueue events for this video's analysis
+    window.TaskQueue.subscribe((eventType, task) => {
+        if (task.video_id !== state.videoId || task.type !== 'analysis') return;
+
+        switch (eventType) {
+            case 'task_started':
+                showAnalysisOverlay(task);
+                break;
+
+            case 'task_progress':
+                updateAnalysisOverlay(task);
+                break;
+
+            case 'task_completed':
+                hideAnalysisOverlay();
+                reloadPageContent();
+                if (window.showToast) {
+                    showToast(t('analysis.complete'), 'success');
+                }
+                break;
+
+            case 'task_cancelled':
+                hideAnalysisOverlay();
+                if (window.showToast) {
+                    showToast(t('task_queue.cancelled'), 'info');
+                }
+                break;
+
+            case 'task_error':
+                hideAnalysisOverlay();
+                if (window.showToast) {
+                    const msg = task.error_message || t('errors.analysis_failed');
+                    showToast(msg, 'error');
+                }
+                break;
+        }
+    });
+}
+
+// =========================================================================
+// GENERATION TASK SUBSCRIPTION (Phase 3 - Task Queue UX)
+// =========================================================================
+
+/**
+ * Setup subscription to TaskQueue for generation events.
+ * Detects jobs started from other pages and syncs gallery on completion.
+ */
+function setupGenerationTaskSubscription() {
+    if (!window.TaskQueue) {
+        console.warn('TaskQueue not available, skipping generation subscription');
+        return;
+    }
+
+    window.TaskQueue.subscribe((eventType, task) => {
+        if (task.video_id !== state.videoId) return;
+        if (task.type !== 'generation') return;
+
+        switch (eventType) {
+            case 'task_started':
+                // Job started (possibly from another page)
+                if (!state.currentJobId) {
+                    console.log(`Detected external generation job ${task.id}, adopting`);
+                    state.currentJobId = task.id;
+                    // Save state and restore UI
+                    import('./state.js').then(mod => {
+                        mod.saveGenerationJobState();
+                    });
+                    Generation.restoreGenerationState();
+                }
+                break;
+
+            case 'task_completed':
+                // Reload full gallery to ensure sync
+                console.log(`Generation job ${task.id} completed, reloading gallery`);
+                Thumbnails.loadExisting();
+                break;
+        }
+    });
+}
+
+// =========================================================================
 // UI HELPERS
 // =========================================================================
 
@@ -177,6 +410,18 @@ document.addEventListener('DOMContentLoaded', () => {
     AiConfig.checkGranSabioStatus();
     AiConfig.loadModelsFromAPI();
     AiConfig.init();
+
+    // Restore generation state if returning to page with active job
+    Generation.restoreGenerationState();
+
+    // Initialize analysis overlay (Phase 2 - Task Queue UX)
+    initAnalysisOverlay();
+
+    // Initialize generation task subscription (Phase 3 - Task Queue UX)
+    setupGenerationTaskSubscription();
+
+    // Initialize queue indicator (Phase 4 - Task Queue UX)
+    QueueIndicator.init();
 });
 
 // =========================================================================

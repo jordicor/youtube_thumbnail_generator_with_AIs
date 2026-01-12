@@ -255,17 +255,11 @@ def _build_clone_rules() -> dict:
     for face cloning vs outfit cloning. Includes hard restrictions.
     """
     return {
-        "CRITICAL": "Every person in this image MUST be cloned from the attached reference photos. Creating new faces is STRICTLY FORBIDDEN.",
-        "face_rule": "For each face_group, use ALL attached reference images of that group to clone the face with 100% accuracy. The generated face MUST be immediately recognizable as the same person.",
-        "outfit_rule": "Clone exact outfit from the style_source character's reference images.",
-        "FORBIDDEN": [
-            "Creating any face not present in attached references",
-            "Using generic faces from training data",
-            "Changing facial proportions, eye spacing, nose shape, or skin tone",
-            "Adding or removing facial hair, glasses, or distinctive features",
-            "Generating persons not identified in the characters dict"
-        ],
-        "VERIFICATION": "A friend of this person MUST recognize them INSTANTLY in the generated image."
+        "CLONE_MODE": "EXACT_FACE_MATCH",
+        "face": "Clone from ALL reference images showing this person (multiple angles = better accuracy)",
+        "outfit": "Use outfit from style_source character",
+        "FORBIDDEN": "generating new faces, using stock faces, modifying facial features",
+        "test": "Would a friend recognize them instantly?"
     }
 
 
@@ -277,10 +271,10 @@ def _build_generation_constraints() -> dict:
     the absolute rules before any creative content.
     """
     return {
-        "face_source": "attached_reference_images_only",
-        "source_restriction": "ALL persons in the generated image MUST be EXACT clones from the attached reference photos. You are FORBIDDEN from creating new faces or using faces from your training data.",
-        "character_restriction": "Every human in the image MUST match a person_XX from the characters dict below. The attached reference images are your ONLY source for human faces.",
-        "enforcement": "STRICT - zero tolerance for new faces or identity drift"
+        "RULE": "CLONE_FACES_FROM_REFERENCES",
+        "faces": "ONLY from attached reference images - NO generated/stock faces allowed",
+        "matching": "Use physical_description in face_groups to identify each person across ALL reference images",
+        "enforcement": "STRICT"
     }
 
 
@@ -320,9 +314,10 @@ def _build_face_groups_v3(image: ThumbnailImage) -> dict:
         members_str = ", ".join(members) if members else "unknown"
 
         result[group_id] = {
+            "CLONE_FROM_REFERENCES": True,
             "physical_description": physical_desc or f"Person appearing in references as {members_str}",
             "characters_with_this_face": members,
-            "clone_instruction": f"Use ALL reference images of {members_str} together to accurately clone this face"
+            "clone_instruction": f"Find this person in attached reference images by matching: {physical_desc or 'visual appearance'}. Clone their EXACT face."
         }
 
     return result
@@ -477,8 +472,8 @@ def _build_scene_v3(image: ThumbnailImage) -> dict:
     Build scene section for V3 prompt.
 
     Creates scene with:
-    - description: what's happening
-    - character_directions: pose/expression for ACTIVE characters only
+    - description: what's happening (with clone prefixes for each active character)
+    - character_directions: pose/expression for ACTIVE characters only (with MUST_CLONE_FACE)
     - environment: setting, props, lighting, effects
 
     Args:
@@ -493,6 +488,12 @@ def _build_scene_v3(image: ThumbnailImage) -> dict:
         subjects=image.subjects,
         characters=image.characters
     )
+
+    # Build clone prefix for active characters
+    clone_prefixes = []
+    for char_id in active_chars:
+        clone_prefixes.append(f"[CLONE {char_id} FACE FROM REFERENCES]")
+    clone_prefix = " ".join(clone_prefixes) + " " if clone_prefixes else ""
 
     # Build character_directions only for active characters
     character_directions = {}
@@ -510,6 +511,8 @@ def _build_scene_v3(image: ThumbnailImage) -> dict:
             position = "seated"
 
         character_directions[char_id] = {
+            "MUST_CLONE_FACE": True,
+            "face_source": "attached_reference_images",
             "position": position,
             "pose": image.subject_pose or "natural engaging pose",
             "expression": image.subject_expression or "engaging expression"
@@ -526,8 +529,11 @@ def _build_scene_v3(image: ThumbnailImage) -> dict:
     if image.environment_effects:
         environment["effects"] = image.environment_effects
 
+    # Prepend clone prefix to scene description
+    scene_description = clone_prefix + (image.scene or image.image_prompt)
+
     return {
-        "description": image.scene or image.image_prompt,
+        "description": scene_description,
         "character_directions": character_directions,
         "environment": environment
     }
@@ -620,6 +626,10 @@ def build_image_prompt_v3(
     if image.text_in_image:
         prompt_dict["text_in_image"] = image.text_in_image
 
+    # Final reinforcement reminder when we have references and identity data
+    if has_reference_images and has_identity_data:
+        prompt_dict["REMINDER"] = "Every person_XX MUST be cloned from reference images. Search ALL attached images for matching faces."
+
     return prompt_dict
 
 
@@ -630,19 +640,10 @@ def _build_face_source_header() -> str:
     This header appears BEFORE the JSON to ensure the image AI reads
     the constraints before processing any creative content.
     """
-    return """═══════════════════════════════════════════════════════════════════════════════
-MANDATORY FACE SOURCE RESTRICTION - READ BEFORE PROCESSING
-═══════════════════════════════════════════════════════════════════════════════
-ALL persons in this image MUST be cloned from the attached reference photos.
-You are STRICTLY FORBIDDEN from:
-  - Creating new faces not visible in the reference images
-  - Using generic/stock faces from your training data
-  - Generating any human face that doesn't match a reference photo
-
-The attached reference images are your ONLY source for human faces.
-Each person_XX in the JSON below maps to specific reference photos.
-Clone their EXACT face - a friend must recognize them INSTANTLY.
-═══════════════════════════════════════════════════════════════════════════════
+    return """### FACE CLONING REQUIRED ###
+Clone ALL faces from attached reference images ONLY.
+NO generated/stock faces allowed - each person_XX must match a reference photo exactly.
+A friend must recognize them INSTANTLY.
 
 """
 
@@ -1816,7 +1817,8 @@ def generate_thumbnails_from_images(
     poe_model: str = None,
     image_provider: str = None,
     progress_callback: callable = None,
-    has_external_style_ref: bool = False
+    has_external_style_ref: bool = False,
+    cancellation_check: callable = None
 ) -> list[Path]:
     """
     Generate thumbnails from a flat list of ThumbnailImage objects.
@@ -1836,9 +1838,11 @@ def generate_thumbnails_from_images(
         progress_callback: Optional callback function(current, total, thumbnail_info)
                           thumbnail_info is a dict with: path, image_index, image
         has_external_style_ref: If True, first reference image is an external style reference
+        cancellation_check: Optional callback that returns True if generation should be cancelled.
+                           Checked before each image generation to allow early abort.
 
     Returns:
-        List of paths to generated thumbnails
+        List of paths to generated thumbnails (may be partial if cancelled)
     """
 
     thumbnails_dir = output.output_dir / "thumbnails"
@@ -1850,6 +1854,11 @@ def generate_thumbnails_from_images(
     generated_thumbnails = []
 
     for img in images:
+        # Check for cancellation before starting each image
+        if cancellation_check and cancellation_check():
+            logger.info(f"Generation cancelled, returning {len(generated_thumbnails)} thumbnails generated so far")
+            break
+
         image_idx = img.image_index
         timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 

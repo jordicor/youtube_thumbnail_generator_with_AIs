@@ -18,7 +18,7 @@ import sys
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from api.routes import videos, analysis, generation, thumbnails, events, directories, titles
+from api.routes import videos, analysis, generation, thumbnails, events, directories, titles, tasks
 from api.middleware.ip_filter import LANOnlyMiddleware
 from database.db import init_db, close_db
 from config import MAX_REFERENCE_FRAMES, SERVER_HOST, SERVER_PORT, DEBUG_MODE
@@ -169,6 +169,7 @@ app.include_router(generation.router, prefix="/api/generation", tags=["generatio
 app.include_router(thumbnails.router, prefix="/api/thumbnails", tags=["thumbnails"])
 app.include_router(events.router, prefix="/api/events", tags=["events"])
 app.include_router(titles.router, prefix="/api/titles", tags=["titles"])
+app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 
 
 # ============================================================================

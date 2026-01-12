@@ -5,9 +5,18 @@ Business logic for thumbnail generation operations.
 """
 
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Callable
 import aiosqlite
 import sqlite3
+import shutil
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class GenerationCancelledError(Exception):
+    """Raised when generation is cancelled by user."""
+    pass
 
 
 class GenerationService:
@@ -153,7 +162,9 @@ class GenerationService:
         reference_image_base64: Optional[str] = None,
         reference_images_base64: Optional[List[str]] = None,
         reference_image_use_for_prompts: bool = False,
-        reference_image_include_in_refs: bool = False
+        reference_image_include_in_refs: bool = False,
+        # Cancellation check callback
+        cancellation_check: Optional[Callable[[], bool]] = None
     ):
         """
         Run the full generation pipeline.
@@ -220,6 +231,10 @@ class GenerationService:
 
             if not transcription:
                 transcription = video_path.stem
+
+            # Check for cancellation after transcription
+            if cancellation_check and cancellation_check():
+                raise GenerationCancelledError(f"Job {job_id} cancelled after transcription")
 
             # Get cluster information by its database ID (needed for description in prompts)
             query = "SELECT * FROM clusters WHERE id = ?"
@@ -334,6 +349,10 @@ class GenerationService:
                 await self.update_job_status(job_id, 'error', 0, 'Prompt generation failed')
                 return
 
+            # Check for cancellation after prompt generation
+            if cancellation_check and cancellation_check():
+                raise GenerationCancelledError(f"Job {job_id} cancelled after prompt generation")
+
             # Step 3: Generate thumbnail images
             await self.update_job_status(job_id, 'generating', 50)
 
@@ -367,6 +386,11 @@ class GenerationService:
 
             def progress_callback(current: int, total: int, thumbnail_info: dict = None):
                 """Update progress and insert thumbnails in DB synchronously during image generation."""
+                # Check for cancellation before continuing
+                # This allows aborting between image generations
+                if cancellation_check and cancellation_check():
+                    raise GenerationCancelledError(f"Job {job_id} cancelled during image generation")
+
                 # Calculate progress: 50% to 95% during image generation
                 if total > 0:
                     image_progress = int((current / total) * 45)  # 0-45%
@@ -410,6 +434,8 @@ class GenerationService:
                             img.text_overlay if img else None
                         ])
 
+                except GenerationCancelledError:
+                    raise  # Re-raise cancellation to stop generation
                 except Exception:
                     pass  # Don't fail generation if progress/thumbnail update fails
                 finally:
@@ -425,7 +451,8 @@ class GenerationService:
                 openai_model=openai_model,
                 poe_model=poe_model,
                 progress_callback=progress_callback,
-                has_external_style_ref=has_external_style_ref
+                has_external_style_ref=has_external_style_ref,
+                cancellation_check=cancellation_check
             )
 
             if not thumbnail_paths:
@@ -447,6 +474,15 @@ class GenerationService:
             """, [job_id])
 
             await self.db.commit()
+
+        except GenerationCancelledError as e:
+            # Handle cancellation gracefully
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Generation job {job_id} cancelled: {e}")
+            await self.update_job_status(job_id, 'cancelled')
+            # Don't raise - just return so worker can handle cleanup
+            return
 
         except Exception as e:
             await self.update_job_status(job_id, 'error', 0, str(e))
@@ -666,3 +702,120 @@ class GenerationService:
                 continue
 
         return result
+
+    async def cleanup_partial_generation(self, job_id: int) -> dict:
+        """
+        Clean up partial resources after generation cancellation.
+
+        This method removes incomplete files and database records that were
+        created during an interrupted generation job. It always cleans:
+        - temp_refs/ directory (temporary reference images)
+        - Thumbnail files that were generated for this job
+        - Thumbnail database records for this job
+
+        Prompts are NOT deleted as they may be valid and reusable.
+
+        Args:
+            job_id: The generation job ID whose partial resources should be cleaned
+
+        Returns:
+            dict with cleanup details: {
+                'cleaned_files': list of file paths that were deleted,
+                'cleaned_db_records': number of DB records deleted,
+                'job_status_was': the status the job was in when cancelled
+            }
+        """
+        from utils import VideoOutput
+
+        cleaned_files = []
+        cleaned_db = 0
+
+        # Get job info
+        job = await self.get_job(job_id)
+        if not job:
+            return {"cleaned_files": [], "cleaned_db_records": 0, "job_status_was": None}
+
+        job_status = job.get("status", "")
+        video_id = job.get("video_id")
+
+        # Get video info for output directory
+        video = await self.get_video(video_id)
+        if not video:
+            return {"cleaned_files": [], "cleaned_db_records": 0, "job_status_was": job_status}
+
+        filename = video.get("filename", "")
+        output = VideoOutput(filename)
+
+        logger.info(f"Cleaning up partial generation for job {job_id} (status was: {job_status})")
+
+        # 1. ALWAYS clean temp_refs/ directory
+        temp_refs_dir = output.output_dir / "temp_refs"
+        if temp_refs_dir.exists():
+            try:
+                shutil.rmtree(temp_refs_dir, ignore_errors=True)
+                cleaned_files.append(str(temp_refs_dir))
+                logger.debug(f"Deleted {temp_refs_dir}")
+            except Exception as e:
+                logger.warning(f"Could not delete {temp_refs_dir}: {e}")
+
+        # 2. Get and delete partial thumbnails (files + DB)
+        try:
+            async with self.db.execute(
+                "SELECT filepath FROM thumbnails WHERE job_id = ?",
+                [job_id]
+            ) as cursor:
+                thumbnails = await cursor.fetchall()
+
+            for (filepath,) in thumbnails:
+                thumb_path = Path(filepath)
+
+                # Delete the thumbnail file
+                if thumb_path.exists():
+                    try:
+                        thumb_path.unlink()
+                        cleaned_files.append(str(thumb_path))
+                        logger.debug(f"Deleted thumbnail {thumb_path}")
+                    except Exception as e:
+                        logger.warning(f"Could not delete {thumb_path}: {e}")
+
+                # Also check for raw version in thumbnails/raw/
+                if thumb_path.parent.name == "thumbnails":
+                    raw_dir = thumb_path.parent / "raw"
+                    # Raw files have same name but might have _raw suffix
+                    raw_filename = thumb_path.stem + "_raw" + thumb_path.suffix
+                    raw_path = raw_dir / raw_filename
+                    if raw_path.exists():
+                        try:
+                            raw_path.unlink()
+                            cleaned_files.append(str(raw_path))
+                            logger.debug(f"Deleted raw thumbnail {raw_path}")
+                        except Exception as e:
+                            logger.warning(f"Could not delete {raw_path}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Error fetching thumbnails for cleanup: {e}")
+
+        # 3. Delete thumbnail DB records
+        try:
+            cursor = await self.db.execute(
+                "DELETE FROM thumbnails WHERE job_id = ?",
+                [job_id]
+            )
+            cleaned_db = cursor.rowcount
+            await self.db.commit()
+            if cleaned_db > 0:
+                logger.debug(f"Deleted {cleaned_db} thumbnail records from DB")
+        except Exception as e:
+            logger.warning(f"Could not delete thumbnail DB records: {e}")
+
+        if cleaned_files or cleaned_db:
+            logger.info(
+                f"Cleanup complete for job {job_id}: "
+                f"{len(cleaned_files)} files, {cleaned_db} DB records"
+            )
+
+        return {
+            "cleaned_files": cleaned_files,
+            "cleaned_db_records": cleaned_db,
+            "job_status_was": job_status
+        }

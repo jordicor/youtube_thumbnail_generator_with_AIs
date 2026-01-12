@@ -4,7 +4,7 @@
  * Handles thumbnail generation process, SSE updates, and polling fallback.
  */
 
-import { state, resetGenerationState } from './state.js';
+import { state, resetGenerationState, saveGenerationJobState, clearGenerationJobState } from './state.js';
 import { getTextConfig, getImageConfig, getCurrentModelMaxRefs, getCurrentModelName } from './ai-config.js';
 import { getSelectedArray as getSelectedTitles } from './titles.js';
 import { addNewToGallery } from './thumbnails.js';
@@ -20,12 +20,47 @@ let originalBtnText = null;
 let conflictResolve = null;
 
 /**
+ * Wait for TaskQueue to be ready.
+ * @param {number} maxWait - Maximum wait time in ms
+ * @returns {Promise<boolean>} True if TaskQueue is ready
+ */
+async function waitForTaskQueue(maxWait = 3000) {
+    const start = Date.now();
+    while (!window.TaskQueue?.tasks && Date.now() - start < maxWait) {
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return !!window.TaskQueue?.tasks;
+}
+
+/**
  * Restore the submit button to its original state.
  */
 function restoreSubmitButton() {
     if (submitBtn) {
         submitBtn.disabled = false;
         submitBtn.textContent = originalBtnText;
+        submitBtn.classList.remove('generating');
+    }
+    hideCancelButton();
+}
+
+/**
+ * Show the cancel button next to generate.
+ */
+function showCancelButton() {
+    const cancelBtn = document.getElementById('cancelGenerationBtn');
+    if (cancelBtn) {
+        cancelBtn.classList.remove('hidden');
+    }
+}
+
+/**
+ * Hide the cancel button.
+ */
+function hideCancelButton() {
+    const cancelBtn = document.getElementById('cancelGenerationBtn');
+    if (cancelBtn) {
+        cancelBtn.classList.add('hidden');
     }
 }
 
@@ -185,6 +220,39 @@ export function getRequest(options = {}) {
 // =========================================================================
 
 /**
+ * Setup cancel generation button handler.
+ */
+function setupCancelButton() {
+    const cancelBtn = document.getElementById('cancelGenerationBtn');
+    if (!cancelBtn) return;
+
+    cancelBtn.addEventListener('click', async () => {
+        if (!state.currentJobId) return;
+
+        const confirmed = await ThumbnailApp.showModal({
+            title: t('task_queue.cancel_title'),
+            message: t('task_queue.cancel_confirm'),
+            type: 'warning',
+            confirmText: t('common.yes'),
+            cancelText: t('common.no')
+        });
+
+        if (confirmed) {
+            try {
+                await fetch(`/api/tasks/generation/${state.currentJobId}/cancel`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                // SSE will notify of cancellation and update UI
+            } catch (error) {
+                console.error('Error cancelling generation:', error);
+                ThumbnailApp.showToast(t('errors.generic'), 'error');
+            }
+        }
+    });
+}
+
+/**
  * Setup generation form event handlers.
  */
 export function setupForm() {
@@ -193,6 +261,9 @@ export function setupForm() {
 
     // Setup conflict modal close handler
     setupRefConflictModalClose();
+
+    // Setup cancel button handler
+    setupCancelButton();
 
     // Listen for image config changes to update warning
     document.addEventListener('imageConfigChanged', updateStyleRefWarning);
@@ -214,10 +285,12 @@ export function setupForm() {
         }
 
         // Disable submit button and change text during generation
-        submitBtn = e.target.querySelector('button[type="submit"]');
+        submitBtn = document.getElementById('generateBtn');
         originalBtnText = submitBtn.textContent;
         submitBtn.disabled = true;
         submitBtn.textContent = t('generation.generating');
+        submitBtn.classList.add('generating');
+        showCancelButton();
 
         // Reset UI state before starting new generation
         document.getElementById('progressFill').style.width = '0%';
@@ -244,6 +317,7 @@ export function setupForm() {
 
             const data = await response.json();
             state.currentJobId = data.job_id;
+            saveGenerationJobState();  // Persist job ID for page navigation
 
             document.getElementById('generationStatus').classList.remove('hidden');
             pollStatus();
@@ -284,17 +358,20 @@ export function startSSE() {
                 document.getElementById('progressFill').style.width = '100%';
                 document.getElementById('progressText').textContent = t('generation.complete');
                 ThumbnailApp.showToast(t('generation.complete'), 'success');
+                clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
                 loadResults();
             },
             error: (data) => {
                 document.getElementById('progressText').textContent = t('common.error');
                 ThumbnailApp.showToast(t('errors.generic') + ': ' + (data.error_message || data.error), 'error');
+                clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
             },
             cancelled: (data) => {
                 document.getElementById('progressText').textContent = t('common.cancel');
                 ThumbnailApp.showToast(t('common.cancel'), 'info');
+                clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
             }
         }
@@ -330,15 +407,20 @@ export async function pollStatus() {
 
             if (data.status === 'completed') {
                 clearInterval(interval);
+                clearGenerationJobState();
                 restoreSubmitButton();
                 loadResults();
-            } else if (data.status === 'error') {
+            } else if (data.status === 'error' || data.status === 'cancelled') {
                 clearInterval(interval);
+                clearGenerationJobState();
                 restoreSubmitButton();
-                ThumbnailApp.showToast(t('errors.generation_failed') + ': ' + (data.error_message || t('errors.generic')), 'error');
+                if (data.status === 'error') {
+                    ThumbnailApp.showToast(t('errors.generation_failed') + ': ' + (data.error_message || t('errors.generic')), 'error');
+                }
             }
         } catch (error) {
             clearInterval(interval);
+            clearGenerationJobState();
             restoreSubmitButton();
         }
     }, 2000);
@@ -405,6 +487,56 @@ export async function loadResults() {
         }
     } catch (error) {
         grid.innerHTML = `<div class="error">${t('errors.load_thumbnails')}: ${escapeHtml(error.message)}</div>`;
+    }
+}
+
+// =========================================================================
+// JOB THUMBNAIL LOADING
+// =========================================================================
+
+/**
+ * Check if a thumbnail is already displayed in the gallery.
+ * @param {number} thumbnailId - The thumbnail database ID
+ * @returns {boolean} True if thumbnail is in gallery
+ */
+function isThumbnailInGallery(thumbnailId) {
+    const card = document.querySelector(
+        `.thumbnail-card[data-thumbnail-id="${thumbnailId}"]`
+    );
+    return !!card;
+}
+
+/**
+ * Load thumbnails already generated by an active job.
+ * Used when restoring state after page navigation to show
+ * thumbnails generated while user was away.
+ * @param {number} jobId - The generation job ID
+ */
+async function loadJobThumbnails(jobId) {
+    try {
+        const response = await fetch(`/api/generation/jobs/${jobId}/thumbnails`);
+        if (!response.ok) return;
+
+        const thumbnails = await response.json();
+        let loadedCount = 0;
+
+        for (const thumb of thumbnails) {
+            // Check if already in gallery to avoid duplicates
+            if (!isThumbnailInGallery(thumb.id)) {
+                addNewToGallery({
+                    thumbnail_id: thumb.id,
+                    suggested_title: thumb.suggested_title,
+                    text_overlay: thumb.text_overlay
+                });
+                loadedCount++;
+            }
+        }
+
+        if (loadedCount > 0) {
+            console.log(`Loaded ${loadedCount} thumbnails from job ${jobId}`);
+        }
+    } catch (error) {
+        console.warn('Error loading job thumbnails:', error);
     }
 }
 
@@ -535,4 +667,122 @@ export function clearReferenceImage() {
 
     // Restore default placeholder
     updateInstructionsPlaceholder(false);
+}
+
+// =========================================================================
+// UI STATE RESTORATION
+// =========================================================================
+
+/**
+ * Show the generating state in the UI.
+ * Used when restoring state after page navigation.
+ * @param {Object} jobData - Optional job status data from API
+ */
+function showGeneratingUI(jobData = null) {
+    // Cache button reference
+    submitBtn = document.getElementById('generateBtn');
+    if (submitBtn) {
+        originalBtnText = submitBtn.textContent;
+        submitBtn.disabled = true;
+        submitBtn.textContent = t('generation.generating');
+        submitBtn.classList.add('generating');
+    }
+    showCancelButton();
+
+    // Show progress section
+    document.getElementById('generationStatus').classList.remove('hidden');
+
+    // Update progress if we have data
+    if (jobData) {
+        document.getElementById('progressFill').style.width = `${jobData.progress || 0}%`;
+        const progressText = jobData.current_step
+            ? `${jobData.current_step} - ${jobData.progress || 0}% (${jobData.thumbnails_generated || 0}/${jobData.total_thumbnails || 0})`
+            : t('generate_form.progress_starting');
+        document.getElementById('progressText').textContent = progressText;
+    }
+}
+
+/**
+ * Check if TaskQueueManager has an active generation job for this video.
+ * This handles the case where the job was started on a different page.
+ * @returns {boolean} True if found and restored
+ */
+function checkTaskQueueForActiveJob() {
+    if (!window.TaskQueue || !window.TaskQueue.tasks) {
+        return false;
+    }
+
+    for (const task of window.TaskQueue.tasks.values()) {
+        if (task.type === 'generation' && task.video_id === state.videoId) {
+            console.log(`Found active generation job ${task.id} in TaskQueue for video ${state.videoId}`);
+            state.currentJobId = task.id;
+            saveGenerationJobState();
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Restore generation UI state after page load.
+ * Checks if there's an active job for this video and reconnects to it.
+ * Call this after initState() during page initialization.
+ */
+export async function restoreGenerationState() {
+    // Wait for TaskQueue to be ready before checking for active jobs
+    const ready = await waitForTaskQueue();
+
+    // First check TaskQueueManager for any active job for this video
+    // (handles case where job was started on another page)
+    if (!state.currentJobId && ready) {
+        checkTaskQueueForActiveJob();
+    }
+
+    // No job to restore
+    if (!state.currentJobId) return;
+
+    console.log(`Checking status of generation job ${state.currentJobId}...`);
+
+    try {
+        const response = await fetch(`/api/generation/jobs/${state.currentJobId}/status`);
+
+        if (!response.ok) {
+            // Job not found or error - clear state
+            console.log('Job not found, clearing state');
+            clearGenerationJobState();
+            state.currentJobId = null;
+            return;
+        }
+
+        const data = await response.json();
+
+        // Check if job is still active
+        if (data.status === 'generating' || data.status === 'pending' || data.status === 'transcribing' || data.status === 'prompting') {
+            console.log(`Job ${state.currentJobId} is still active (${data.status}), restoring UI`);
+
+            // Load thumbnails already generated while user was away
+            await loadJobThumbnails(state.currentJobId);
+
+            // Show the generating UI with current progress
+            showGeneratingUI(data);
+
+            // Reconnect to SSE stream
+            startSSE();
+        } else {
+            // Job finished while we were away
+            console.log(`Job ${state.currentJobId} finished (${data.status}), clearing state`);
+            clearGenerationJobState();
+            state.currentJobId = null;
+
+            // If completed, we could show a notification
+            if (data.status === 'completed') {
+                ThumbnailApp.showToast(t('generation.complete'), 'success');
+            }
+        }
+    } catch (error) {
+        console.warn('Error checking job status:', error);
+        // On error, clear the persisted state
+        clearGenerationJobState();
+        state.currentJobId = null;
+    }
 }

@@ -5,14 +5,22 @@ Business logic for video analysis (scenes, faces, clustering).
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any, Set, Callable
 import aiosqlite
 import json
 import shutil
 import re
+import logging
 
 from config import MAX_REFERENCE_FRAMES
 from i18n import t
+
+logger = logging.getLogger(__name__)
+
+
+class AnalysisCancelledError(Exception):
+    """Raised when analysis is cancelled by user."""
+    pass
 
 
 def extract_scene_index_from_path(frame_path: str) -> Optional[int]:
@@ -67,7 +75,8 @@ class AnalysisService:
         force_clustering: bool = False,
         force_transcription: bool = False,
         clustering_eps: float = 0.5,
-        clustering_min_samples: int = 3
+        clustering_min_samples: int = 3,
+        cancellation_check: Optional[Callable[[], bool]] = None
     ):
         """
         Run full analysis pipeline for a video.
@@ -115,6 +124,10 @@ class AnalysisService:
                 await self.update_video_status(video_id, 'error', f'scene_detection_error: {str(e)}')
                 return
 
+            # Check for cancellation after scene detection
+            if cancellation_check and cancellation_check():
+                raise AnalysisCancelledError(f"Video {video_id} cancelled after scene detection")
+
             # Step 2: Face extraction
             await self.update_video_status(video_id, 'analyzing_faces')
 
@@ -126,6 +139,10 @@ class AnalysisService:
             except Exception as e:
                 await self.update_video_status(video_id, 'error', f'face_extraction_error: {str(e)}')
                 return
+
+            # Check for cancellation after face extraction
+            if cancellation_check and cancellation_check():
+                raise AnalysisCancelledError(f"Video {video_id} cancelled after face extraction")
 
             # Step 3: Face clustering (if faces found)
             if face_result and face_result.all_faces:
@@ -141,6 +158,10 @@ class AnalysisService:
                 except Exception as e:
                     await self.update_video_status(video_id, 'error', f'clustering_error: {str(e)}')
                     return
+
+                # Check for cancellation after clustering
+                if cancellation_check and cancellation_check():
+                    raise AnalysisCancelledError(f"Video {video_id} cancelled after clustering")
 
             # Step 4: Audio transcription
             await self.update_video_status(video_id, 'transcribing')
@@ -162,6 +183,13 @@ class AnalysisService:
 
             # Mark as analyzed
             await self.update_video_status(video_id, 'analyzed')
+
+        except AnalysisCancelledError as e:
+            # Handle cancellation gracefully
+            logger.info(f"Analysis for video {video_id} cancelled: {e}")
+            await self.update_video_status(video_id, 'cancelled')
+            # Don't raise - return to let worker handle SSE events
+            return
 
         except Exception as e:
             await self.update_video_status(video_id, 'error', str(e))
@@ -1901,4 +1929,109 @@ class AnalysisService:
             'skipped': skipped,
             'errors': errors,
             'total_frames': new_count
+        }
+
+    async def cleanup_partial_analysis(self, video_id: int) -> dict:
+        """
+        Clean up partial resources after analysis cancellation.
+
+        This method removes incomplete files and database records that were
+        created during an interrupted analysis. It checks the video status
+        to determine which step was interrupted and cleans accordingly.
+
+        Cleanup strategy:
+        - If interrupted during 'clustering': remove clustering_result.json,
+          clusters/ folder, and cluster DB records
+        - If interrupted during 'transcribing': remove partial transcription files
+
+        NOTE: frames/, scenes.json, and faces.json are NOT deleted as they are
+        reusable source-of-truth data.
+
+        Args:
+            video_id: The video ID whose partial analysis should be cleaned
+
+        Returns:
+            dict with cleanup details: {
+                'cleaned_files': list of file paths that were deleted,
+                'cleaned_db_records': number of DB records deleted,
+                'status_was': the status the video was in when cancelled
+            }
+        """
+        from utils import VideoOutput
+
+        video = await self.get_video(video_id)
+        if not video:
+            return {"cleaned_files": [], "cleaned_db_records": 0, "status_was": None}
+
+        status = video.get("status", "")
+        filename = video.get("filename", "")
+        output = VideoOutput(filename)
+
+        cleaned_files = []
+        cleaned_db = 0
+
+        logger.info(f"Cleaning up partial analysis for video {video_id} (status was: {status})")
+
+        # Clean clustering artifacts if interrupted during or after clustering
+        if status in ("clustering", "cancelled"):
+            # Remove clustering_result.json
+            clustering_file = output.output_dir / "clustering_result.json"
+            if clustering_file.exists():
+                try:
+                    clustering_file.unlink()
+                    cleaned_files.append(str(clustering_file))
+                    logger.debug(f"Deleted {clustering_file}")
+                except Exception as e:
+                    logger.warning(f"Could not delete {clustering_file}: {e}")
+
+            # Remove clusters/ directory
+            clusters_dir = output.output_dir / "clusters"
+            if clusters_dir.exists():
+                try:
+                    shutil.rmtree(clusters_dir, ignore_errors=True)
+                    cleaned_files.append(str(clusters_dir))
+                    logger.debug(f"Deleted {clusters_dir}")
+                except Exception as e:
+                    logger.warning(f"Could not delete {clusters_dir}: {e}")
+
+            # Clean DB records for clusters (cluster_frames CASCADE deletes automatically)
+            try:
+                cursor = await self.db.execute(
+                    "DELETE FROM clusters WHERE video_id = ?",
+                    [video_id]
+                )
+                cleaned_db += cursor.rowcount
+                await self.db.commit()
+                if cursor.rowcount > 0:
+                    logger.debug(f"Deleted {cursor.rowcount} cluster records from DB")
+            except Exception as e:
+                logger.warning(f"Could not delete cluster DB records: {e}")
+
+        # Clean transcription artifacts if interrupted during transcription
+        if status in ("transcribing", "cancelled"):
+            transcription_files = [
+                "transcription.txt",
+                "transcription.json",
+                "transcription_segments.json"
+            ]
+            for filename in transcription_files:
+                filepath = output.output_dir / filename
+                if filepath.exists():
+                    try:
+                        filepath.unlink()
+                        cleaned_files.append(str(filepath))
+                        logger.debug(f"Deleted {filepath}")
+                    except Exception as e:
+                        logger.warning(f"Could not delete {filepath}: {e}")
+
+        if cleaned_files or cleaned_db:
+            logger.info(
+                f"Cleanup complete for video {video_id}: "
+                f"{len(cleaned_files)} files, {cleaned_db} DB records"
+            )
+
+        return {
+            "cleaned_files": cleaned_files,
+            "cleaned_db_records": cleaned_db,
+            "status_was": status
         }

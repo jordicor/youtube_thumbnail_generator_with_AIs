@@ -182,6 +182,9 @@
             currentStatusFilter = savedFilter;
             statusFilter.value = savedFilter;
         }
+
+        // Setup TaskQueue integration for analysis progress tracking
+        setupTaskQueueIntegration();
     });
 
     // ========================================================================
@@ -583,21 +586,19 @@
             viewBtn.addEventListener('click', () => {
                 window.location.href = `/video/${video.id}`;
             });
-        } else if (video.status === 'analyzing') {
+        } else if (video.status === 'analyzing' || video.status.startsWith('analyzing_') ||
+                   video.status === 'clustering' || video.status === 'transcribing') {
             analyzeBtn.textContent = t('status.analyzing');
             analyzeBtn.disabled = true;
             viewBtn.classList.add('hidden');
 
             // Activate the overlay for already analyzing videos
+            // TaskQueue handles progress updates via handleTaskQueueEvent
             const overlay = card.querySelector('.video-analysis-overlay');
             if (overlay) {
                 card.classList.add('analyzing');
                 overlay.classList.add('active');
             }
-
-            // Register as active and start monitoring
-            activeAnalyses.add(video.id);
-            pollVideoStatus(video.id);
         } else {
             viewBtn.classList.add('hidden');
             analyzeBtn.addEventListener('click', () => startAnalysis(video.id));
@@ -814,126 +815,23 @@
     // ANALYSIS
     // ========================================================================
 
-    // Queue an analysis - doesn't block the UI
+    // ========================================================================
+    // ANALYSIS SYSTEM (integrated with TaskQueueManager)
+    // ========================================================================
+
+    // Start analysis for a video - uses global TaskQueue for state management
     async function startAnalysis(videoId) {
-        // Check if already analyzing or queued
-        if (activeAnalyses.has(videoId)) {
-            ThumbnailApp.showToast(t('errors.already_analyzing'), 'info');
-            return;
-        }
-
-        if (analysisQueue.some(item => item.videoId === videoId)) {
-            ThumbnailApp.showToast(t('errors.already_queued'), 'info');
-            return;
-        }
-
-        // If we have capacity, execute immediately
-        if (activeAnalyses.size < MAX_CONCURRENT_ANALYSES) {
-            await executeAnalysis(videoId);
-        } else {
-            // Add to queue
-            analysisQueue.push({ videoId });
-            updateVideoCardOverlay(videoId, 'queued');
-            ThumbnailApp.showToast(t('analysis.added_to_queue'), 'info');
-        }
-    }
-
-    // Active SSE connections
-    const activeConnections = {};
-
-    // ========================================================================
-    // ANALYSIS QUEUE SYSTEM
-    // ========================================================================
-
-    const MAX_CONCURRENT_ANALYSES = 2;
-    const analysisQueue = [];
-    const activeAnalyses = new Set();
-
-    // Update the visual overlay on a video card
-    function updateVideoCardOverlay(videoId, state, stepText = '') {
-        const card = document.querySelector(`.video-card[data-id="${videoId}"]`);
-        if (!card) return;
-
-        const overlay = card.querySelector('.video-analysis-overlay');
-        const overlayText = overlay?.querySelector('.overlay-text');
-        const overlayStep = overlay?.querySelector('.overlay-step');
-
-        if (!overlay) return;
-
-        // Remove all state classes first
-        card.classList.remove('analyzing', 'queued');
-        overlay.classList.remove('active', 'queued');
-
-        switch (state) {
-            case 'analyzing':
-                card.classList.add('analyzing');
-                overlay.classList.add('active');
-                if (overlayText) overlayText.textContent = t('analysis.analyzing');
-                if (overlayStep) overlayStep.textContent = stepText;
-                break;
-
-            case 'queued':
-                card.classList.add('queued');
-                overlay.classList.add('active', 'queued');
-                if (overlayText) overlayText.textContent = t('analysis.queued');
-                if (overlayStep) overlayStep.textContent = t('analysis.queue_position', {position: getQueuePosition(videoId)});
-                break;
-
-            case 'progress':
-                card.classList.add('analyzing');
-                overlay.classList.add('active');
-                if (overlayText) overlayText.textContent = t('analysis.analyzing');
-                if (overlayStep) overlayStep.textContent = stepText;
-                break;
-
-            case 'complete':
-            case 'error':
-            default:
-                // Overlay hidden, classes removed
-                break;
-        }
-
-        // Also update the status badge
-        const statusEl = card.querySelector('.video-status');
-        if (statusEl && state === 'analyzing') {
-            statusEl.textContent = t('status.analyzing');
-            statusEl.className = 'video-status status-analyzing';
-        }
-    }
-
-    // Get position in queue for a video
-    function getQueuePosition(videoId) {
-        const index = analysisQueue.findIndex(item => item.videoId === videoId);
-        return index >= 0 ? index + 1 : 0;
-    }
-
-    // Update queue position displays for all queued videos
-    function updateQueuePositions() {
-        analysisQueue.forEach((item, index) => {
-            const card = document.querySelector(`.video-card[data-id="${item.videoId}"]`);
-            if (card) {
-                const overlayStep = card.querySelector('.overlay-step');
-                if (overlayStep) {
-                    overlayStep.textContent = t('analysis.queue_position', {position: index + 1});
+        // Check if already analyzing via TaskQueue
+        if (window.TaskQueue?.tasks) {
+            for (const task of window.TaskQueue.tasks.values()) {
+                if (task.type === 'analysis' && task.video_id === videoId) {
+                    ThumbnailApp.showToast(t('errors.already_analyzing'), 'info');
+                    return;
                 }
             }
-        });
-    }
-
-    // Process the next item in the queue
-    async function processAnalysisQueue() {
-        while (activeAnalyses.size < MAX_CONCURRENT_ANALYSES && analysisQueue.length > 0) {
-            const nextItem = analysisQueue.shift();
-            if (nextItem) {
-                updateQueuePositions();
-                await executeAnalysis(nextItem.videoId);
-            }
         }
-    }
 
-    // Actually execute the analysis API call
-    async function executeAnalysis(videoId) {
-        activeAnalyses.add(videoId);
+        // Show overlay immediately
         updateVideoCardOverlay(videoId, 'analyzing');
 
         try {
@@ -948,17 +846,51 @@
                 throw new Error(error.detail || 'Error starting analysis');
             }
 
-            // Start listening for progress updates via SSE
-            startAnalysisSSE(videoId);
-
+            // TaskQueue SSE will handle progress updates via handleTaskQueueEvent
         } catch (error) {
-            activeAnalyses.delete(videoId);
             updateVideoCardOverlay(videoId, 'error');
             ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + error.message, 'error');
-            // Try to refresh just this card to show error state
             await refreshSingleVideo(videoId);
-            // Process next in queue
-            processAnalysisQueue();
+        }
+    }
+
+    // Update the visual overlay on a video card
+    function updateVideoCardOverlay(videoId, state, stepText = '') {
+        const card = document.querySelector(`.video-card[data-id="${videoId}"]`);
+        if (!card) return;
+
+        const overlay = card.querySelector('.video-analysis-overlay');
+        const overlayText = overlay?.querySelector('.overlay-text');
+        const overlayStep = overlay?.querySelector('.overlay-step');
+
+        if (!overlay) return;
+
+        // Remove all state classes first
+        card.classList.remove('analyzing');
+        overlay.classList.remove('active');
+
+        switch (state) {
+            case 'analyzing':
+            case 'progress':
+                card.classList.add('analyzing');
+                overlay.classList.add('active');
+                if (overlayText) overlayText.textContent = t('analysis.analyzing');
+                if (overlayStep) overlayStep.textContent = stepText;
+                break;
+
+            case 'complete':
+            case 'error':
+            case 'cancelled':
+            default:
+                // Overlay hidden, classes removed
+                break;
+        }
+
+        // Also update the status badge
+        const statusEl = card.querySelector('.video-status');
+        if (statusEl && (state === 'analyzing' || state === 'progress')) {
+            statusEl.textContent = t('status.analyzing');
+            statusEl.className = 'video-status status-analyzing';
         }
     }
 
@@ -982,84 +914,90 @@
         }
     }
 
-    function startAnalysisSSE(videoId) {
-        if (activeConnections[videoId]) {
-            activeConnections[videoId].close();
-        }
+    // ========================================================================
+    // TASKQUEUE INTEGRATION
+    // ========================================================================
 
-        activeConnections[videoId] = ThumbnailApp.createSSEConnection(
-            `/api/events/analysis/${videoId}`,
-            {
-                progress: (data) => {
-                    // Update the overlay with progress info
-                    updateVideoCardOverlay(videoId, 'progress', data.current_step || '');
-                },
-                complete: (data) => {
-                    delete activeConnections[videoId];
-                    activeAnalyses.delete(videoId);
+    let taskQueueUnsubscribe = null;
 
-                    // Update just this card
-                    updateVideoCardOverlay(videoId, 'complete');
-                    refreshSingleVideo(videoId);
-
-                    ThumbnailApp.showToast(t('analysis.complete'), 'success');
-
-                    // Process next in queue
-                    processAnalysisQueue();
-                },
-                error: (data) => {
-                    delete activeConnections[videoId];
-                    activeAnalyses.delete(videoId);
-
-                    // Update just this card
-                    updateVideoCardOverlay(videoId, 'error');
-                    refreshSingleVideo(videoId);
-
-                    ThumbnailApp.showToast(t('status.error') + ': ' + (data.error_message || data.error), 'error');
-
-                    // Process next in queue
-                    processAnalysisQueue();
-                }
-            }
-        );
-    }
-
-    async function pollVideoStatus(videoId) {
-        if (ThumbnailApp.isSSESupported()) {
-            startAnalysisSSE(videoId);
+    // Setup integration with global TaskQueueManager
+    function setupTaskQueueIntegration() {
+        if (!window.TaskQueue) {
+            console.warn('TaskQueue not available, retrying...');
+            setTimeout(setupTaskQueueIntegration, 500);
             return;
         }
 
-        // Fallback polling when SSE not supported
-        const interval = setInterval(async () => {
-            try {
-                const response = await fetch(`/api/analysis/${videoId}/status`);
-                const data = await response.json();
+        // Subscribe to task events
+        taskQueueUnsubscribe = window.TaskQueue.subscribe(handleTaskQueueEvent);
 
-                // Update progress overlay
-                if (data.status === 'analyzing' && data.current_step) {
-                    updateVideoCardOverlay(videoId, 'progress', data.current_step);
-                }
+        // Initialize overlays for any currently active analysis tasks
+        initializeActiveAnalysisOverlays();
+    }
 
-                if (data.status === 'analyzed' || data.status === 'completed' || data.status === 'error') {
-                    clearInterval(interval);
-                    activeAnalyses.delete(videoId);
-                    updateVideoCardOverlay(videoId, data.status === 'error' ? 'error' : 'complete');
-                    await refreshSingleVideo(videoId);
+    // Initialize overlays for videos that are currently being analyzed
+    function initializeActiveAnalysisOverlays() {
+        if (!window.TaskQueue?.tasks) return;
 
-                    if (data.status !== 'error') {
-                        ThumbnailApp.showToast(t('analysis.complete'), 'success');
-                    }
-
-                    // Process next in queue
-                    processAnalysisQueue();
-                }
-            } catch (error) {
-                clearInterval(interval);
-                activeAnalyses.delete(videoId);
-                processAnalysisQueue();
+        for (const task of window.TaskQueue.tasks.values()) {
+            if (task.type === 'analysis') {
+                updateVideoCardOverlay(task.video_id, 'progress', task.current_step || '');
             }
-        }, 3000);
+        }
+    }
+
+    // Handle events from TaskQueueManager
+    function handleTaskQueueEvent(eventType, data) {
+        // For snapshot, initialize all active analysis overlays
+        if (eventType === 'tasks_snapshot') {
+            if (data.tasks && Array.isArray(data.tasks)) {
+                for (const task of data.tasks) {
+                    if (task.type === 'analysis') {
+                        updateVideoCardOverlay(task.video_id, 'progress', task.current_step || '');
+                    }
+                }
+            }
+            return;
+        }
+
+        // For individual task events, only handle analysis tasks
+        if (data.type !== 'analysis') return;
+
+        switch (eventType) {
+            case 'task_started':
+            case 'task_progress':
+                updateVideoCardOverlay(data.video_id, 'progress', data.current_step || '');
+                break;
+
+            case 'task_completed':
+                updateVideoCardOverlay(data.video_id, 'complete');
+                refreshSingleVideo(data.video_id);
+                ThumbnailApp.showToast(t('analysis.complete'), 'success');
+                break;
+
+            case 'task_error':
+                updateVideoCardOverlay(data.video_id, 'error');
+                refreshSingleVideo(data.video_id);
+                ThumbnailApp.showToast(t('status.error') + ': ' + (data.error_message || t('errors.generic')), 'error');
+                break;
+
+            case 'task_cancelled':
+                updateVideoCardOverlay(data.video_id, 'cancelled');
+                refreshSingleVideo(data.video_id);
+                break;
+        }
+    }
+
+    // Check if a video is currently being analyzed (via TaskQueue)
+    function isVideoAnalyzing(videoId) {
+        if (!window.TaskQueue?.tasks) return false;
+
+        for (const task of window.TaskQueue.tasks.values()) {
+            if (task.type === 'analysis' && task.video_id === videoId) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ========================================================================

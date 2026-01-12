@@ -57,9 +57,8 @@ credentials.*
 # Documentation (screenshots pending)
 docs/
 
-# Development scripts and tests (internal use only)
+# Development scripts (internal use only)
 scripts/
-tests/
 
 # Windows batch files (local dev only)
 *.bat

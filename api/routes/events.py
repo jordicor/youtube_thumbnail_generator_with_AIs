@@ -13,7 +13,10 @@ from fastapi.responses import StreamingResponse
 from database.db import get_db
 from services.analysis_service import AnalysisService
 from services.generation_service import GenerationService
+from services.task_service import TaskService
 from i18n.i18n import translate as t
+# CHANNEL_TASKS is available for future pub/sub optimization if needed
+# Currently the endpoint uses polling for consistency with other SSE endpoints
 
 
 router = APIRouter()
@@ -392,6 +395,148 @@ async def stream_all_videos_status(request: Request):
                         break
 
                 await asyncio.sleep(2)
+
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+# =============================================================================
+# GLOBAL TASK QUEUE EVENTS
+# =============================================================================
+
+@router.get("/tasks")
+async def stream_all_tasks_status(request: Request):
+    """
+    Stream status updates for all tasks (analysis + generation).
+
+    This endpoint provides a unified view of all running tasks,
+    enabling the task queue UI to show real-time progress across
+    all operations regardless of which page the user is viewing.
+
+    Events:
+    - tasks_snapshot: Initial state of all active tasks (sent on connect)
+    - task_started: New task started
+    - task_progress: Task progress update
+    - task_completed: Task finished successfully
+    - task_cancelled: Task was cancelled
+    - task_error: Task failed with error
+
+    Example client usage:
+        const eventSource = new EventSource('/api/events/tasks');
+        eventSource.addEventListener('tasks_snapshot', (e) => {
+            const data = JSON.parse(e.data);
+            initializeTaskList(data.tasks);
+        });
+        eventSource.addEventListener('task_progress', (e) => {
+            const data = JSON.parse(e.data);
+            updateTask(data.task_id, data);
+        });
+    """
+    async def event_generator() -> AsyncGenerator[str, None]:
+        error_count = 0
+        max_errors = 5
+        last_task_states = {}
+
+        try:
+            # Send initial snapshot of all active tasks
+            try:
+                async with get_db() as db:
+                    service = TaskService(db)
+                    active_tasks = await service.get_active_tasks()
+                    pending_tasks = await service.get_pending_tasks()
+
+                all_tasks = active_tasks + pending_tasks
+
+                # Build initial state map
+                for task in all_tasks:
+                    key = f"{task['type']}:{task['id']}"
+                    last_task_states[key] = task
+
+                yield await create_sse_message(
+                    {
+                        "tasks": all_tasks,
+                        "active_count": len(active_tasks),
+                        "pending_count": len(pending_tasks)
+                    },
+                    event="tasks_snapshot"
+                )
+            except Exception as e:
+                yield await create_sse_message(
+                    {"error": f"Failed to load initial tasks: {str(e)}"},
+                    event="error"
+                )
+
+            # Poll for updates (consistent with other SSE endpoints)
+            # Redis pub/sub could be used here for lower latency,
+            # but polling ensures consistency with DB state
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    async with get_db() as db:
+                        service = TaskService(db)
+                        active_tasks = await service.get_active_tasks()
+                        pending_tasks = await service.get_pending_tasks()
+
+                    current_tasks = active_tasks + pending_tasks
+                    current_task_keys = set()
+
+                    for task in current_tasks:
+                        key = f"{task['type']}:{task['id']}"
+                        current_task_keys.add(key)
+
+                        prev_task = last_task_states.get(key)
+
+                        if prev_task is None:
+                            # New task started
+                            yield await create_sse_message(task, event="task_started")
+                            last_task_states[key] = task
+
+                        elif (
+                            prev_task.get('status') != task.get('status') or
+                            prev_task.get('progress') != task.get('progress') or
+                            prev_task.get('thumbnails_generated') != task.get('thumbnails_generated')
+                        ):
+                            # Task state changed
+                            if task.get('status') == 'completed':
+                                yield await create_sse_message(task, event="task_completed")
+                            elif task.get('status') == 'cancelled':
+                                yield await create_sse_message(task, event="task_cancelled")
+                            elif task.get('status') == 'error':
+                                yield await create_sse_message(task, event="task_error")
+                            else:
+                                yield await create_sse_message(task, event="task_progress")
+                            last_task_states[key] = task
+
+                    # Check for tasks that disappeared (completed/removed)
+                    removed_keys = set(last_task_states.keys()) - current_task_keys
+                    for key in removed_keys:
+                        removed_task = last_task_states.pop(key)
+                        # Task finished and is no longer in active/pending lists
+                        if removed_task.get('status') not in ('completed', 'cancelled', 'error'):
+                            # Assume completed if it just disappeared
+                            removed_task['status'] = 'completed'
+                            yield await create_sse_message(removed_task, event="task_completed")
+
+                    error_count = 0
+
+                except Exception:
+                    error_count += 1
+                    if error_count >= max_errors:
+                        break
+
+                await asyncio.sleep(1)
 
         except asyncio.CancelledError:
             pass

@@ -16,9 +16,200 @@ sys.path.insert(0, str(ROOT_DIR))
 from database.db import get_db
 from services.analysis_service import AnalysisService
 from services.generation_service import GenerationService
-from job_queue.pubsub import publish_progress, publish_event, CHANNEL_ANALYSIS, CHANNEL_GENERATION
+from job_queue.pubsub import (
+    publish_progress,
+    publish_event,
+    publish_task_event,
+    CHANNEL_ANALYSIS,
+    CHANNEL_GENERATION,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# CANCELLATION CHECK HELPERS
+# =============================================================================
+
+def create_sync_cancellation_check(job_id: int):
+    """
+    Create a synchronous cancellation check function for use in sync code.
+
+    This is needed because generate_thumbnails_from_images is synchronous,
+    but we need to check the database for cancellation status.
+
+    Args:
+        job_id: The generation job ID to check
+
+    Returns:
+        A callable that returns True if the job has been cancelled
+    """
+    import sqlite3
+    from config import DATABASE_PATH
+
+    def check() -> bool:
+        try:
+            conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
+            cursor = conn.execute(
+                "SELECT status FROM generation_jobs WHERE id = ?",
+                [job_id]
+            )
+            row = cursor.fetchone()
+            conn.close()
+            return row and row[0] == 'cancelled'
+        except Exception as e:
+            logger.warning(f"Error in sync cancellation check for job {job_id}: {e}")
+            return False
+
+    return check
+
+
+def create_sync_analysis_cancellation_check(video_id: int):
+    """
+    Create a synchronous cancellation check function for video analysis.
+
+    This is needed because analysis steps (scene detection, face extraction, etc.)
+    are synchronous, but we need to check the database for cancellation status.
+
+    Args:
+        video_id: The video ID to check
+
+    Returns:
+        A callable that returns True if the video analysis has been cancelled
+    """
+    import sqlite3
+    from config import DATABASE_PATH
+
+    def check() -> bool:
+        try:
+            conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
+            cursor = conn.execute(
+                "SELECT status FROM videos WHERE id = ?",
+                [video_id]
+            )
+            row = cursor.fetchone()
+            conn.close()
+            return row and row[0] == 'cancelled'
+        except Exception as e:
+            logger.warning(f"Error in sync cancellation check for video {video_id}: {e}")
+            return False
+
+    return check
+
+
+async def check_generation_cancelled(job_id: int) -> bool:
+    """
+    Check if a generation job has been cancelled.
+
+    Args:
+        job_id: The generation job ID to check
+
+    Returns:
+        True if job status is 'cancelled', False otherwise
+    """
+    try:
+        async with get_db() as db:
+            service = GenerationService(db)
+            job = await service.get_job(job_id)
+            return job and job.get('status') == 'cancelled'
+    except Exception as e:
+        logger.warning(f"Error checking generation cancellation for job {job_id}: {e}")
+        return False
+
+
+async def check_analysis_cancelled(video_id: int) -> bool:
+    """
+    Check if a video analysis has been cancelled.
+
+    Args:
+        video_id: The video ID to check
+
+    Returns:
+        True if video status is 'cancelled', False otherwise
+    """
+    try:
+        async with get_db() as db:
+            service = AnalysisService(db)
+            video = await service.get_video(video_id)
+            return video and video.get('status') == 'cancelled'
+    except Exception as e:
+        logger.warning(f"Error checking analysis cancellation for video {video_id}: {e}")
+        return False
+
+
+async def handle_cancellation(
+    task_type: str,
+    task_id: int,
+    video_id: int,
+    video_name: str,
+    arq_job_id: str
+) -> dict:
+    """
+    Handle task cancellation: cleanup partial resources, emit SSE event, and return response.
+
+    This function:
+    1. Cleans up any partial files/DB records created during the interrupted task
+    2. Emits cancellation events to both specific and global SSE channels
+    3. Returns appropriate response for arq
+
+    Args:
+        task_type: 'analysis' or 'generation'
+        task_id: The task ID (video_id for analysis, job_id for generation)
+        video_id: The video ID
+        video_name: The video filename
+        arq_job_id: The arq job ID for logging
+
+    Returns:
+        dict with cancellation status for arq
+    """
+    logger.info(f"[{arq_job_id}] Task {task_type} {task_id} was cancelled, stopping gracefully")
+
+    # Clean up partial resources
+    cleanup_result = {"cleaned_files": [], "cleaned_db_records": 0}
+    try:
+        async with get_db() as db:
+            if task_type == "analysis":
+                service = AnalysisService(db)
+                cleanup_result = await service.cleanup_partial_analysis(video_id)
+            else:  # generation
+                service = GenerationService(db)
+                cleanup_result = await service.cleanup_partial_generation(task_id)
+
+        if cleanup_result.get("cleaned_files"):
+            logger.info(
+                f"[{arq_job_id}] Cleaned up {len(cleanup_result['cleaned_files'])} partial files"
+            )
+        if cleanup_result.get("cleaned_db_records"):
+            logger.info(
+                f"[{arq_job_id}] Cleaned up {cleanup_result['cleaned_db_records']} DB records"
+            )
+    except Exception as e:
+        # Cleanup errors should not prevent cancellation from completing
+        logger.warning(f"[{arq_job_id}] Error during cleanup (non-fatal): {e}")
+
+    # Emit cancellation event to specific channel
+    channel = CHANNEL_ANALYSIS if task_type == "analysis" else CHANNEL_GENERATION
+    id_key = "video_id" if task_type == "analysis" else "job_id"
+
+    await publish_event(
+        channel,
+        "cancelled",
+        {"status": "cancelled", "message": "Task cancelled by user"},
+        **{id_key: task_id}
+    )
+
+    # Emit cancellation event to global task channel
+    await publish_task_event(
+        task_type=task_type,
+        event_type="task_cancelled",
+        task_id=task_id,
+        video_id=video_id,
+        video_name=video_name,
+        status="cancelled",
+        progress=0
+    )
+
+    return {"status": "cancelled", id_key: task_id}
 
 
 async def analyze_video(
@@ -41,7 +232,8 @@ async def analyze_video(
     3. Face clustering
     4. Audio transcription
 
-    Progress is reported via Redis pub/sub to the CHANNEL_ANALYSIS channel.
+    Progress is reported via Redis pub/sub to the CHANNEL_ANALYSIS channel
+    and the global CHANNEL_TASKS for the task queue UI.
 
     Args:
         ctx: arq context (contains job_id, redis connection, etc.)
@@ -56,8 +248,28 @@ async def analyze_video(
     job_id = ctx.get("job_id", "unknown")
     logger.info(f"[Job {job_id}] Starting analysis for video {video_id}")
 
+    # Get video name for global task events
+    video_name = ""
     try:
-        # Notify start
+        async with get_db() as db:
+            service = AnalysisService(db)
+            video_info = await service.get_video(video_id)
+            video_name = video_info.get("filename", "") if video_info else ""
+    except Exception:
+        pass
+
+    # Check if already cancelled before starting
+    if await check_analysis_cancelled(video_id):
+        return await handle_cancellation(
+            task_type="analysis",
+            task_id=video_id,
+            video_id=video_id,
+            video_name=video_name,
+            arq_job_id=job_id
+        )
+
+    try:
+        # Notify start (specific channel)
         await publish_progress(
             CHANNEL_ANALYSIS,
             status="analyzing",
@@ -66,8 +278,23 @@ async def analyze_video(
             video_id=video_id
         )
 
+        # Notify start (global task channel)
+        await publish_task_event(
+            task_type="analysis",
+            event_type="task_started",
+            task_id=video_id,
+            video_id=video_id,
+            video_name=video_name,
+            status="analyzing",
+            progress=5,
+            current_step="Starting analysis..."
+        )
+
         async with get_db() as db:
             service = AnalysisService(db)
+
+            # Create sync cancellation check for use during analysis
+            cancellation_check = create_sync_analysis_cancellation_check(video_id)
 
             # Wrap the service to report progress
             # We'll modify the service methods to accept a progress callback
@@ -78,7 +305,18 @@ async def analyze_video(
                 force_clustering=force_clustering,
                 force_transcription=force_transcription,
                 clustering_eps=clustering_eps,
-                clustering_min_samples=clustering_min_samples
+                clustering_min_samples=clustering_min_samples,
+                cancellation_check=cancellation_check
+            )
+
+        # Check if cancelled during analysis
+        if await check_analysis_cancelled(video_id):
+            return await handle_cancellation(
+                task_type="analysis",
+                task_id=video_id,
+                video_id=video_id,
+                video_name=video_name,
+                arq_job_id=job_id
             )
 
         # Get final status
@@ -89,21 +327,57 @@ async def analyze_video(
             error_message = video.get("error_message") if video else None
 
         if final_status == "analyzed":
+            # Notify completion (specific channel)
             await publish_event(
                 CHANNEL_ANALYSIS,
                 "complete",
                 {"status": "analyzed", "progress": 100},
                 video_id=video_id
             )
+
+            # Notify completion (global task channel)
+            await publish_task_event(
+                task_type="analysis",
+                event_type="task_completed",
+                task_id=video_id,
+                video_id=video_id,
+                video_name=video_name,
+                status="analyzed",
+                progress=100
+            )
+
             logger.info(f"[Job {job_id}] Analysis completed for video {video_id}")
             return {"status": "success", "video_id": video_id}
+        elif final_status == "cancelled":
+            # Handle cancellation detected from final status
+            return await handle_cancellation(
+                task_type="analysis",
+                task_id=video_id,
+                video_id=video_id,
+                video_name=video_name,
+                arq_job_id=job_id
+            )
         else:
+            # Notify error (specific channel)
             await publish_event(
                 CHANNEL_ANALYSIS,
                 "error",
                 {"status": final_status, "error": error_message},
                 video_id=video_id
             )
+
+            # Notify error (global task channel)
+            await publish_task_event(
+                task_type="analysis",
+                event_type="task_error",
+                task_id=video_id,
+                video_id=video_id,
+                video_name=video_name,
+                status="error",
+                progress=0,
+                error_message=error_message
+            )
+
             logger.error(f"[Job {job_id}] Analysis failed for video {video_id}: {error_message}")
             return {"status": "error", "video_id": video_id, "error": error_message}
 
@@ -119,12 +393,24 @@ async def analyze_video(
         except Exception:
             pass
 
-        # Notify error
+        # Notify error (specific channel)
         await publish_event(
             CHANNEL_ANALYSIS,
             "error",
             {"status": "error", "error": error_msg},
             video_id=video_id
+        )
+
+        # Notify error (global task channel)
+        await publish_task_event(
+            task_type="analysis",
+            event_type="task_error",
+            task_id=video_id,
+            video_id=video_id,
+            video_name=video_name,
+            status="error",
+            progress=0,
+            error_message=error_msg
         )
 
         return {"status": "error", "video_id": video_id, "error": error_msg}
@@ -163,7 +449,8 @@ async def run_generation(
     2. Generate prompts using LLM
     3. Generate thumbnail images
 
-    Progress is reported via Redis pub/sub to the CHANNEL_GENERATION channel.
+    Progress is reported via Redis pub/sub to the CHANNEL_GENERATION channel
+    and the global CHANNEL_TASKS for the task queue UI.
 
     Args:
         ctx: arq context
@@ -189,8 +476,34 @@ async def run_generation(
     arq_job_id = ctx.get("job_id", "unknown")
     logger.info(f"[arq:{arq_job_id}] Starting generation for job {job_id}")
 
+    # Get video info for global task events
+    video_id = 0
+    video_name = ""
+    num_images = 0
     try:
-        # Notify start
+        async with get_db() as db:
+            service = GenerationService(db)
+            job_info = await service.get_job(job_id)
+            if job_info:
+                video_id = job_info.get("video_id", 0)
+                num_images = job_info.get("num_images", 0)
+                video = await service.get_video(video_id)
+                video_name = video.get("filename", "") if video else ""
+    except Exception:
+        pass
+
+    # Check if already cancelled before starting
+    if await check_generation_cancelled(job_id):
+        return await handle_cancellation(
+            task_type="generation",
+            task_id=job_id,
+            video_id=video_id,
+            video_name=video_name,
+            arq_job_id=arq_job_id
+        )
+
+    try:
+        # Notify start (specific channel)
         await publish_progress(
             CHANNEL_GENERATION,
             status="starting",
@@ -198,6 +511,23 @@ async def run_generation(
             message="Starting generation...",
             job_id=job_id
         )
+
+        # Notify start (global task channel)
+        await publish_task_event(
+            task_type="generation",
+            event_type="task_started",
+            task_id=job_id,
+            video_id=video_id,
+            video_name=video_name,
+            status="starting",
+            progress=5,
+            current_step="Starting generation...",
+            thumbnails_generated=0,
+            total_thumbnails=num_images
+        )
+
+        # Create sync cancellation check for use during generation
+        cancellation_check = create_sync_cancellation_check(job_id)
 
         async with get_db() as db:
             service = GenerationService(db)
@@ -220,7 +550,18 @@ async def run_generation(
                 selected_titles=selected_titles,
                 reference_image_base64=reference_image_base64,
                 reference_image_use_for_prompts=reference_image_use_for_prompts,
-                reference_image_include_in_refs=reference_image_include_in_refs
+                reference_image_include_in_refs=reference_image_include_in_refs,
+                cancellation_check=cancellation_check
+            )
+
+        # Check if cancelled during generation
+        if await check_generation_cancelled(job_id):
+            return await handle_cancellation(
+                task_type="generation",
+                task_id=job_id,
+                video_id=video_id,
+                video_name=video_name,
+                arq_job_id=arq_job_id
             )
 
         # Get final status
@@ -231,21 +572,59 @@ async def run_generation(
             error_message = job.get("error_message") if job else None
 
         if final_status == "completed":
+            # Notify completion (specific channel)
             await publish_event(
                 CHANNEL_GENERATION,
                 "complete",
                 {"status": "completed", "progress": 100},
                 job_id=job_id
             )
+
+            # Notify completion (global task channel)
+            await publish_task_event(
+                task_type="generation",
+                event_type="task_completed",
+                task_id=job_id,
+                video_id=video_id,
+                video_name=video_name,
+                status="completed",
+                progress=100,
+                thumbnails_generated=num_images,
+                total_thumbnails=num_images
+            )
+
             logger.info(f"[arq:{arq_job_id}] Generation completed for job {job_id}")
             return {"status": "success", "job_id": job_id}
+        elif final_status == "cancelled":
+            # Handle cancellation detected from final status
+            return await handle_cancellation(
+                task_type="generation",
+                task_id=job_id,
+                video_id=video_id,
+                video_name=video_name,
+                arq_job_id=arq_job_id
+            )
         else:
+            # Notify error (specific channel)
             await publish_event(
                 CHANNEL_GENERATION,
                 "error",
                 {"status": final_status, "error": error_message},
                 job_id=job_id
             )
+
+            # Notify error (global task channel)
+            await publish_task_event(
+                task_type="generation",
+                event_type="task_error",
+                task_id=job_id,
+                video_id=video_id,
+                video_name=video_name,
+                status="error",
+                progress=0,
+                error_message=error_message
+            )
+
             logger.error(f"[arq:{arq_job_id}] Generation failed for job {job_id}: {error_message}")
             return {"status": "error", "job_id": job_id, "error": error_message}
 
@@ -261,12 +640,24 @@ async def run_generation(
         except Exception:
             pass
 
-        # Notify error
+        # Notify error (specific channel)
         await publish_event(
             CHANNEL_GENERATION,
             "error",
             {"status": "error", "error": error_msg},
             job_id=job_id
+        )
+
+        # Notify error (global task channel)
+        await publish_task_event(
+            task_type="generation",
+            event_type="task_error",
+            task_id=job_id,
+            video_id=video_id,
+            video_name=video_name,
+            status="error",
+            progress=0,
+            error_message=error_msg
         )
 
         return {"status": "error", "job_id": job_id, "error": error_msg}

@@ -738,6 +738,7 @@
       "invalid_file_extension": "Extension de archivo invalida. Permitidas: {extensions}",
       "invalid_file_content": "Contenido de archivo invalido: {error}. La extension era {ext} pero el contenido no coincide con un formato de video.",
       "job_cannot_cancel": "El trabajo no puede ser cancelado",
+      "task_cannot_cancel": "La tarea no puede ser cancelada",
       "custom_prompt_required": "El prompt personalizado es requerido cuando el estilo es 'custom'",
       "title_not_found": "Titulo no encontrado",
       "description_not_found": "Descripcion no encontrada",
@@ -798,6 +799,23 @@
     "unknown": "Desconocido"
   },
 
+  "task_queue": {
+    "title": "Cola de Tareas",
+    "active_tasks": "En ejecucion",
+    "pending_tasks": "Pendientes",
+    "empty": "No hay tareas en cola",
+    "cancel": "Cancelar",
+    "cancel_title": "Cancelar Tarea",
+    "cancel_confirm": "¿Seguro que quieres cancelar esta tarea?",
+    "cancelled": "Tarea cancelada",
+    "analysis": "Analizando video",
+    "generation": "Generando miniaturas",
+    "analysis_complete": "{name}: Analisis completado",
+    "generation_complete": "{name}: Miniaturas generadas",
+    "thumbnails_progress": "{done}/{total} miniaturas",
+    "waiting": "En cola..."
+  },
+
   "ai_providers": {
     "anthropic": "Anthropic (Claude)",
     "openai": "OpenAI (GPT)",
@@ -806,5 +824,24 @@
     "gemini": "Gemini (Google)",
     "poe": "Poe (FLUX/Ideogram)",
     "replicate": "Replicate"
+  },
+
+  "analysis_overlay": {
+    "title": "Analizando Video",
+    "starting": "Iniciando analisis...",
+    "cancel": "Cancelar Analisis",
+    "detecting_scenes": "Detectando escenas...",
+    "analyzing_faces": "Analizando caras...",
+    "clustering_faces": "Agrupando caras...",
+    "transcribing": "Transcribiendo audio...",
+    "finalizing": "Finalizando..."
+  },
+
+  "queue_indicator": {
+    "generating_thumbnails": "Generando: {done} de {total}",
+    "running_and_queued": "{running} activa(s), {queued} en cola",
+    "tasks_running": "{count} tarea(s) en ejecucion",
+    "tasks_queued": "{count} tarea(s) en cola",
+    "view": "Ver"
   }
 }

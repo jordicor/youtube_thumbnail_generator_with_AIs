@@ -9,6 +9,20 @@
 </div>
 
 <div class="video-detail" id="videoDetailApp" data-video-id="{{ video_id }}">
+    <!-- Analysis Overlay - shown when video is being analyzed -->
+    <div id="analysisOverlay" class="analysis-overlay hidden">
+        <div class="analysis-overlay-content">
+            <div class="analysis-overlay-icon">🔍</div>
+            <h2 id="analysisOverlayTitle">{{ t('analysis_overlay.title') }}</h2>
+            <div class="analysis-progress-bar">
+                <div class="analysis-progress-fill" id="analysisProgressFill"></div>
+            </div>
+            <p class="analysis-step" id="analysisStep">{{ t('analysis_overlay.starting') }}</p>
+            <p class="analysis-percent" id="analysisPercent">0%</p>
+            <button class="btn btn-danger" id="cancelAnalysisBtn">{{ t('analysis_overlay.cancel') }}</button>
+        </div>
+    </div>
+
     <!-- Video info section -->
     <section class="section">
         <h2>{{ t('video_detail.info.title') }}</h2>
@@ -580,9 +594,25 @@
                 <textarea id="promptCustomInstructions" class="custom-instructions-textarea" placeholder="{{ t('generate_form.instructions_placeholder') }}"></textarea>
             </div>
 
-            <button type="submit" class="btn btn-primary btn-large" style="width: 100%; max-width: 400px; margin: 20px auto 0; display: block;">
-                {{ t('generate_form.generate_button') }}
-            </button>
+            <div class="generation-button-wrapper">
+                <div class="generation-button-group">
+                    <button type="submit" class="btn btn-primary btn-generate" id="generateBtn">
+                        {{ t('generate_form.generate_button') }}
+                    </button>
+                    <!-- Queue badge - shows task count for this video -->
+                    <span class="generation-queue-badge hidden" id="generationQueueBadge">0</span>
+                    <button type="button" class="btn btn-danger btn-cancel hidden" id="cancelGenerationBtn"
+                            title="{{ t('task_queue.cancel') }}">
+                        ■
+                    </button>
+                </div>
+                <!-- Queue status line below button -->
+                <div class="generation-queue-status hidden" id="generationQueueStatus">
+                    <span class="queue-status-icon">⏳</span>
+                    <span class="queue-status-text" id="generationQueueText"></span>
+                    <a href="#" class="queue-status-link" id="generationQueueLink">{{ t('queue_indicator.view') }}</a>
+                </div>
+            </div>
         </form>
     </section>
 

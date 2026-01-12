@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 CHANNEL_ANALYSIS = "analysis:{video_id}"
 CHANNEL_GENERATION = "generation:{job_id}"
 CHANNEL_VIDEOS = "videos:status"
+CHANNEL_TASKS = "tasks:global"  # Global channel for all task events
 
 
 def _format_channel(pattern: str, **kwargs) -> str:
@@ -193,3 +194,103 @@ def publish_progress_sync(
         data["message"] = message
 
     return publish_event_sync(channel, "progress", data, **channel_params)
+
+
+# =============================================================================
+# GLOBAL TASK CHANNEL HELPERS
+# =============================================================================
+
+async def publish_task_event(
+    task_type: str,
+    event_type: str,
+    task_id: int,
+    video_id: int,
+    video_name: str,
+    status: str,
+    progress: int = 0,
+    current_step: Optional[str] = None,
+    error_message: Optional[str] = None,
+    thumbnails_generated: Optional[int] = None,
+    total_thumbnails: Optional[int] = None
+) -> int:
+    """
+    Publish an event to the global tasks channel.
+
+    This allows the task queue UI to receive updates for all running tasks
+    regardless of which page the user is viewing.
+
+    Args:
+        task_type: 'analysis' or 'generation'
+        event_type: 'task_started', 'task_progress', 'task_completed',
+                    'task_cancelled', or 'task_error'
+        task_id: video_id for analysis, job_id for generation
+        video_id: ID of the video being processed
+        video_name: Filename of the video
+        status: Current status string
+        progress: Progress percentage (0-100)
+        current_step: Human-readable current step description
+        error_message: Error message if event_type is 'task_error'
+        thumbnails_generated: For generation tasks, number completed
+        total_thumbnails: For generation tasks, total to generate
+
+    Returns:
+        Number of subscribers that received the message
+    """
+    data = {
+        "task_type": task_type,
+        "task_id": task_id,
+        "video_id": video_id,
+        "video_name": video_name,
+        "status": status,
+        "progress": progress,
+    }
+
+    if current_step:
+        data["current_step"] = current_step
+    if error_message:
+        data["error_message"] = error_message
+    if thumbnails_generated is not None:
+        data["thumbnails_generated"] = thumbnails_generated
+    if total_thumbnails is not None:
+        data["total_thumbnails"] = total_thumbnails
+
+    return await publish_event(CHANNEL_TASKS, event_type, data)
+
+
+def publish_task_event_sync(
+    task_type: str,
+    event_type: str,
+    task_id: int,
+    video_id: int,
+    video_name: str,
+    status: str,
+    progress: int = 0,
+    current_step: Optional[str] = None,
+    error_message: Optional[str] = None,
+    thumbnails_generated: Optional[int] = None,
+    total_thumbnails: Optional[int] = None
+) -> int:
+    """
+    Sync version of publish_task_event for use in workers.
+
+    See publish_task_event for argument documentation.
+    """
+    data = {
+        "task_type": task_type,
+        "task_id": task_id,
+        "video_id": video_id,
+        "video_name": video_name,
+        "status": status,
+        "progress": progress,
+    }
+
+    if current_step:
+        data["current_step"] = current_step
+    if error_message:
+        data["error_message"] = error_message
+    if thumbnails_generated is not None:
+        data["thumbnails_generated"] = thumbnails_generated
+    if total_thumbnails is not None:
+        data["total_thumbnails"] = total_thumbnails
+
+    return publish_event_sync(CHANNEL_TASKS, event_type, data)

@@ -1,0 +1,318 @@
+/* Task Queue Component Styles */
+/* ============================= */
+
+/* Header button */
+.task-queue-btn {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    background-color: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-right: 12px;
+}
+
+.task-queue-btn:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+
+.task-queue-btn.has-tasks {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+}
+
+.task-queue-icon {
+    font-size: 1.2rem;
+}
+
+/* Badge counter */
+.task-queue-badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    background-color: var(--primary-color);
+    color: white;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.task-queue-badge.hidden {
+    display: none;
+}
+
+/* Modal specific styles */
+.task-queue-modal {
+    max-width: 500px;
+    width: 95%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.task-queue-modal .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.task-queue-modal .modal-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.task-queue-modal .modal-close {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.5rem;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.task-queue-modal .modal-close:hover {
+    background-color: var(--surface-light);
+    color: var(--text);
+}
+
+.task-queue-modal .modal-body {
+    padding: 0;
+    overflow-y: auto;
+    flex: 1;
+}
+
+/* Task sections */
+.task-section {
+    padding: 12px 0;
+}
+
+.task-section:not(:last-child) {
+    border-bottom: 1px solid var(--border);
+}
+
+.task-section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 20px 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.task-section-count {
+    background-color: var(--surface-light);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.75rem;
+}
+
+/* Task items */
+.task-item {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 20px;
+    transition: background-color 0.2s;
+}
+
+.task-item:hover {
+    background-color: var(--surface-light);
+}
+
+.task-item-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.task-item-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+.task-item-icon {
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+
+.task-item-icon.analysis {
+    color: var(--accent-color);
+}
+
+.task-item-icon.generation {
+    color: var(--warning);
+}
+
+.task-item-icon.pending {
+    color: var(--text-muted);
+}
+
+.task-item-details {
+    flex: 1;
+    min-width: 0;
+}
+
+.task-item-name {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.task-item-type {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.task-item-cancel {
+    padding: 6px 12px;
+    background-color: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.task-item-cancel:hover {
+    border-color: var(--error);
+    color: var(--error);
+    background-color: rgba(255, 68, 68, 0.1);
+}
+
+/* Progress section */
+.task-item-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.task-progress-bar {
+    width: 100%;
+    height: 6px;
+    background-color: var(--surface-light);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.task-progress-fill {
+    height: 100%;
+    background-color: var(--accent-color);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.task-progress-fill.generation {
+    background-color: var(--warning);
+}
+
+.task-progress-text {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* Empty state */
+.task-queue-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    text-align: center;
+}
+
+.task-queue-empty-icon {
+    font-size: 2.5rem;
+    margin-bottom: 12px;
+    opacity: 0.5;
+}
+
+.task-queue-empty-text {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+}
+
+/* Animations */
+@keyframes taskPulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.6;
+    }
+}
+
+.task-item.active .task-item-icon {
+    animation: taskPulse 1.5s ease-in-out infinite;
+}
+
+/* Task item link - clickable video name */
+.task-item-link {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-decoration: none;
+    display: block;
+    transition: color 0.2s;
+}
+
+.task-item-link:hover {
+    color: var(--primary-color);
+    text-decoration: underline;
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+    .task-queue-modal {
+        max-height: 90vh;
+    }
+
+    .task-item-header {
+        flex-wrap: wrap;
+    }
+
+    .task-item-cancel {
+        width: 100%;
+        margin-top: 8px;
+    }
+}

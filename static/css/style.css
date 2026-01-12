@@ -4308,3 +4308,272 @@ body {
     color: var(--warning);
 }
 
+/* ========================================================================= */
+/* GENERATION BUTTON GROUP (Split Button)                                    */
+/* ========================================================================= */
+
+.generation-button-group {
+    display: flex;
+    gap: 0;
+    max-width: 400px;
+    margin: 20px auto 0;
+}
+
+.generation-button-group .btn-generate {
+    flex: 1;
+    border-radius: var(--radius) 0 0 var(--radius);
+    padding: 15px 30px;
+    font-size: 1.1rem;
+}
+
+.generation-button-group .btn-cancel {
+    width: 50px;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 1.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+.generation-button-group .btn-cancel.hidden {
+    display: none;
+}
+
+/* When cancel button is hidden, restore full border-radius on generate button */
+.generation-button-group .btn-generate:only-child,
+.generation-button-group .btn-generate:last-child:first-child {
+    border-radius: var(--radius);
+}
+
+/* Alternative: when no visible cancel button */
+.generation-button-group:has(.btn-cancel.hidden) .btn-generate {
+    border-radius: var(--radius);
+}
+
+/* Generating state animation */
+.generation-button-group .btn-generate.generating {
+    position: relative;
+    overflow: hidden;
+}
+
+.generation-button-group .btn-generate.generating::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+    animation: generating-shimmer 1.5s infinite;
+}
+
+@keyframes generating-shimmer {
+    0% { left: -100%; }
+    100% { left: 100%; }
+}
+
+/* ============================================
+   Analysis Overlay (Phase 2 - Task Queue UX)
+   ============================================ */
+
+.analysis-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(26, 26, 26, 0.95);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.analysis-overlay.hidden {
+    display: none;
+}
+
+.analysis-overlay-content {
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 40px 60px;
+    text-align: center;
+    max-width: 450px;
+    width: 90%;
+    box-shadow: var(--shadow);
+    border: 1px solid var(--border);
+}
+
+.analysis-overlay-icon {
+    font-size: 4rem;
+    margin-bottom: 20px;
+    animation: analysisPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes analysisPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.7; transform: scale(1.1); }
+}
+
+.analysis-overlay-content h2 {
+    margin-bottom: 24px;
+    font-size: 1.5rem;
+    color: var(--text);
+}
+
+.analysis-progress-bar {
+    width: 100%;
+    height: 8px;
+    background-color: var(--surface-light);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 16px;
+}
+
+.analysis-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-color), var(--primary-color));
+    border-radius: 4px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+.analysis-step {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+    min-height: 1.5em;
+}
+
+.analysis-percent {
+    color: var(--accent-color);
+    font-size: 1.8rem;
+    font-weight: 600;
+    margin-bottom: 24px;
+}
+
+.analysis-overlay .btn-danger {
+    padding: 10px 24px;
+    font-size: 0.95rem;
+}
+
+/* ============================================
+   Generation Queue Indicator (Phase 4 - Task Queue UX)
+   ============================================ */
+
+/* Wrapper for button + status line */
+.generation-button-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 400px;
+    margin: 20px auto 0;
+}
+
+/* Override button group to use relative positioning for badge */
+.generation-button-wrapper .generation-button-group {
+    position: relative;
+    margin: 0;
+}
+
+/* Queue badge - notification style on the button */
+.generation-queue-badge {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 7px;
+    background-color: var(--warning);
+    color: #000;
+    font-size: 0.8rem;
+    font-weight: 700;
+    border-radius: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 10;
+    transition: transform 0.2s, background-color 0.2s;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.generation-queue-badge:hover {
+    transform: scale(1.15);
+    background-color: #ffb833;
+}
+
+.generation-queue-badge.hidden {
+    display: none;
+}
+
+/* When cancel button is visible, adjust badge position */
+.generation-button-group:has(.btn-cancel:not(.hidden)) .generation-queue-badge {
+    right: 42px;
+}
+
+/* Queue status line below button */
+.generation-queue-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    justify-content: center;
+    padding: 8px 12px;
+    background: var(--surface-light);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+
+.generation-queue-status.hidden {
+    display: none;
+}
+
+.queue-status-icon {
+    font-size: 1rem;
+    animation: queuePulse 1.5s ease-in-out infinite;
+}
+
+@keyframes queuePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+.queue-status-text {
+    flex: 1;
+    text-align: left;
+}
+
+.queue-status-link {
+    color: var(--primary-color);
+    text-decoration: none;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+}
+
+.queue-status-link:hover {
+    text-decoration: underline;
+    background-color: rgba(255, 68, 68, 0.1);
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+    .generation-button-wrapper {
+        max-width: 100%;
+    }
+
+    .generation-queue-status {
+        flex-wrap: wrap;
+    }
+
+    .queue-status-link {
+        width: 100%;
+        text-align: center;
+        margin-top: 4px;
+    }
+}
+

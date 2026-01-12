@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}{{ t('common.app_name') }}{% endblock %}</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/task-queue.css">
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -36,6 +37,10 @@
                 </button>
                 {% endfor %}
             </div>
+            <button class="task-queue-btn" id="taskQueueBtn" title="{{ t('task_queue.title') }}">
+                <span class="task-queue-icon">⏳</span>
+                <span class="task-queue-badge hidden" id="taskQueueBadge">0</span>
+            </button>
             <nav class="nav">
                 <a href="/" class="nav-link">{{ t('nav.videos') }}</a>
                 <a href="/api/docs" class="nav-link" target="_blank">{{ t('nav.api_docs') }}</a>
@@ -55,10 +60,26 @@
         </div>
     </footer>
 
+    <!-- Task Queue Modal -->
+    <div id="taskQueueModal" class="modal-overlay">
+        <div class="modal-dialog task-queue-modal">
+            <div class="modal-header">
+                <h3 class="modal-title">{{ t('task_queue.title') }}</h3>
+                <button class="modal-close" id="taskQueueClose">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="taskQueueContent">
+                    <!-- Rendered by TaskQueueManager -->
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- i18n translations (inline to prevent race condition) -->
     <script>window.__I18N_CACHE__ = {{ get_all_translations() | tojson | safe }};</script>
     <script src="/static/js/i18n.js"></script>
     <script src="/static/js/app.js"></script>
+    <script src="/static/js/task-queue.js"></script>
     <script>
         // Global utility function to escape HTML and prevent XSS
         // Use this when inserting user-generated content into innerHTML

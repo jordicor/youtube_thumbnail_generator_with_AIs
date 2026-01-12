@@ -108,6 +108,27 @@ Server-Sent Events (SSE) provide instant feedback:
 
 - **Python 3.10+** (3.11 recommended)
 - **FFmpeg** installed and in PATH
+  ```bash
+  # Windows (PowerShell as admin)
+  winget install FFmpeg
+
+  # Linux
+  sudo apt install ffmpeg
+
+  # Mac
+  brew install ffmpeg
+  ```
+- **Redis** (required for Web UI, not needed for CLI)
+  ```bash
+  # Windows: Use Laragon (recommended), Docker, or WSL
+  # https://laragon.org/ - includes Redis out of the box
+
+  # Linux
+  sudo apt install redis-server
+
+  # Mac
+  brew install redis
+  ```
 - **NVIDIA GPU** recommended (works on CPU, 5-10x slower)
 - API keys for at least one provider (Gemini, OpenAI, or Poe)
 
@@ -182,6 +203,10 @@ python main.py
 # Server starts at http://localhost:8000
 ```
 
+> **Port Conflict Note:** Both Gran Sabio and this project default to port 8000. You have two options:
+> - Run Gran Sabio on a different port: `python main.py --port 8001` and update `GRANSABIO_LLM_URL=http://localhost:8001`
+> - Or run this project on a different port: `uvicorn api.main:app --port 8080`
+
 **4. Configure this project to use Gran Sabio:**
 
 Add to your `.env`:
@@ -192,13 +217,37 @@ GRANSABIO_LLM_URL=http://localhost:8000
 
 > **Why Gran Sabio?** Instead of duplicating API integration code, Gran Sabio provides a unified interface to multiple AI providers (OpenAI, Anthropic, Google, xAI, OpenRouter) with features like multi-model QA, thinking modes, and automatic retries. Your API keys are configured once in Gran Sabio and shared across projects.
 
+### Two Ways to Run
+
+| Mode | Requirements | Best For |
+|------|--------------|----------|
+| **Web UI** | Redis + Gran Sabio | Interactive use, face cluster selection, real-time progress |
+| **CLI** | None (just Python deps) | Batch processing, automation, simpler setup |
+
+The CLI processes videos synchronously without a job queue, so Redis and Gran Sabio are not needed. However, you lose the ability to manually select face clusters and monitor progress in real-time.
+
 ### Run the Web UI
+
+Make sure Redis and Gran Sabio are running first, then:
 
 ```bash
 python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Open http://localhost:8000 in your browser.
+
+### Run the CLI (No Redis/Gran Sabio needed)
+
+```bash
+# Process all videos in configured VIDEOS_DIR
+python main.py
+
+# Process a single video
+python main.py --single "path/to/video.mp4"
+
+# Preview what would be processed
+python main.py --dry-run
+```
 
 ---
 
@@ -297,7 +346,7 @@ youtube_thumbnail_generator/
 │   └── generation_service.py # Generation pipeline
 ├── templates/              # Jinja2 HTML (dark theme UI)
 ├── static/                 # CSS + JavaScript
-├── database/               # SQLite with async access
+├── database/               # SQLite with async access (auto-created on first run)
 └── output/                 # Generated files per video
 ```
 

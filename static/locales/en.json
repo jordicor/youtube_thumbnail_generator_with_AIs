@@ -738,6 +738,7 @@
       "invalid_file_extension": "Invalid file extension. Allowed: {extensions}",
       "invalid_file_content": "Invalid file content: {error}. File extension was {ext} but content doesn't match a video format.",
       "job_cannot_cancel": "Job cannot be cancelled",
+      "task_cannot_cancel": "Task cannot be cancelled",
       "custom_prompt_required": "Custom prompt is required when style is 'custom'",
       "title_not_found": "Title not found",
       "description_not_found": "Description not found",
@@ -798,6 +799,23 @@
     "unknown": "Unknown"
   },
 
+  "task_queue": {
+    "title": "Task Queue",
+    "active_tasks": "Running",
+    "pending_tasks": "Pending",
+    "empty": "No tasks in queue",
+    "cancel": "Cancel",
+    "cancel_title": "Cancel Task",
+    "cancel_confirm": "Are you sure you want to cancel this task?",
+    "cancelled": "Task cancelled",
+    "analysis": "Analyzing video",
+    "generation": "Generating thumbnails",
+    "analysis_complete": "{name}: Analysis completed",
+    "generation_complete": "{name}: Thumbnails generated",
+    "thumbnails_progress": "{done}/{total} thumbnails",
+    "waiting": "Waiting..."
+  },
+
   "ai_providers": {
     "anthropic": "Anthropic (Claude)",
     "openai": "OpenAI (GPT)",
@@ -806,5 +824,24 @@
     "gemini": "Gemini (Google)",
     "poe": "Poe (FLUX/Ideogram)",
     "replicate": "Replicate"
+  },
+
+  "analysis_overlay": {
+    "title": "Analyzing Video",
+    "starting": "Starting analysis...",
+    "cancel": "Cancel Analysis",
+    "detecting_scenes": "Detecting scenes...",
+    "analyzing_faces": "Analyzing faces...",
+    "clustering_faces": "Clustering faces...",
+    "transcribing": "Transcribing audio...",
+    "finalizing": "Finalizing..."
+  },
+
+  "queue_indicator": {
+    "generating_thumbnails": "Generating: {done} of {total}",
+    "running_and_queued": "{running} running, {queued} queued",
+    "tasks_running": "{count} task(s) running",
+    "tasks_queued": "{count} task(s) queued",
+    "view": "View"
   }
 }
