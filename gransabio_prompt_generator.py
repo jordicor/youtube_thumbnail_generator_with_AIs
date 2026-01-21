@@ -422,6 +422,21 @@ USE THESE IDs in your image_prompt descriptions:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+    # Language requirement section - text must match transcription language
+    language_section = """
+═══════════════════════════════════════════════════════════════════════════════
+LANGUAGE REQUIREMENT:
+═══════════════════════════════════════════════════════════════════════════════
+All user-facing text fields MUST be written in the SAME LANGUAGE as the transcription:
+- text_overlay
+- suggested_title
+- key_topics
+
+Detect the language from the transcription above and use that language consistently.
+Only use a different language if the user explicitly requests it in their instructions.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
     prompt = f"""You are an expert YouTube thumbnail designer and video content analyst.
 
 Analyze the following video transcription and generate {num_concepts} thumbnail concepts, each with {num_variations} variations.
@@ -430,7 +445,7 @@ VIDEO TITLE: {video_title}
 {context_section}
 TRANSCRIPTION (excerpt):
 {transcription}
-{history_section}{selected_titles_section}{subject_analysis_section}{custom_section}
+{history_section}{selected_titles_section}{subject_analysis_section}{language_section}{custom_section}
 ═══════════════════════════════════════════════════════════════════════════════
 TASK: Generate {num_concepts} concepts x {num_variations} variations = {total_images} unique image prompts
 ═══════════════════════════════════════════════════════════════════════════════
@@ -696,6 +711,22 @@ USE character IDs in scene descriptions:
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
+    # Language requirement section - text must match transcription language
+    language_section = """
+═══════════════════════════════════════════════════════════════════════════════
+LANGUAGE REQUIREMENT:
+═══════════════════════════════════════════════════════════════════════════════
+All user-facing text fields MUST be written in the SAME LANGUAGE as the transcription:
+- text_overlay
+- text_in_image
+- suggested_title
+- key_topics
+
+Detect the language from the transcription above and use that language consistently.
+Only use a different language if the user explicitly requests it in their instructions.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
     prompt = f"""You are an expert YouTube thumbnail designer.
 
 Analyze the following video transcription and generate {num_images} unique thumbnail images.
@@ -704,7 +735,7 @@ VIDEO TITLE: {video_title}
 {context_section}
 TRANSCRIPTION (excerpt):
 {transcription}
-{history_section}{selected_titles_section}{style_reference_section}{subject_analysis_section}{custom_section}
+{history_section}{selected_titles_section}{style_reference_section}{subject_analysis_section}{language_section}{custom_section}
 ═══════════════════════════════════════════════════════════════════════════════
 TASK: Generate {num_images} unique thumbnail images
 ═══════════════════════════════════════════════════════════════════════════════
