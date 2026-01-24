@@ -7,7 +7,6 @@
 import { state, resetGenerationState, saveGenerationJobState, clearGenerationJobState } from './state.js';
 import { getTextConfig, getImageConfig, getCurrentModelMaxRefs, getCurrentModelName } from './ai-config.js';
 import { getSelectedArray as getSelectedTitles } from './titles.js';
-import { addNewToGallery } from './thumbnails.js';
 
 // Store reference image data
 let referenceImageData = null;
@@ -42,6 +41,20 @@ function restoreSubmitButton() {
         submitBtn.classList.remove('generating');
     }
     hideCancelButton();
+}
+
+/**
+ * Restore the submit button if it's still in generating state.
+ * Used as fallback when SSE complete event doesn't arrive but TaskQueue does.
+ */
+export function restoreSubmitButtonIfNeeded() {
+    const btn = document.getElementById('generateBtn');
+    if (btn && btn.classList.contains('generating')) {
+        btn.disabled = false;
+        btn.textContent = t('generate_form.button');
+        btn.classList.remove('generating');
+        hideCancelButton();
+    }
 }
 
 /**
@@ -451,9 +464,6 @@ export function appendThumbnail(thumb) {
         </div>
     `;
     grid.appendChild(card);
-
-    // Also add to the existing thumbnails gallery
-    addNewToGallery(thumb);
 }
 
 /**

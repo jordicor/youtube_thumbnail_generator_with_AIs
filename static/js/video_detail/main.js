@@ -326,6 +326,8 @@ function setupGenerationTaskSubscription() {
                 // Reload full gallery to ensure sync
                 console.log(`Generation job ${task.id} completed, reloading gallery`);
                 Thumbnails.loadExisting();
+                // Restore button if SSE complete event didn't arrive
+                Generation.restoreSubmitButtonIfNeeded();
                 break;
         }
     });
