@@ -19,6 +19,16 @@ class GenerationCancelledError(Exception):
     pass
 
 
+class PromptGenerationError(Exception):
+    """Raised when prompt generation fails (e.g., LLM service error)."""
+    pass
+
+
+class ImageGenerationError(Exception):
+    """Raised when image generation fails."""
+    pass
+
+
 class GenerationService:
     """Service for thumbnail generation operations."""
 
@@ -346,8 +356,10 @@ class GenerationService:
             )
 
             if not thumbnail_images:
-                await self.update_job_status(job_id, 'error', 0, 'Prompt generation failed')
-                return
+                error_msg = 'Prompt generation failed'
+                logger.error(f"Job {job_id}: {error_msg} - marking as error and aborting")
+                await self.update_job_status(job_id, 'error', 0, error_msg)
+                raise PromptGenerationError(f"Job {job_id}: {error_msg}")
 
             # Check for cancellation after prompt generation
             if cancellation_check and cancellation_check():
@@ -373,8 +385,6 @@ class GenerationService:
                         has_external_style_ref = True
                     else:
                         # Fallback: if somehow we're at limit, log warning but continue
-                        import logging
-                        logger = logging.getLogger(__name__)
                         logger.warning(
                             f"External style reference not added: already at model limit "
                             f"({len(best_frames)}/{model_max} refs)"
@@ -456,8 +466,10 @@ class GenerationService:
             )
 
             if not thumbnail_paths:
-                await self.update_job_status(job_id, 'error', 0, 'Thumbnail generation failed')
-                return
+                error_msg = 'Thumbnail generation failed'
+                logger.error(f"Job {job_id}: {error_msg} - marking as error and aborting")
+                await self.update_job_status(job_id, 'error', 0, error_msg)
+                raise ImageGenerationError(f"Job {job_id}: {error_msg}")
 
             # Thumbnails are already saved to database in progress_callback during generation
             # Just update video status
@@ -477,14 +489,18 @@ class GenerationService:
 
         except GenerationCancelledError as e:
             # Handle cancellation gracefully
-            import logging
-            logger = logging.getLogger(__name__)
             logger.info(f"Generation job {job_id} cancelled: {e}")
             await self.update_job_status(job_id, 'cancelled')
             # Don't raise - just return so worker can handle cleanup
             return
 
+        except (PromptGenerationError, ImageGenerationError):
+            # Already logged and marked as error before raising - just re-raise
+            # so worker can handle appropriately (e.g., arq counts as j_failed)
+            raise
+
         except Exception as e:
+            logger.error(f"Job {job_id}: Unexpected error - {e}")
             await self.update_job_status(job_id, 'error', 0, str(e))
             raise
 
