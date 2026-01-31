@@ -5,7 +5,7 @@ Tests for the Server-Sent Events endpoint /api/events/tasks
 """
 
 import pytest
-import json
+import orjson
 import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
@@ -63,8 +63,8 @@ def parse_sse_events(content: str) -> list:
             # End of event
             data_str = '\n'.join(current_data)
             try:
-                data = json.loads(data_str)
-            except json.JSONDecodeError:
+                data = orjson.loads(data_str)
+            except orjson.JSONDecodeError:
                 data = data_str
             events.append((current_event, data))
             current_data = []

@@ -5,7 +5,7 @@ Real-time progress updates for analysis and generation operations.
 """
 
 import asyncio
-import json
+import orjson
 from typing import AsyncGenerator, Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
@@ -28,7 +28,7 @@ router = APIRouter()
 
 async def create_sse_message(data: dict, event: str = "message") -> str:
     """Format data as SSE message."""
-    json_data = json.dumps(data, ensure_ascii=False)
+    json_data = orjson.dumps(data).decode('utf-8')
     return f"event: {event}\ndata: {json_data}\n\n"
 
 

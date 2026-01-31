@@ -7,7 +7,7 @@ Business logic for video analysis (scenes, faces, clustering).
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Callable
 import aiosqlite
-import json
+import orjson
 import shutil
 import re
 import logging
@@ -220,8 +220,8 @@ class AnalysisService:
         # Check for existing clustering result
         clustering_result_path = output.output_dir / "clustering_result.json"
         if clustering_result_path.exists() and not force:
-            with open(clustering_result_path, 'r', encoding='utf-8') as f:
-                result = json.load(f)
+            with open(clustering_result_path, 'rb') as f:
+                result = orjson.loads(f.read())
         else:
             result = run_clustering_pipeline(
                 video_output_dir=output.output_dir,
@@ -807,8 +807,8 @@ class AnalysisService:
             return
 
         try:
-            with open(faces_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            with open(faces_file, 'rb') as f:
+                data = orjson.loads(f.read())
 
             if 'all_faces' not in data:
                 return
@@ -830,8 +830,8 @@ class AnalysisService:
             data['frames_with_faces'] = new_count
 
             # Save updated file
-            with open(faces_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            with open(faces_file, 'wb') as f:
+                f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
 
         except Exception:
             # If faces.json is corrupted or has unexpected format, skip
@@ -930,8 +930,8 @@ class AnalysisService:
             ]
         }
 
-        with open(clusters_json_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        with open(clusters_json_path, 'wb') as f:
+            f.write(orjson.dumps(metadata, option=orjson.OPT_INDENT_2))
 
     async def _update_clustering_result_json(self, output_dir: Path, clusters: List[dict]):
         """Update clustering_result.json to reflect current state.
@@ -944,8 +944,8 @@ class AnalysisService:
         existing_data = {}
         if result_path.exists():
             try:
-                with open(result_path, 'r', encoding='utf-8') as f:
-                    existing_data = json.load(f)
+                with open(result_path, 'rb') as f:
+                    existing_data = orjson.loads(f.read())
             except Exception:
                 pass
 
@@ -994,8 +994,8 @@ class AnalysisService:
                 'top_frames': top_frames
             })
 
-        with open(result_path, 'w', encoding='utf-8') as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
+        with open(result_path, 'wb') as f:
+            f.write(orjson.dumps(result, option=orjson.OPT_INDENT_2))
 
     async def _reindex_clusters(self, video_id: int):
         """Reindex clusters to maintain consecutive indices (0, 1, 2...)."""

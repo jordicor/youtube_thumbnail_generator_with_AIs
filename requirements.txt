@@ -5,6 +5,7 @@
 
 # Core dependencies
 numpy>=1.24.0
+orjson>=3.9.0              # Fast JSON (3-10x faster than stdlib)
 opencv-python>=4.8.0
 Pillow>=10.0.0
 requests>=2.31.0

@@ -8,7 +8,7 @@ based on speaker changes and pauses. Provides timestamps for video descriptions.
 from datetime import timedelta
 from typing import Optional
 from pathlib import Path
-import json
+import orjson
 import re
 import logging
 
@@ -297,8 +297,8 @@ def get_segments_from_json_file(
         return []
 
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        with open(json_path, 'rb') as f:
+            data = orjson.loads(f.read())
 
         words = data.get("words", [])
         return group_words_into_segments(words, pause_threshold)
@@ -356,8 +356,8 @@ def has_multiple_speakers(json_path: Path) -> bool:
         return False
 
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        with open(json_path, 'rb') as f:
+            data = orjson.loads(f.read())
 
         words = data.get("words", [])
         speakers = set()
@@ -386,8 +386,8 @@ def get_video_duration_from_transcript(json_path: Path) -> Optional[float]:
         return None
 
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        with open(json_path, 'rb') as f:
+            data = orjson.loads(f.read())
 
         words = data.get("words", [])
         if words:
@@ -421,8 +421,8 @@ def generate_segments_cache(json_path: Path, pause_threshold: float = 0.8) -> Op
         return None
 
     try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        with open(json_path, 'rb') as f:
+            data = orjson.loads(f.read())
 
         words = data.get("words", [])
         if not words:
@@ -486,8 +486,8 @@ def save_segments_cache(json_path: Path, pause_threshold: float = 0.8) -> Option
 
     cache_path = get_segments_cache_path(json_path)
     try:
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, indent=2, ensure_ascii=False)
+        with open(cache_path, 'wb') as f:
+            f.write(orjson.dumps(cache, option=orjson.OPT_INDENT_2))
         logger.info(f"Segments cache saved: {cache_path} ({cache['metadata']['total_segments']} segments)")
         return cache_path
     except Exception as e:
@@ -510,8 +510,8 @@ def load_segments_cache(json_path: Path) -> Optional[dict]:
         return None
 
     try:
-        with open(cache_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        with open(cache_path, 'rb') as f:
+            return orjson.loads(f.read())
     except Exception as e:
         logger.error(f"Error loading segments cache: {e}")
         return None

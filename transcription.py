@@ -11,7 +11,7 @@ and speaker identification for generating accurate timestamps in descriptions.
 import subprocess
 import tempfile
 import requests
-import json
+import orjson
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -300,8 +300,8 @@ def save_transcription(
     # Save JSON with word-level timestamps if available (ElevenLabs)
     if full_response and full_response.get('words'):
         json_path = output.transcription_file.with_suffix('.json')
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(full_response, f, ensure_ascii=False, indent=2)
+        with open(json_path, 'wb') as f:
+            f.write(orjson.dumps(full_response, option=orjson.OPT_INDENT_2))
         word_count = len(full_response.get('words', []))
         logger.success(f"Transcription JSON saved: {json_path} ({word_count} words with timestamps)")
 

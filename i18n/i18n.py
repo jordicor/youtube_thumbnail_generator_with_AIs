@@ -11,7 +11,7 @@ Usage:
     t('video.count', count=5)  # "5 videos"
 """
 
-import json
+import orjson
 from pathlib import Path
 from typing import Any, Optional
 from functools import lru_cache
@@ -46,11 +46,11 @@ def _load_translations(lang: str) -> dict:
         return {}
 
     try:
-        with open(locale_file, "r", encoding="utf-8") as f:
-            translations = json.load(f)
+        with open(locale_file, "rb") as f:
+            translations = orjson.loads(f.read())
             _translations_cache[lang] = translations
             return translations
-    except json.JSONDecodeError as e:
+    except orjson.JSONDecodeError as e:
         print(f"Error parsing locale file {locale_file}: {e}")
         return {}
 

@@ -10,7 +10,7 @@ Supports all providers available in Gran Sabio LLM:
 - xAI (Grok models)
 """
 
-import json
+import orjson
 import logging
 import re
 from typing import Optional
@@ -583,7 +583,7 @@ def generate_titles(request: TitleGenerationRequest) -> TitleGenerationResult:
             if isinstance(response, dict):
                 data = response
             elif isinstance(response, str):
-                data = json.loads(response)
+                data = orjson.loads(response)
             else:
                 raise ValueError(f"Unexpected response type: {type(response)}")
 
@@ -597,7 +597,7 @@ def generate_titles(request: TitleGenerationRequest) -> TitleGenerationResult:
                 error = "Gran Sabio LLM returned empty titles array"
                 logger.error(error)
 
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (orjson.JSONDecodeError, KeyError, TypeError) as e:
             error = f"Failed to parse JSON response: {e}"
             logger.error(error)
     else:
@@ -799,7 +799,7 @@ def generate_descriptions(request: DescriptionGenerationRequest) -> DescriptionG
             if isinstance(response, dict):
                 data = response
             elif isinstance(response, str):
-                data = json.loads(response)
+                data = orjson.loads(response)
             else:
                 raise ValueError(f"Unexpected response type: {type(response)}")
 
@@ -813,7 +813,7 @@ def generate_descriptions(request: DescriptionGenerationRequest) -> DescriptionG
                 error = "Gran Sabio LLM returned empty descriptions array"
                 logger.error(error)
 
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+        except (orjson.JSONDecodeError, KeyError, TypeError) as e:
             error = f"Failed to parse JSON response: {e}"
             logger.error(error)
     else:

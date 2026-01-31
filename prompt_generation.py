@@ -6,7 +6,7 @@ thumbnail prompts and titles.
 """
 
 import hashlib
-import json
+import orjson
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field, asdict
@@ -538,9 +538,9 @@ def parse_llm_response(response: str) -> Optional[list | dict]:
                         response = response[:i + 1]
                         break
 
-        return json.loads(response)
+        return orjson.loads(response)
 
-    except json.JSONDecodeError as e:
+    except orjson.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON response: {e}")
         logger.debug(f"Response was: {response[:1000]}")
         return None
@@ -581,8 +581,8 @@ def generate_thumbnail_prompts(
             for i in range(num_variations):
                 prompt_file = prompts_dir / f"prompt_{i+1}.json"
                 if prompt_file.exists():
-                    with open(prompt_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
+                    with open(prompt_file, 'rb') as f:
+                        data = orjson.loads(f.read())
                         prompts.append(ThumbnailPrompt(video_title=video_title, **data))
             if len(prompts) == num_variations:
                 return prompts
@@ -756,14 +756,14 @@ def save_prompts(prompts: list[ThumbnailPrompt], output: VideoOutput):
         }
 
         prompt_file = prompts_dir / f"prompt_{i+1}.json"
-        with open(prompt_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        with open(prompt_file, 'wb') as f:
+            f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
 
         # Also save the full JSON structured prompt for Nano Banana
         json_prompt = build_json_prompt_for_nano_banana(prompt)
         json_prompt_file = prompts_dir / f"prompt_{i+1}_nano_banana.json"
-        with open(json_prompt_file, 'w', encoding='utf-8') as f:
-            json.dump(json_prompt, f, indent=2, ensure_ascii=False)
+        with open(json_prompt_file, 'wb') as f:
+            f.write(orjson.dumps(json_prompt, option=orjson.OPT_INDENT_2))
 
     logger.info(f"Saved {len(prompts)} prompts to: {prompts_dir}")
 
@@ -844,8 +844,8 @@ def save_concepts(concepts: list[ThumbnailConcept], output: VideoOutput):
 
     # Save full concepts structure
     concepts_file = prompts_dir / "concepts.json"
-    with open(concepts_file, 'w', encoding='utf-8') as f:
-        json.dump([c.to_dict() for c in concepts], f, indent=2, ensure_ascii=False)
+    with open(concepts_file, 'wb') as f:
+        f.write(orjson.dumps([c.to_dict() for c in concepts], option=orjson.OPT_INDENT_2))
 
     # Also save individual prompts for compatibility (flat structure)
     prompt_index = 0
@@ -867,8 +867,8 @@ def save_concepts(concepts: list[ThumbnailConcept], output: VideoOutput):
             }
 
             prompt_file = prompts_dir / f"prompt_{prompt_index}.json"
-            with open(prompt_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            with open(prompt_file, 'wb') as f:
+                f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
 
     logger.info(f"Saved {len(concepts)} concepts ({prompt_index} total prompts) to: {prompts_dir}")
 
@@ -955,8 +955,8 @@ def save_images(
         "style_reference_hash": style_reference_hash,
         "images": [img.to_dict() for img in images]
     }
-    with open(images_file, 'w', encoding='utf-8') as f:
-        json.dump(cache_data, f, indent=2, ensure_ascii=False)
+    with open(images_file, 'wb') as f:
+        f.write(orjson.dumps(cache_data, option=orjson.OPT_INDENT_2))
 
     # Also save individual prompts for compatibility
     for img in images:
@@ -995,8 +995,8 @@ def save_images(
         }
 
         prompt_file = prompts_dir / f"prompt_{img.image_index}.json"
-        with open(prompt_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        with open(prompt_file, 'wb') as f:
+            f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
 
     logger.info(f"Saved {len(images)} images to: {prompts_dir}")
 
@@ -1043,8 +1043,8 @@ def generate_thumbnail_images(
 
     if images_file.exists():
         try:
-            with open(images_file, 'r', encoding='utf-8') as f:
-                cached_data = json.load(f)
+            with open(images_file, 'rb') as f:
+                cached_data = orjson.loads(f.read())
 
             # Handle both new format (dict with metadata) and legacy format (list)
             if isinstance(cached_data, dict):
@@ -1249,8 +1249,8 @@ def generate_thumbnail_concepts(
 
     if concepts_file.exists():
         try:
-            with open(concepts_file, 'r', encoding='utf-8') as f:
-                cached_data = json.load(f)
+            with open(concepts_file, 'rb') as f:
+                cached_data = orjson.loads(f.read())
 
             # Check if cache matches requested structure
             if len(cached_data) == num_concepts:

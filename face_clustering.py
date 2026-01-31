@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_distances
-import json
+import orjson
 import shutil
 
 from utils import setup_logger
@@ -354,8 +354,8 @@ def save_cluster_representatives(
     }
 
     metadata_path = clusters_dir / "clusters.json"
-    with open(metadata_path, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    with open(metadata_path, 'wb') as f:
+        f.write(orjson.dumps(metadata, option=orjson.OPT_INDENT_2))
 
     logger.info(f"Saved {len(clusters)} cluster representatives to {clusters_dir}")
 
@@ -380,8 +380,8 @@ def load_faces_with_embeddings(faces_json_path: Path) -> List[Dict[str, Any]]:
         logger.error(f"Faces JSON not found: {faces_json_path}")
         return []
 
-    with open(faces_json_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    with open(faces_json_path, 'rb') as f:
+        data = orjson.loads(f.read())
 
     # Handle both list format and dict with 'all_faces' key
     if isinstance(data, list):
@@ -460,8 +460,8 @@ def run_clustering_pipeline(
         ]
     }
 
-    with open(clusters_result_path, 'w', encoding='utf-8') as f:
-        json.dump(result_to_save, f, indent=2, ensure_ascii=False)
+    with open(clusters_result_path, 'wb') as f:
+        f.write(orjson.dumps(result_to_save, option=orjson.OPT_INDENT_2))
 
     logger.info(f"Clustering result saved to {clusters_result_path}")
 

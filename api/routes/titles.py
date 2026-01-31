@@ -4,7 +4,7 @@ Content Generation API Routes
 Endpoints for AI-powered title and description generation.
 """
 
-import json
+import orjson
 import logging
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
@@ -669,8 +669,8 @@ async def get_transcription(video_id: int):
     # Try structured segments file first
     if segments_file.exists():
         try:
-            with open(segments_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            with open(segments_file, 'rb') as f:
+                data = orjson.loads(f.read())
                 segments = data.get('segments', [])
                 if segments:
                     # Format as readable lines: [00:00] speaker_0: text

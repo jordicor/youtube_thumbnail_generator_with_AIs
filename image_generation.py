@@ -661,9 +661,9 @@ def build_v3_prompt_string(
     Returns:
         String with optional header + JSON content
     """
-    import json
+    import orjson
     prompt_dict = build_image_prompt_v3(image, has_reference_images)
-    json_content = json.dumps(prompt_dict, indent=2, ensure_ascii=False)
+    json_content = orjson.dumps(prompt_dict, option=orjson.OPT_INDENT_2).decode('utf-8')
 
     # Add header only when we have references and identity data
     has_identity_data = image.characters or image.subjects

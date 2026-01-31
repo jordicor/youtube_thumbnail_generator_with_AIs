@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
-import json
+import orjson
 
 # Configure stdout encoding for Windows
 if sys.platform == 'win32':
@@ -201,7 +201,6 @@ def safe_parse_fps(fps_string: str) -> float:
 def get_video_info(video_path: Path) -> dict:
     """Get basic video information using ffprobe"""
     import subprocess
-    import json
 
     try:
         cmd = [
@@ -216,7 +215,7 @@ def get_video_info(video_path: Path) -> dict:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode == 0:
-            data = json.loads(result.stdout)
+            data = orjson.loads(result.stdout)
 
             # Extract relevant info
             format_info = data.get('format', {})
@@ -323,14 +322,14 @@ class VideoOutput:
         data['video_path'] = str(self.video_path)
         data['processed_at'] = datetime.now().isoformat()
 
-        with open(self.metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        with open(self.metadata_file, 'wb') as f:
+            f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
 
     def load_metadata(self) -> dict:
         """Load existing metadata if available"""
         if self.metadata_file.exists():
-            with open(self.metadata_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            with open(self.metadata_file, 'rb') as f:
+                return orjson.loads(f.read())
         return {}
 
     def is_complete(self) -> bool:

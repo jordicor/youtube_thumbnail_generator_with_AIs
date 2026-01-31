@@ -9,7 +9,7 @@ Expression detection and embedding extraction for clustering.
 import cuda_setup  # noqa: F401
 
 import cv2
-import json
+import orjson
 import numpy as np
 from pathlib import Path
 from typing import Optional
@@ -487,8 +487,8 @@ def extract_faces(
     if output.faces_file.exists() and not force_refresh:
         logger.info("Checking cached face extraction results...")
         try:
-            with open(output.faces_file, 'r') as f:
-                cached_data = json.load(f)
+            with open(output.faces_file, 'rb') as f:
+                cached_data = orjson.loads(f.read())
 
             is_valid, reason = _validate_cache(cached_data, frame_paths)
 
@@ -559,8 +559,8 @@ def extract_faces(
     )
 
     # Save results (embeddings included for clustering)
-    with open(output.faces_file, 'w', encoding='utf-8') as f:
-        json.dump(result.to_dict(), f, indent=2)
+    with open(output.faces_file, 'wb') as f:
+        f.write(orjson.dumps(result.to_dict(), option=orjson.OPT_INDENT_2))
 
     logger.success(
         f"Face extraction complete: {len(frames_with_faces)} frames with faces, "

@@ -6,7 +6,7 @@ Extracts representative frames from each scene.
 """
 
 import cv2
-import json
+import orjson
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, asdict
@@ -176,8 +176,8 @@ def detect_scenes(video_path: Path, output: VideoOutput) -> Optional[SceneDetect
     if output.scenes_file.exists():
         logger.info("Loading cached scene detection results...")
         try:
-            with open(output.scenes_file, 'r') as f:
-                data = json.load(f)
+            with open(output.scenes_file, 'rb') as f:
+                data = orjson.loads(f.read())
                 scenes = [Scene(**s) for s in data['scenes']]
                 return SceneDetectionResult(
                     video_path=data['video_path'],
@@ -287,8 +287,8 @@ def detect_scenes(video_path: Path, output: VideoOutput) -> Optional[SceneDetect
         )
 
         # Save results
-        with open(output.scenes_file, 'w', encoding='utf-8') as f:
-            json.dump(result.to_dict(), f, indent=2)
+        with open(output.scenes_file, 'wb') as f:
+            f.write(orjson.dumps(result.to_dict(), option=orjson.OPT_INDENT_2))
 
         logger.success(f"Scene detection complete: {len(scenes)} scenes, {total_frames_to_extract} frames to extract")
 

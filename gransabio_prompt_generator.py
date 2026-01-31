@@ -7,7 +7,7 @@ AI provider selection, thinking mode support, and prompt history.
 """
 
 import sys
-import json
+import orjson
 import time
 import base64
 import logging
@@ -1043,7 +1043,7 @@ def generate_thumbnail_concepts_gransabio(
                 end = response.find("```", start)
                 response = response[start:end].strip()
 
-            data = json.loads(response)
+            data = orjson.loads(response)
 
             if isinstance(data, list):
                 logger.info(f"Gran Sabio LLM generated {len(data)} concepts successfully")
@@ -1059,7 +1059,7 @@ def generate_thumbnail_concepts_gransabio(
         logger.warning(f"Unexpected response type: {type(response)}")
         return None
 
-    except json.JSONDecodeError as e:
+    except orjson.JSONDecodeError as e:
         logger.error(f"Failed to parse Gran Sabio LLM response: {e}")
         return None
 
@@ -1149,7 +1149,7 @@ def generate_thumbnail_images_gransabio(
                 end = response.find("```", start)
                 response = response[start:end].strip()
 
-            data = json.loads(response)
+            data = orjson.loads(response)
 
             if isinstance(data, list):
                 logger.info(f"Gran Sabio LLM generated {len(data)} images successfully")
@@ -1164,7 +1164,7 @@ def generate_thumbnail_images_gransabio(
         logger.warning(f"Unexpected response type: {type(response)}")
         return None
 
-    except json.JSONDecodeError as e:
+    except orjson.JSONDecodeError as e:
         logger.error(f"Failed to parse Gran Sabio LLM response: {e}")
         return None
 

@@ -4,7 +4,7 @@ Redis Pub/Sub for real-time progress updates.
 Used to communicate between workers and the API server for SSE events.
 """
 
-import json
+import orjson
 import logging
 from typing import Optional, AsyncGenerator, Any
 
@@ -51,10 +51,10 @@ async def publish_event(
         )
     """
     formatted_channel = _format_channel(channel, **channel_params)
-    message = json.dumps({
+    message = orjson.dumps({
         "type": event_type,
         "data": data,
-    })
+    }).decode('utf-8')
 
     try:
         async with get_redis() as redis:
@@ -121,7 +121,7 @@ async def subscribe_to_channel(
 
     Example:
         async for message in subscribe_to_channel(CHANNEL_ANALYSIS, video_id=123):
-            yield f"event: {message['type']}\\ndata: {json.dumps(message['data'])}\\n\\n"
+            yield f"event: {message['type']}\\ndata: {orjson.dumps(message['data']).decode()}\\n\\n"
     """
     formatted_channel = _format_channel(channel, **channel_params)
 
@@ -135,9 +135,9 @@ async def subscribe_to_channel(
         async for message in pubsub.listen():
             if message["type"] == "message":
                 try:
-                    parsed = json.loads(message["data"])
+                    parsed = orjson.loads(message["data"])
                     yield parsed
-                except json.JSONDecodeError:
+                except orjson.JSONDecodeError:
                     logger.warning(f"Invalid JSON in message: {message['data']}")
                     continue
     finally:
@@ -163,10 +163,10 @@ def publish_event_sync(
     from job_queue.client import get_redis_sync
 
     formatted_channel = _format_channel(channel, **channel_params)
-    message = json.dumps({
+    message = orjson.dumps({
         "type": event_type,
         "data": data,
-    })
+    }).decode('utf-8')
 
     try:
         redis = get_redis_sync()
