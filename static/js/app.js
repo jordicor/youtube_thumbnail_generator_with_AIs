@@ -81,6 +81,9 @@ function getStatusLabel(status) {
     return status;
 }
 
+// M35: Track active toasts for vertical stacking
+let _activeToasts = [];
+
 /**
  * Show a toast notification
  */
@@ -90,10 +93,13 @@ function showToast(message, type = 'info') {
     toast.className = `toast toast-${type}`;
     toast.textContent = message;
 
+    // M35: Calculate vertical offset based on active toasts
+    const bottomOffset = 20 + (_activeToasts.length * 60);
+
     // Add styles
     toast.style.cssText = `
         position: fixed;
-        bottom: 20px;
+        bottom: ${bottomOffset}px;
         right: 20px;
         padding: 15px 25px;
         background-color: ${type === 'error' ? '#ff4444' : type === 'success' ? '#44ff44' : '#333'};
@@ -105,19 +111,32 @@ function showToast(message, type = 'info') {
     `;
 
     document.body.appendChild(toast);
+    _activeToasts.push(toast);
 
     // Remove after 3 seconds
     setTimeout(() => {
         toast.style.animation = 'slideOut 0.3s ease';
-        setTimeout(() => toast.remove(), 300);
+        setTimeout(() => {
+            const idx = _activeToasts.indexOf(toast);
+            if (idx !== -1) _activeToasts.splice(idx, 1);
+            toast.remove();
+            // Reposition remaining toasts
+            _activeToasts.forEach((t, i) => {
+                t.style.bottom = `${20 + (i * 60)}px`;
+            });
+        }, 300);
     }, 3000);
 }
+
+// Close the active modal through the same cleanup path as user cancellation.
+let _currentModalCleanup = null;
 
 /**
  * Modal dialog system
  * @param {Object} options - Modal options
  * @param {string} options.title - Modal title
- * @param {string} options.message - Modal message
+ * @param {string} options.message - Modal message (text only, use htmlMessage for HTML)
+ * @param {string} [options.htmlMessage] - Modal message as HTML (only use when HTML is explicitly needed)
  * @param {string} [options.type='info'] - Modal type: 'info', 'warning', 'danger'
  * @param {string} [options.confirmText] - Confirm button text (default: localized 'Accept')
  * @param {string} [options.cancelText] - Cancel button text (default: localized 'Cancel')
@@ -125,10 +144,15 @@ function showToast(message, type = 'info') {
  * @returns {Promise<boolean>} - Resolves to true if confirmed, false if cancelled
  */
 function showModal(options) {
+    if (_currentModalCleanup) {
+        _currentModalCleanup(false);
+    }
+
     return new Promise((resolve) => {
         const {
             title = t('modal.confirm_title'),
             message = '',
+            htmlMessage = null,
             type = 'info',
             confirmText = t('common.accept'),
             cancelText = t('common.cancel'),
@@ -164,9 +188,13 @@ function showModal(options) {
         const cancelBtn = overlay.querySelector('.btn-cancel');
         const confirmBtn = overlay.querySelector('.btn-confirm');
 
-        // Set content
+        // C1: Set content - use textContent by default (XSS safe), innerHTML only when explicitly requested
         titleEl.textContent = title;
-        bodyEl.innerHTML = message;
+        if (htmlMessage !== null) {
+            bodyEl.innerHTML = htmlMessage;
+        } else {
+            bodyEl.textContent = message;
+        }
         confirmBtn.textContent = confirmText;
         cancelBtn.textContent = cancelText;
 
@@ -188,13 +216,19 @@ function showModal(options) {
         // Show modal
         overlay.classList.add('visible');
 
-        // Focus management
-        confirmBtn.focus();
-
-        // Cleanup function
+        let settled = false;
         const cleanup = (result) => {
+            // Events already queued for a dismissed modal must not affect its replacement.
+            if (settled) return;
+            settled = true;
             overlay.classList.remove('visible');
             document.removeEventListener('keydown', handleKeydown);
+            confirmBtn.removeEventListener('click', handleConfirm);
+            cancelBtn.removeEventListener('click', handleCancel);
+            overlay.removeEventListener('click', handleOverlayClick);
+            if (_currentModalCleanup === cleanup) {
+                _currentModalCleanup = null;
+            }
             resolve(result);
         };
 
@@ -208,22 +242,20 @@ function showModal(options) {
         };
         const handleKeydown = (e) => {
             if (e.key === 'Escape') {
+                e.preventDefault();
                 cleanup(false);
             } else if (e.key === 'Enter') {
+                e.preventDefault();
                 cleanup(true);
             }
         };
 
-        // Remove old listeners and add new ones
-        const newConfirmBtn = confirmBtn.cloneNode(true);
-        const newCancelBtn = cancelBtn.cloneNode(true);
-        confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
-        cancelBtn.parentNode.replaceChild(newCancelBtn, cancelBtn);
-
-        newConfirmBtn.addEventListener('click', handleConfirm);
-        newCancelBtn.addEventListener('click', handleCancel);
-        overlay.onclick = handleOverlayClick;
+        _currentModalCleanup = cleanup;
+        confirmBtn.addEventListener('click', handleConfirm);
+        cancelBtn.addEventListener('click', handleCancel);
+        overlay.addEventListener('click', handleOverlayClick);
         document.addEventListener('keydown', handleKeydown);
+        confirmBtn.focus();
     });
 }
 

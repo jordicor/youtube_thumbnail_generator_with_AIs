@@ -7,7 +7,7 @@ Handles multi-directory support for video sources.
 
 from pathlib import Path
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import aiosqlite
 
 from i18n.i18n import translate as t
@@ -291,9 +291,11 @@ class DirectoryService:
             if 'T' in timestamp_str:
                 timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
             else:
-                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                # Naive timestamps from SQLite are treated as UTC
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
-            now = datetime.now()
+            # Use tz-aware now so subtraction works regardless of timestamp tz-info
+            now = datetime.now(timezone.utc)
             diff = now - timestamp
 
             seconds = diff.total_seconds()

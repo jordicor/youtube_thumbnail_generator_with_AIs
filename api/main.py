@@ -112,7 +112,11 @@ templates.env.globals["SUPPORTED_LANGUAGES"] = SUPPORTED_LANGUAGES
 
 @app.middleware("http")
 async def i18n_middleware(request: Request, call_next):
-    """Detect language from cookie and set it for the request."""
+    """Detect language from cookie and set it for the request.
+
+    Thread-safety note: i18n.set_language uses a ContextVar, so concurrent
+    requests each get their own language value without racing.
+    """
     lang_cookie = request.cookies.get("lang")
     if lang_cookie and lang_cookie in SUPPORTED_LANGUAGES:
         set_language(lang_cookie)

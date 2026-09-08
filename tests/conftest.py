@@ -27,21 +27,14 @@ async def test_db() -> AsyncGenerator[aiosqlite.Connection, None]:
     Yields:
         aiosqlite.Connection: Database connection ready for use
     """
-    # Create in-memory database
-    db = await aiosqlite.connect(":memory:")
+    from database.db import _run_migrations
 
-    # Enable foreign keys
-    await db.execute("PRAGMA foreign_keys = ON")
-
-    # Load and execute schema
-    if SCHEMA_PATH.exists():
-        with open(SCHEMA_PATH, 'r', encoding='utf-8') as f:
-            schema_sql = f.read()
-        await db.executescript(schema_sql)
-
-    yield db
-
-    await db.close()
+    async with aiosqlite.connect(":memory:") as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        # Match application startup, including tables introduced by migrations.
+        await _run_migrations(db)
+        yield db
 
 
 @pytest.fixture
@@ -216,25 +209,28 @@ async def app(test_db: aiosqlite.Connection):
 
     This fixture patches the database module to use the test database.
     """
-    import sys
-    from unittest.mock import patch, MagicMock, AsyncMock
-    from contextlib import asynccontextmanager
+    from unittest.mock import patch, AsyncMock
+    from contextlib import asynccontextmanager, ExitStack
+    from api.main import app as fastapi_app
+    from api.routes import videos, analysis, generation, thumbnails, events, directories, titles, tasks
 
     # Create a mock for get_db that returns our test_db
     @asynccontextmanager
     async def mock_get_db():
         yield test_db
 
-    # Patch the database module
-    with patch('database.db.get_db', mock_get_db):
-        with patch('database.db._db_connection', test_db):
-            # Import the app after patching
-            from api.main import app as fastapi_app
-
-            # Skip Redis check in tests
-            with patch('job_queue.client.RedisManager.health_check', new_callable=AsyncMock) as mock_health:
-                mock_health.return_value = False  # Redis not available in tests
-                yield fastapi_app
+    # Patch route imports explicitly; imports may be cached between test cases.
+    with ExitStack() as stack:
+        stack.enter_context(patch('database.db.get_db', mock_get_db))
+        for module in (videos, analysis, generation, thumbnails, events, directories, titles, tasks):
+            stack.enter_context(patch.object(module, 'get_db', mock_get_db))
+        stack.enter_context(patch('api.main.init_db', new_callable=AsyncMock))
+        stack.enter_context(patch('api.main.close_db', new_callable=AsyncMock))
+        mock_health = stack.enter_context(
+            patch('job_queue.client.RedisManager.health_check', new_callable=AsyncMock)
+        )
+        mock_health.return_value = False
+        yield fastapi_app
 
 
 @pytest.fixture

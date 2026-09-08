@@ -228,11 +228,11 @@ class TaskService:
             True if cancelled successfully, False otherwise.
         """
         if task_type == 'analysis':
-            # For analysis, reset video to pending
+            # For analysis, set video to 'cancelled' so the worker detects it
             placeholders = ','.join('?' * len(self.ANALYSIS_ACTIVE_STATES))
             query = f"""
                 UPDATE videos
-                SET status = 'pending', error_message = 'Cancelled by user'
+                SET status = 'cancelled', error_message = 'Cancelled by user'
                 WHERE id = ? AND status IN ({placeholders})
             """
             cursor = await self.db.execute(query, (task_id,) + self.ANALYSIS_ACTIVE_STATES)
@@ -245,20 +245,10 @@ class TaskService:
                 return False
 
         elif task_type == 'generation':
-            # For generation, mark job as cancelled
-            all_gen_states = self.GENERATION_PENDING_STATES + self.GENERATION_ACTIVE_STATES
-            placeholders = ','.join('?' * len(all_gen_states))
-            query = f"""
-                UPDATE generation_jobs
-                SET status = 'cancelled'
-                WHERE id = ? AND status IN ({placeholders})
-            """
-            cursor = await self.db.execute(
-                query,
-                (task_id,) + all_gen_states
-            )
-            await self.db.commit()
-            if cursor.rowcount > 0:
+            from services.generation_service import GenerationService
+
+            # Share the atomic terminal transition and video ownership check.
+            if await GenerationService(self.db).cancel_job(task_id):
                 logger.info(f"Task generation:{task_id} cancelled successfully")
                 return True
             else:

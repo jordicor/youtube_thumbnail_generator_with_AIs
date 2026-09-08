@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class BatchDeleteRequest(BaseModel):
+    ids: list[int] = Field(..., max_length=1000)
+
+
 # ============================================================================
 # REQUEST/RESPONSE MODELS - TITLES
 # ============================================================================
@@ -352,15 +356,15 @@ async def get_saved_titles(video_id: int):
         success=True,
         titles=[
             SavedTitle(
-                id=t['id'],
-                title_text=t['title_text'],
-                style=t['style'],
-                language=t['language'],
-                provider=t['provider'],
-                model=t['model'],
-                created_at=str(t['created_at']) if t['created_at'] else ""
+                id=title['id'],
+                title_text=title['title_text'],
+                style=title['style'],
+                language=title['language'],
+                provider=title['provider'],
+                model=title['model'],
+                created_at=str(title['created_at']) if title['created_at'] else ""
             )
-            for t in titles
+            for title in titles
         ],
         count=len(titles)
     )
@@ -411,19 +415,18 @@ async def delete_title(title_id: int):
 
 
 @router.delete("/delete-batch")
-async def delete_titles_batch(request: dict):
+async def delete_titles_batch(request: BatchDeleteRequest):
     """Delete multiple titles by IDs."""
-    ids = request.get("ids", [])
-    if not ids:
+    if not request.ids:
         return {"success": True, "deleted_count": 0}
 
     deleted_count = 0
-    for title_id in ids:
+    for title_id in request.ids:
         try:
             deleted = await db_delete_title(title_id)
             deleted_count += deleted
         except Exception as e:
-            print(f"Error deleting title {title_id}: {e}")
+            logger.error(f"Error deleting title {title_id}: {e}")
 
     return {"success": True, "deleted_count": deleted_count}
 
@@ -604,14 +607,13 @@ async def delete_description(description_id: int):
 
 
 @router.delete("/delete-descriptions-batch")
-async def delete_descriptions_batch(request: dict):
+async def delete_descriptions_batch(request: BatchDeleteRequest):
     """Delete multiple descriptions by IDs."""
-    ids = request.get("ids", [])
-    if not ids:
+    if not request.ids:
         return {"success": True, "deleted_count": 0}
 
     deleted_count = 0
-    for description_id in ids:
+    for description_id in request.ids:
         try:
             deleted = await db_delete_description(description_id)
             deleted_count += deleted

@@ -27,21 +27,51 @@ def mock_task_service():
 
 @pytest.fixture
 async def sse_client(mock_task_service):
-    """Create a test client configured for SSE testing."""
+    """Disconnect after the first event and bound the entire ASGI request."""
     @asynccontextmanager
     async def mock_get_db():
         yield MagicMock()
 
+    from fastapi import FastAPI
+    from api.routes.events import router
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/events")
+
+    async def bounded_stream(scope, receive, send):
+        disconnected = asyncio.Event()
+        request_received = False
+        response_finished = False
+
+        async def receive_until_disconnect():
+            nonlocal request_received
+            if not request_received:
+                request_received = True
+                return await receive()
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send_and_disconnect(message):
+            nonlocal response_finished
+            await send(message)
+            if message["type"] == "http.response.body":
+                response_finished = not message.get("more_body", False)
+                if message.get("body"):
+                    disconnected.set()
+
+        # HTTPX buffers ASGI responses until the app returns, even for stream().
+        # This limit also covers entering that context, unlike a body-read timeout.
+        async with asyncio.timeout(2):
+            await app(scope, receive_until_disconnect, send_and_disconnect)
+        # ASGITransport requires a final body even after our simulated disconnect.
+        if not response_finished:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+
     with patch('api.routes.events.get_db', mock_get_db):
         with patch('api.routes.events.TaskService', return_value=mock_task_service):
-            with patch('database.db.init_db', new_callable=AsyncMock):
-                with patch('job_queue.client.RedisManager.health_check', new_callable=AsyncMock) as mock_redis:
-                    mock_redis.return_value = False
-
-                    from api.main import app
-                    transport = ASGITransport(app=app)
-                    async with AsyncClient(transport=transport, base_url="http://test") as client:
-                        yield client, mock_task_service
+            transport = ASGITransport(app=bounded_stream)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                yield client, mock_task_service
 
 
 # =============================================================================
@@ -79,12 +109,9 @@ def parse_sse_events(content: str) -> list:
 async def read_sse_with_timeout(response, timeout: float = 2.0) -> str:
     """Read SSE response with timeout."""
     content = b""
-    try:
-        async with asyncio.timeout(timeout):
-            async for chunk in response.aiter_bytes():
-                content += chunk
-    except asyncio.TimeoutError:
-        pass
+    async with asyncio.timeout(timeout):
+        async for chunk in response.aiter_bytes():
+            content += chunk
     return content.decode('utf-8')
 
 

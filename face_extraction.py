@@ -8,6 +8,7 @@ Expression detection and embedding extraction for clustering.
 # CUDA setup must be imported FIRST before any ONNX/InsightFace imports
 import cuda_setup  # noqa: F401
 
+import os
 import cv2
 import orjson
 import numpy as np
@@ -41,8 +42,9 @@ LOWER_LIP_INNER = [65, 66, 67]    # Inner lower lip
 LIP_CENTER_TOP = 51               # Center top of upper lip
 LIP_CENTER_BOTTOM = 57            # Center bottom of lower lip
 
-# Global face analysis app (lazy loaded)
+# Global face analysis app (lazy loaded, thread-safe)
 _face_app = None
+_face_app_lock = __import__('threading').Lock()
 
 
 # =============================================================================
@@ -104,21 +106,24 @@ class FaceExtractionResult:
 # =============================================================================
 
 def get_face_app():
-    """Get or initialize the InsightFace analysis app"""
+    """Get or initialize the InsightFace analysis app (thread-safe)"""
     global _face_app
 
     if _face_app is None:
-        from insightface.app import FaceAnalysis
+        with _face_app_lock:
+            if _face_app is None:  # Double-check after acquiring lock
+                from insightface.app import FaceAnalysis
 
-        logger.info(f"Initializing InsightFace with model: {FACE_DETECTOR_MODEL}")
+                logger.info(f"Initializing InsightFace with model: {FACE_DETECTOR_MODEL}")
 
-        _face_app = FaceAnalysis(
-            name=FACE_DETECTOR_MODEL,
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
-        )
-        _face_app.prepare(ctx_id=0, det_size=(640, 640))
+                app = FaceAnalysis(
+                    name=FACE_DETECTOR_MODEL,
+                    providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+                )
+                app.prepare(ctx_id=0, det_size=(640, 640))
 
-        logger.success("InsightFace initialized successfully")
+                _face_app = app
+                logger.success("InsightFace initialized successfully")
 
     return _face_app
 
@@ -437,7 +442,13 @@ def _validate_cache(data: dict, frame_paths: list[Path]) -> tuple[bool, str]:
         return False, f"Cache invalid: {len(missing_frames)} frame files missing"
 
     # Check if frames match current input (detect new/removed frames)
-    cached_frame_set = set(face.get('frame_path', '') for face in all_faces)
+    # Use processed_frames list if available (tracks ALL frames including those with no faces)
+    processed_frames = data.get('processed_frames')
+    if processed_frames:
+        cached_frame_set = set(processed_frames)
+    else:
+        # Legacy fallback: only frames with detected faces are tracked
+        cached_frame_set = set(face.get('frame_path', '') for face in all_faces)
     current_frame_set = set(str(p) for p in frame_paths)
 
     # Frames in current but not in cache
@@ -559,8 +570,22 @@ def extract_faces(
     )
 
     # Save results (embeddings included for clustering)
-    with open(output.faces_file, 'wb') as f:
-        f.write(orjson.dumps(result.to_dict(), option=orjson.OPT_INDENT_2))
+    # Include processed_frames to track ALL frames (even those without faces) for cache validation
+    save_data = result.to_dict()
+    save_data['processed_frames'] = [str(p) for p in frame_paths]
+
+    # Atomic write: write to temp file first, then rename
+    import tempfile
+    temp_fd, temp_path = tempfile.mkstemp(
+        dir=str(output.faces_file.parent), suffix='.tmp'
+    )
+    try:
+        with os.fdopen(temp_fd, 'wb') as f:
+            f.write(orjson.dumps(save_data, option=orjson.OPT_INDENT_2))
+        os.replace(temp_path, str(output.faces_file))
+    except BaseException:
+        os.unlink(temp_path)
+        raise
 
     logger.success(
         f"Face extraction complete: {len(frames_with_faces)} frames with faces, "

@@ -18,6 +18,8 @@ import { getTextConfig } from './ai-config.js';
 export async function loadSaved() {
     try {
         const response = await fetch(`/api/titles/saved/${state.videoId}`);
+        // H7: Check response before parsing
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
 
         if (data.success && data.titles && data.titles.length > 0) {
@@ -384,6 +386,9 @@ export function updateCount() {
 export async function deleteOne(index) {
     const titleObj = state.titles[index];
     if (!titleObj) return;
+
+    // M32: Confirm before deleting (matching pattern from thumbnails.js)
+    if (!confirm(t('common.delete'))) return;
 
     if (titleObj.dbId) {
         try {

@@ -5,6 +5,7 @@ Uses LLM (Claude/GPT) to analyze transcription and generate
 thumbnail prompts and titles.
 """
 
+import base64
 import hashlib
 import orjson
 from pathlib import Path
@@ -169,7 +170,7 @@ class ThumbnailPrompt:
 
 ANALYSIS_PROMPT = """You are an expert YouTube thumbnail designer and video content analyst.
 
-Analyze the following video transcription and generate {num_concepts} thumbnail concepts, each with {num_variations} variations.
+Analyze the following video transcription and generate {num_variations} unique thumbnail prompts.
 
 VIDEO TITLE: {video_title}
 {context_section}
@@ -177,59 +178,38 @@ TRANSCRIPTION (excerpt):
 {transcription}
 
 ═══════════════════════════════════════════════════════════════════════════════
-TASK: Generate {num_concepts} concepts × {num_variations} variations = {total_images} unique image prompts
+TASK: Generate {num_variations} unique thumbnail image prompts
 ═══════════════════════════════════════════════════════════════════════════════
 
-CONCEPTS are different creative ideas for the thumbnail. Examples of concept approaches:
+Each prompt should explore a DIFFERENT creative approach for the thumbnail:
 - Emotion/Reaction, Problem/Solution, Intrigue/Curiosity, Achievement, Tutorial, Humor, etc.
 - Choose what fits best with the video content - these are just examples, use your creativity.
+- Think of each prompt as an A/B test candidate - they should be meaningfully different.
 
-VARIATIONS are different interpretations of the same concept, like A/B testing for engagement.
-Each variation should have a complete, independent image_prompt. Think of variations as:
-- Different ways to visually represent the same idea
-- Subtle or more noticeable differences depending on what makes sense
-- Examples: different expressions, poses, camera angles, compositions, lighting, visual elements
-- Use your judgment - sometimes variations can be quite similar with small tweaks,
-  other times they might explore the concept from different visual angles.
-
-The goal is to give options to test which thumbnail performs better, not to force
-artificial differences. Let the variations flow naturally from the concept.
-
-For EACH concept, provide:
-- **concept_name**: Short name for this concept (2-4 words)
-- **thumbnail_concept**: Brief description of the idea (1-2 sentences)
+For EACH of the {num_variations} prompts, provide:
 - **suggested_title**: Catchy video title (max 60 chars)
+- **thumbnail_concept**: Brief description of the idea (1-2 sentences)
+- **image_prompt**: COMPLETE prompt for AI image generation. Include subject, expression,
+  pose, background, lighting, style. Optimized for 16:9 (1280x720). Each prompt must work independently.
+- **text_overlay**: Short text for the thumbnail (2-5 words, punchy)
 - **mood**: Emotional tone (excited, mysterious, professional, fun, etc.)
 - **colors**: 2-3 dominant colors as hex codes
 - **key_topics**: 3-5 main keywords from the video
-- **variations**: Array of {num_variations} variations, each with:
-  - **variation_index**: 1, 2, 3...
-  - **variation_focus**: What this variation emphasizes (e.g., "intense expression", "dynamic angle")
-  - **image_prompt**: COMPLETE prompt for AI image generation. Include subject, expression,
-    pose, background, lighting, style. Optimized for 16:9 (1280x720). Each prompt must work independently.
-  - **text_overlay**: Short text for the thumbnail (2-5 words, punchy)
 
-Respond in JSON format:
+Respond in JSON format (array of {num_variations} objects):
 [
     {{
-        "concept_name": "...",
-        "thumbnail_concept": "...",
         "suggested_title": "...",
+        "thumbnail_concept": "...",
+        "image_prompt": "...",
+        "text_overlay": "...",
         "mood": "...",
         "colors": ["#...", "#..."],
-        "key_topics": ["...", "..."],
-        "variations": [
-            {{
-                "variation_index": 1,
-                "variation_focus": "...",
-                "image_prompt": "...",
-                "text_overlay": "..."
-            }}
-        ]
+        "key_topics": ["...", "..."]
     }}
 ]
 
-Generate exactly {num_concepts} concepts, each with exactly {num_variations} variations.
+Generate exactly {num_variations} unique prompts.
 
 {style_guidance}
 """
@@ -252,8 +232,8 @@ def generate_with_claude(prompt: str) -> Optional[str]:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=16000,
+            model="claude-sonnet-4-6",
+            max_tokens=16384,
             messages=[
                 {"role": "user", "content": prompt}
             ]
@@ -282,11 +262,10 @@ def generate_with_openai(prompt: str) -> Optional[str]:
         client = OpenAI(api_key=OPENAI_API_KEY)
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini",
             messages=[
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1500,
             response_format={"type": "json_object"}
         )
 
@@ -513,30 +492,30 @@ def parse_llm_response(response: str) -> Optional[list | dict]:
             end = response.find("```", start)
             response = response[start:end].strip()
 
-        # Find JSON array (expected for multiple prompts)
-        if response.startswith('['):
-            # Find matching closing bracket
-            bracket_count = 0
+        # Find JSON array or object with string-aware bracket counting
+        if response.startswith('[') or response.startswith('{'):
+            start_char = response[0]
+            end_char = ']' if start_char == '[' else '}'
+            depth = 0
+            in_string = False
+            escaped = False
             for i, char in enumerate(response):
-                if char == '[':
-                    bracket_count += 1
-                elif char == ']':
-                    bracket_count -= 1
-                    if bracket_count == 0:
-                        response = response[:i + 1]
-                        break
-        # Find JSON object
-        elif response.startswith('{'):
-            # Find matching closing brace
-            brace_count = 0
-            for i, char in enumerate(response):
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        response = response[:i + 1]
-                        break
+                if escaped:
+                    escaped = False
+                    continue
+                if char == '\\' and in_string:
+                    escaped = True
+                    continue
+                if char == '"' and not escaped:
+                    in_string = not in_string
+                if not in_string:
+                    if char == start_char:
+                        depth += 1
+                    elif char == end_char:
+                        depth -= 1
+                        if depth == 0:
+                            response = response[:i + 1]
+                            break
 
         return orjson.loads(response)
 
@@ -936,7 +915,7 @@ def compute_style_reference_hash(
 
     # The style reference is always the first image in the list
     style_image_b64 = reference_images_base64[0]
-    return hashlib.md5(style_image_b64.encode()).hexdigest()
+    return hashlib.md5(base64.b64decode(style_image_b64)).hexdigest()
 
 
 def save_images(
@@ -1536,16 +1515,17 @@ if __name__ == "__main__":
     output = VideoOutput(Path("test_video.mp4"), OUTPUT_DIR)
     output.setup()
 
-    result = generate_thumbnail_prompt(test_transcription, test_title, output)
+    results = generate_thumbnail_prompts(test_transcription, test_title, output)
 
-    if result:
-        print("\nGenerated Thumbnail Prompt:")
-        print("-" * 40)
-        print(f"Title: {result.suggested_title}")
-        print(f"Concept: {result.thumbnail_concept}")
-        print(f"Text Overlay: {result.text_overlay}")
-        print(f"Mood: {result.mood}")
-        print(f"Colors: {result.colors}")
-        print(f"Topics: {result.key_topics}")
-        print("-" * 40)
-        print(f"Image Prompt:\n{result.image_prompt}")
+    if results:
+        for i, result in enumerate(results, 1):
+            print(f"\nGenerated Thumbnail Prompt {i}:")
+            print("-" * 40)
+            print(f"Title: {result.suggested_title}")
+            print(f"Concept: {result.thumbnail_concept}")
+            print(f"Text Overlay: {result.text_overlay}")
+            print(f"Mood: {result.mood}")
+            print(f"Colors: {result.colors}")
+            print(f"Topics: {result.key_topics}")
+            print("-" * 40)
+            print(f"Image Prompt:\n{result.image_prompt}")

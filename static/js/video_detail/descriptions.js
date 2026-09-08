@@ -18,6 +18,8 @@ import { getTextConfig } from './ai-config.js';
 export async function loadSaved() {
     try {
         const response = await fetch(`/api/titles/saved-descriptions/${state.videoId}`);
+        // H7: Check response before parsing
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
 
         if (data.success && data.descriptions && data.descriptions.length > 0) {
@@ -192,8 +194,9 @@ export async function generate() {
         const descriptionObjects = data.descriptions.map(text => ({ text, dbId: null }));
         display(descriptionObjects);
 
-        saveToDb(data.descriptions, style, language, length, data.provider, data.model,
-                 includeTimestamps, includeHashtags, includeEmojis, includeSocialLinks);
+        // M36: Await the save operation instead of fire-and-forget
+        await saveToDb(data.descriptions, style, language, length, data.provider, data.model,
+                       includeTimestamps, includeHashtags, includeEmojis, includeSocialLinks);
 
         if (data.transcription_generated) {
             ThumbnailApp.showToast(t('descriptions.generating'), 'success');
@@ -316,6 +319,9 @@ export async function deleteOne(index) {
 export async function deleteAll() {
     const validDescriptions = state.descriptions.filter(d => d !== null);
     if (validDescriptions.length === 0) return;
+
+    // M31: Confirm before bulk delete
+    if (!confirm(t('common.delete'))) return;
 
     const dbIds = validDescriptions
         .filter(d => d.dbId)

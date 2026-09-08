@@ -204,12 +204,12 @@ class VideoService:
             return 0
 
         placeholders = ','.join(['?' for _ in video_ids])
-        await self.db.execute(
+        cursor = await self.db.execute(
             f"UPDATE videos SET is_hidden = TRUE WHERE id IN ({placeholders})",
             video_ids
         )
         await self.db.commit()
-        return len(video_ids)
+        return cursor.rowcount
 
     async def reanalyze_video(self, video_id: int) -> bool:
         """
@@ -241,6 +241,12 @@ class VideoService:
         # Delete generation_jobs (cascade deletes thumbnails)
         await self.db.execute(
             "DELETE FROM generation_jobs WHERE video_id = ?",
+            [video_id]
+        )
+
+        # Delete video_frames so stale frame data does not persist
+        await self.db.execute(
+            "DELETE FROM video_frames WHERE video_id = ?",
             [video_id]
         )
 

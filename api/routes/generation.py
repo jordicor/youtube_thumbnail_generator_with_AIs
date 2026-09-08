@@ -9,7 +9,7 @@ from typing import Optional, List, Literal
 from pydantic import BaseModel
 
 from database.db import get_db
-from services.generation_service import GenerationService
+from services.generation_service import GenerationService, GenerationNotReadyError
 from job_queue.queue import enqueue_generation
 from i18n.i18n import translate as t
 
@@ -40,9 +40,11 @@ class GenerationRequest(BaseModel):
     image_provider: Literal["gemini", "openai", "poe", "replicate"] = "gemini"
     gemini_model: Optional[Literal[
         "gemini-2.5-flash-image",
-        "gemini-3-pro-image-preview"
+        "gemini-3-pro-image-preview",
+        "gemini-3.1-flash-image-preview"
     ]] = None
     openai_model: Optional[Literal[
+        "gpt-image-2",
         "gpt-image-1.5",
         "gpt-image-1",
         "gpt-image-1-mini",
@@ -103,67 +105,76 @@ async def start_generation(
     Requires the video to be analyzed and have clusters.
     Generation runs in background via Redis job queue.
     """
-    async with get_db() as db:
-        service = GenerationService(db)
+    # M45: Validate base64 reference image size (10MB base64 ~ 7.5MB image)
+    if request.reference_image_base64 and len(request.reference_image_base64) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Reference image too large")
 
-        # Verify video is analyzed
-        video = await service.get_video(video_id)
-        if not video:
-            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
-
-        if video['status'] not in ('analyzed', 'completed'):
-            raise HTTPException(
-                status_code=400,
-                detail=t('api.errors.video_must_be_analyzed', status=video['status'])
-            )
-
-        # Verify cluster exists
-        cluster = await service.get_cluster(video_id, request.cluster_index)
-        if not cluster:
-            raise HTTPException(
-                status_code=404,
-                detail=t('api.errors.cluster_not_found')
-            )
-
-        # Create job in database
-        job = await service.create_generation_job(
-            video_id=video_id,
-            cluster_id=cluster['id'],
-            num_images=request.num_images,
-            preferred_expression=request.preferred_expression
-        )
-
-    # Enqueue generation job to Redis
-    arq_job_id = await enqueue_generation(
-        job_id=job['id'],
-        force_transcription=request.force_transcription,
-        force_prompts=request.force_prompts,
-        image_provider=request.image_provider,
-        gemini_model=request.gemini_model,
-        openai_model=request.openai_model,
-        poe_model=request.poe_model,
-        num_reference_images=request.num_reference_images,
-        # Prompt generation AI settings
-        prompt_provider=request.prompt_provider,
-        prompt_model=request.prompt_model,
-        prompt_thinking_enabled=request.prompt_thinking_enabled,
-        prompt_thinking_level=request.prompt_thinking_level,
-        prompt_custom_instructions=request.prompt_custom_instructions,
-        prompt_include_history=request.prompt_include_history,
-        # Selected titles to guide image generation
-        selected_titles=request.selected_titles,
-        # External reference image
-        reference_image_base64=request.reference_image_base64,
-        reference_image_use_for_prompts=request.reference_image_use_for_prompts,
-        reference_image_include_in_refs=request.reference_image_include_in_refs
-    )
-
-    if not arq_job_id:
-        # Failed to enqueue - update job status
+    job = None
+    try:
         async with get_db() as db:
             service = GenerationService(db)
-            await service.update_job_status(job['id'], 'error', 0, t('api.errors.failed_enqueue_generation'))
-        raise HTTPException(status_code=500, detail=t('api.errors.failed_enqueue_generation'))
+
+            # Verify video exists
+            video = await service.get_video(video_id)
+            if not video:
+                raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
+
+            # Verify cluster exists
+            cluster = await service.get_cluster(video_id, request.cluster_index)
+            if not cluster:
+                raise HTTPException(
+                    status_code=404,
+                    detail=t('api.errors.cluster_not_found')
+                )
+
+            # Claim and job creation share one transaction, after validation.
+            try:
+                job = await service.create_generation_job(
+                    video_id=video_id,
+                    cluster_id=cluster['id'],
+                    num_images=request.num_images,
+                    preferred_expression=request.preferred_expression
+                )
+            except GenerationNotReadyError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=t('api.errors.video_must_be_analyzed', status=video['status'])
+                ) from None
+
+        # Enqueue generation job to Redis
+        arq_job_id = await enqueue_generation(
+            job_id=job['id'],
+            force_transcription=request.force_transcription,
+            force_prompts=request.force_prompts,
+            image_provider=request.image_provider,
+            gemini_model=request.gemini_model,
+            openai_model=request.openai_model,
+            poe_model=request.poe_model,
+            num_reference_images=request.num_reference_images,
+            # Prompt generation AI settings
+            prompt_provider=request.prompt_provider,
+            prompt_model=request.prompt_model,
+            prompt_thinking_enabled=request.prompt_thinking_enabled,
+            prompt_thinking_level=request.prompt_thinking_level,
+            prompt_custom_instructions=request.prompt_custom_instructions,
+            prompt_include_history=request.prompt_include_history,
+            # Selected titles to guide image generation
+            selected_titles=request.selected_titles,
+            # External reference image
+            reference_image_base64=request.reference_image_base64,
+            reference_image_use_for_prompts=request.reference_image_use_for_prompts,
+            reference_image_include_in_refs=request.reference_image_include_in_refs
+        )
+        if not arq_job_id:
+            raise HTTPException(status_code=500, detail=t('api.errors.failed_enqueue_generation'))
+    except BaseException:
+        # Also release the claim when enqueue raises or the request is cancelled.
+        # A late queue delivery cannot revive the now-terminal database job.
+        if job is not None:
+            async with get_db() as db:
+                service = GenerationService(db)
+                await service.fail_enqueue(job['id'], t('api.errors.failed_enqueue_generation'))
+        raise
 
     return {
         "job_id": job['id'],

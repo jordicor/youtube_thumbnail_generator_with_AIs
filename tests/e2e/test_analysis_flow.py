@@ -76,8 +76,8 @@ class TestAnalysisVisibilityInTaskQueue:
 class TestAnalysisCancellationFlow:
     """Tests for the complete analysis cancellation flow."""
 
-    async def test_cancel_resets_video_to_pending(self, test_db):
-        """Cancelling analysis should reset video status to pending."""
+    async def test_cancel_marks_video_cancelled(self, test_db):
+        """Cancellation must remain visible to the analysis worker."""
         service = TaskService(test_db)
         video_id = await insert_video(test_db, "test.mp4", "analyzing_faces")
 
@@ -93,13 +93,13 @@ class TestAnalysisCancellationFlow:
         active_after = await service.get_active_tasks()
         assert len(active_after) == 0
 
-        # Verify video status is now pending
+        # Preserve the cancellation signal until the worker acknowledges it.
         async with test_db.execute(
             "SELECT status, error_message FROM videos WHERE id = ?",
             (video_id,)
         ) as cursor:
             row = await cursor.fetchone()
-            assert row[0] == 'pending'
+            assert row[0] == 'cancelled'
             assert row[1] == 'Cancelled by user'
 
     async def test_cancel_all_analysis_states(self, test_db):
@@ -115,13 +115,13 @@ class TestAnalysisCancellationFlow:
 
             assert result is True, f"Failed to cancel from state: {status}"
 
-            # Verify reset to pending
+            # Verify cancellation remains visible to the worker.
             async with test_db.execute(
                 "SELECT status FROM videos WHERE id = ?",
                 (video_id,)
             ) as cursor:
                 row = await cursor.fetchone()
-                assert row[0] == 'pending', f"Video not reset from state: {status}"
+                assert row[0] == 'cancelled', f"Video not cancelled from state: {status}"
 
     async def test_cannot_cancel_pending_video(self, test_db):
         """Cannot cancel a video that is not being analyzed."""

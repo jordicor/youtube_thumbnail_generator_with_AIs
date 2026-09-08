@@ -98,9 +98,9 @@ class TaskQueueManager {
             }
         });
 
-        // Close on Escape key
+        // M51: Close on Escape key only when task queue modal is actually visible
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && this.modalVisible) {
+            if (e.key === 'Escape' && this.modalVisible && this.elements.modal?.classList.contains('visible')) {
                 this.hideModal();
             }
         });
@@ -120,6 +120,12 @@ class TaskQueueManager {
      * Connect to SSE endpoint for real-time task updates.
      */
     connectSSE() {
+        // M34: Clear any pending reconnect timer to prevent duplicates
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+
         if (this.eventSource) {
             this.eventSource.close();
         }
@@ -212,7 +218,8 @@ class TaskQueueManager {
         // Exponential backoff: 2s, 4s, 8s, 16s, 30s (max)
         const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 30000);
         console.warn(`TaskQueue: SSE error, reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-        setTimeout(() => this.connectSSE(), delay);
+        // M34: Store timer ID so it can be cleaned up
+        this._reconnectTimer = setTimeout(() => this.connectSSE(), delay);
     }
 
     /**
@@ -557,6 +564,11 @@ class TaskQueueManager {
      * Cleanup when page unloads.
      */
     destroy() {
+        // M34: Clear reconnect timer
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
         if (this.eventSource) {
             this.eventSource.close();
             this.eventSource = null;

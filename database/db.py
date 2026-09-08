@@ -73,10 +73,13 @@ async def init_db() -> None:
         # Use executescript for full SQL schema (handles triggers correctly)
         try:
             await _db_connection.executescript(schema_sql)
+            # executescript implicitly commits and resets PRAGMAs; re-enable them
+            await _db_connection.execute("PRAGMA foreign_keys = ON")
+            await _db_connection.execute("PRAGMA busy_timeout = 60000")
         except Exception as e:
-            # Tables may already exist
+            # Only tolerate "already exists" errors; everything else is fatal
             if 'already exists' not in str(e).lower():
-                print(f"Schema warning: {e}")
+                raise
 
     # Run migrations for existing databases
     await _run_migrations(_db_connection)
@@ -96,28 +99,29 @@ async def _reset_orphaned_analysis_states(db: aiosqlite.Connection) -> None:
     no analysis process is running. This function resets them to 'pending'
     so they can be re-analyzed.
     """
-    # States that indicate an analysis was in progress
-    orphaned_states = (
+    # States that indicate an analysis was in progress -> reset to 'pending'
+    analysis_orphaned_states = (
         'analyzing',
         'analyzing_scenes',
         'analyzing_faces',
         'clustering',
-        'transcribing'
+        'transcribing',
+        'cancelled',
     )
 
-    # Build placeholders for IN clause
-    placeholders = ','.join('?' * len(orphaned_states))
+    # Videos stuck in 'generating' already completed analysis -> reset to 'analyzed'
+    generation_orphaned_states = ('generating',)
 
-    # Count affected videos first
+    # Reset analysis-orphaned videos to 'pending'
+    placeholders = ','.join('?' * len(analysis_orphaned_states))
     async with db.execute(
         f"SELECT COUNT(*) FROM videos WHERE status IN ({placeholders})",
-        orphaned_states
+        analysis_orphaned_states
     ) as cursor:
         row = await cursor.fetchone()
-        count = row[0] if row else 0
+        analysis_count = row[0] if row else 0
 
-    if count > 0:
-        # Reset to pending with an error message explaining what happened
+    if analysis_count > 0:
         await db.execute(
             f"""
             UPDATE videos
@@ -125,10 +129,32 @@ async def _reset_orphaned_analysis_states(db: aiosqlite.Connection) -> None:
                 error_message = 'Analysis interrupted by server restart. Please re-analyze.'
             WHERE status IN ({placeholders})
             """,
-            orphaned_states
+            analysis_orphaned_states
         )
         await db.commit()
-        print(f"Startup cleanup: Reset {count} video(s) from interrupted analysis states to 'pending'")
+        print(f"Startup cleanup: Reset {analysis_count} video(s) from interrupted analysis states to 'pending'")
+
+    # Reset generation-orphaned videos to 'analyzed'
+    placeholders = ','.join('?' * len(generation_orphaned_states))
+    async with db.execute(
+        f"SELECT COUNT(*) FROM videos WHERE status IN ({placeholders})",
+        generation_orphaned_states
+    ) as cursor:
+        row = await cursor.fetchone()
+        generation_count = row[0] if row else 0
+
+    if generation_count > 0:
+        await db.execute(
+            f"""
+            UPDATE videos
+            SET status = 'analyzed',
+                error_message = 'Generation interrupted by server restart.'
+            WHERE status IN ({placeholders})
+            """,
+            generation_orphaned_states
+        )
+        await db.commit()
+        print(f"Startup cleanup: Reset {generation_count} video(s) from interrupted generation state to 'analyzed'")
 
 
 async def _run_migrations(db: aiosqlite.Connection) -> None:
@@ -462,25 +488,20 @@ async def get_db():
         async with get_db() as db:
             await db.execute("SELECT * FROM videos")
     """
-    global _db_connection
-
-    # If no global connection, create a new one
-    if _db_connection is None:
-        db_path = get_db_path()
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        conn = await aiosqlite.connect(str(db_path), timeout=60)
+    # A connection belongs to one operation. Sharing the initialization
+    # connection lets concurrent requests commit each other's transactions.
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = await aiosqlite.connect(str(db_path), timeout=60)
+    try:
         await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.execute("PRAGMA journal_mode = WAL")
+        # init_db configures WAL once. Switching journal modes here races with
+        # other requests opening/reading a database that has not been initialized.
         await conn.execute("PRAGMA busy_timeout = 60000")
-
-        try:
-            yield conn
-        finally:
-            await conn.close()
-    else:
-        # Use global connection
-        yield _db_connection
+        yield conn
+    finally:
+        # Closing rolls back an uncommitted operation, including cancellation.
+        await conn.close()
 
 
 # =============================================================================

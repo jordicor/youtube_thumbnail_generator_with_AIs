@@ -4,7 +4,7 @@ Directories API Routes
 Endpoints for multi-directory management.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
 from pydantic import BaseModel
 
@@ -221,8 +221,8 @@ async def scan_directory(directory_id: int):
 async def get_directory_videos(
     directory_id: int,
     status: Optional[str] = None,
-    skip: int = 0,
-    limit: int = 50
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=500)
 ):
     """
     Get all videos in a directory.

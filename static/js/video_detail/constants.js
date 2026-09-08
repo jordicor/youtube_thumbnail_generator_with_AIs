@@ -24,9 +24,11 @@ export const STORAGE_KEYS = {
 export const MODEL_MAX_REFS = {
     gemini: {
         "gemini-2.5-flash-image": 3,
-        "gemini-3-pro-image-preview": 14
+        "gemini-3-pro-image-preview": 14,
+        "gemini-3.1-flash-image-preview": 14
     },
     openai: {
+        "gpt-image-2": 16,
         "gpt-image-1.5": 16,
         "gpt-image-1": 16,
         "gpt-image-1-mini": 16,
@@ -58,12 +60,14 @@ export const PROVIDER_NAMES = {
 export const SHORT_MODEL_NAMES = {
     'gemini-2.5-flash-image': 'Gemini Flash',
     'gemini-3-pro-image-preview': 'Gemini Pro 4K',
+    'gemini-3.1-flash-image-preview': 'NanoBanana 2',
     'flux2pro': 'FLUX Pro',
     'flux2flex': 'FLUX Flex',
     'fluxkontextpro': 'FLUX Kontext',
     'seedream40': 'Seedream',
     'nanobananapro': 'Nanobana',
     'Ideogram-v3': 'Ideogram',
+    'gpt-image-2': 'GPT Image 2',
     'gpt-image-1.5': 'GPT Image 1.5',
     'gpt-image-1': 'GPT Image',
     'gpt-image-1-mini': 'GPT Mini',

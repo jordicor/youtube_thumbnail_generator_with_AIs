@@ -97,8 +97,8 @@ def save_raw_thumbnail(image_data: bytes, output_path: Path, logger) -> Optional
             f.write(image_data)
 
         # Get dimensions for logging
-        img = Image.open(raw_path)
-        logger.info(f"Raw image saved: {raw_path.name} ({img.width}x{img.height})")
+        with Image.open(raw_path) as img:
+            logger.info(f"Raw image saved: {raw_path.name} ({img.width}x{img.height})")
 
         return raw_path
 
@@ -700,7 +700,7 @@ def generate_with_gemini(
     image: ThumbnailImage = None
 ) -> Optional[Path]:
     """
-    Generate image using Google Gemini API (Nano Banana / Nano Banana Pro).
+    Generate image using Google Gemini API (Nano Banana / Nano Banana Pro / Nano Banana 2).
 
     Args:
         prompt: Text prompt for image generation (V1) or fallback (V2)
@@ -820,13 +820,13 @@ Requirements:
             for img_path in reference_images[:max_refs]:
                 if img_path.exists():
                     try:
-                        img = Image.open(img_path)
-                        if max(img.size) > 1024:
-                            img.thumbnail((1024, 1024))
+                        with Image.open(img_path) as img:
+                            if max(img.size) > 1024:
+                                img.thumbnail((1024, 1024))
 
-                        img_buffer = io.BytesIO()
-                        img.save(img_buffer, format='JPEG', quality=85)
-                        img_bytes = img_buffer.getvalue()
+                            img_buffer = io.BytesIO()
+                            img.save(img_buffer, format='JPEG', quality=85)
+                            img_bytes = img_buffer.getvalue()
 
                         contents.append(types.Part.from_bytes(
                             data=img_bytes,
@@ -840,10 +840,10 @@ Requirements:
         contents.append(full_prompt)
 
         # Build generation config
-        # Gemini 3 Pro supports image_size and aspect_ratio for higher resolution output
-        is_gemini_3_pro = "gemini-3-pro" in gemini_model
+        # Gemini 3 Pro and Gemini 3.1 Flash support image_size and aspect_ratio
+        supports_image_config = "gemini-3-pro" in gemini_model or "gemini-3.1-flash" in gemini_model
 
-        if is_gemini_3_pro:
+        if supports_image_config:
             gen_config = types.GenerateContentConfig(
                 response_modalities=["IMAGE", "TEXT"],
                 image_config=types.ImageConfig(
@@ -851,7 +851,7 @@ Requirements:
                     image_size=GEMINI_PRO_OUTPUT_RESOLUTION,  # "1K", "2K", or "4K"
                 ),
             )
-            logger.info(f"Using Gemini 3 Pro with {GEMINI_PRO_OUTPUT_RESOLUTION} resolution (16:9)")
+            logger.info(f"Using {gemini_model} with {GEMINI_PRO_OUTPUT_RESOLUTION} resolution (16:9)")
         else:
             # Standard config for other models (gemini-2.5-flash-image, etc.)
             gen_config = types.GenerateContentConfig(
@@ -880,11 +880,10 @@ Requirements:
                                     save_raw_thumbnail(image_data, output_path, logger)
 
                                     # Load image for resizing
-                                    img = Image.open(io.BytesIO(image_data))
-
-                                    # Resize to exact thumbnail dimensions
-                                    img = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-                                    img.save(output_path, 'PNG', quality=95)
+                                    with Image.open(io.BytesIO(image_data)) as img:
+                                        # Resize to exact thumbnail dimensions
+                                        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+                                        resized.save(output_path, 'PNG', quality=95)
 
                                     logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
                                     return output_path
@@ -913,7 +912,8 @@ def generate_with_openai(
     Generate image using OpenAI GPT Image or DALL-E.
 
     Supports:
-    - gpt-image-1.5 (best quality, recommended) - up to 16 reference images
+    - gpt-image-2 (latest, multilingual text, native reasoning) - up to 16 reference images
+    - gpt-image-1.5 (high quality) - up to 16 reference images
     - gpt-image-1 (standard) - up to 16 reference images
     - gpt-image-1-mini (faster, lower cost) - up to 16 reference images
     - dall-e-3 (legacy, deprecated) - NO reference support
@@ -1005,7 +1005,7 @@ Photorealistic style, professional quality.
 """
 
         if is_gpt_image:
-            # GPT Image models (gpt-image-1, gpt-image-1.5, gpt-image-1-mini)
+            # GPT Image models (gpt-image-2, gpt-image-1.5, gpt-image-1, gpt-image-1-mini)
             response = None
 
             if has_refs:
@@ -1016,14 +1016,14 @@ Photorealistic style, professional quality.
                     if img_path.exists():
                         try:
                             # Load and resize image for efficiency
-                            img = Image.open(img_path)
-                            if max(img.size) > 1024:
-                                img.thumbnail((1024, 1024))
+                            with Image.open(img_path) as img:
+                                if max(img.size) > 1024:
+                                    img.thumbnail((1024, 1024))
 
-                            # Convert to PNG bytes (required format)
-                            img_buffer = io.BytesIO()
-                            img.save(img_buffer, format='PNG')
-                            img_buffer.seek(0)
+                                # Convert to PNG bytes (required format)
+                                img_buffer = io.BytesIO()
+                                img.save(img_buffer, format='PNG')
+                                img_buffer.seek(0)
                             ref_image_files.append(img_buffer)
                             logger.info(f"Added reference image: {img_path.name}")
                         except Exception as e:
@@ -1038,7 +1038,9 @@ Photorealistic style, professional quality.
                         for i, img_buffer in enumerate(ref_image_files)
                     ]
 
-                    # Build edit params - input_fidelity only supported on gpt-image-1 and gpt-image-1.5
+                    # Build edit params.
+                    # input_fidelity is only supported on gpt-image-1 and gpt-image-1.5.
+                    # gpt-image-2 always processes inputs at high fidelity automatically (param not allowed).
                     edit_params = {
                         "model": selected_model,
                         "image": image_tuples if len(image_tuples) > 1 else image_tuples[0],
@@ -1083,15 +1085,15 @@ Photorealistic style, professional quality.
                 save_raw_thumbnail(img_bytes, output_path, logger)
 
                 # Load and resize to exact thumbnail dimensions
-                img = Image.open(io.BytesIO(img_bytes))
-                img = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+                with Image.open(io.BytesIO(img_bytes)) as img:
+                    resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
 
-                # Save with configured format
-                save_format = OPENAI_IMAGE_FORMAT.upper()
-                if save_format == "JPG":
-                    save_format = "JPEG"
+                    # Save with configured format
+                    save_format = OPENAI_IMAGE_FORMAT.upper()
+                    if save_format == "JPG":
+                        save_format = "JPEG"
 
-                img.save(output_path, save_format, quality=95)
+                    resized.save(output_path, save_format, quality=95)
                 logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
                 return output_path
 
@@ -1119,11 +1121,9 @@ Photorealistic style, professional quality.
                     save_raw_thumbnail(img_bytes, output_path, logger)
 
                     # Load and resize to exact thumbnail dimensions
-                    img = Image.open(io.BytesIO(img_bytes))
-                    img = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-
-                    # Save
-                    img.save(output_path, 'PNG', quality=95)
+                    with Image.open(io.BytesIO(img_bytes)) as img:
+                        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+                        resized.save(output_path, 'PNG', quality=95)
                     logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
                     return output_path
 
@@ -1178,11 +1178,11 @@ def generate_with_replicate(
                     logger.info(f"Using {min(len(reference_images), max_refs)} reference image(s) for {model_short_name}")
 
                     # Resize image for efficiency
-                    img = Image.open(ref_img)
-                    if max(img.size) > 1024:
-                        img.thumbnail((1024, 1024))
-                    img_buffer = io.BytesIO()
-                    img.save(img_buffer, format='JPEG', quality=85)
+                    with Image.open(ref_img) as img:
+                        if max(img.size) > 1024:
+                            img.thumbnail((1024, 1024))
+                        img_buffer = io.BytesIO()
+                        img.save(img_buffer, format='JPEG', quality=85)
                     img_data = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
 
                     if "face-to-many" in selected_model:
@@ -1219,9 +1219,9 @@ def generate_with_replicate(
                 save_raw_thumbnail(img_bytes, output_path, logger)
 
                 # Load and resize
-                img = Image.open(io.BytesIO(img_bytes))
-                img = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-                img.save(output_path, 'PNG', quality=95)
+                with Image.open(io.BytesIO(img_bytes)) as img:
+                    resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+                    resized.save(output_path, 'PNG', quality=95)
                 logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
                 return output_path
 
@@ -1298,13 +1298,13 @@ def generate_with_poe(
                 if img_path.exists():
                     try:
                         # Load and resize image for efficiency
-                        img = Image.open(img_path)
-                        if max(img.size) > 1024:
-                            img.thumbnail((1024, 1024))
+                        with Image.open(img_path) as img:
+                            if max(img.size) > 1024:
+                                img.thumbnail((1024, 1024))
 
-                        # Convert to base64
-                        img_buffer = io.BytesIO()
-                        img.save(img_buffer, format='JPEG', quality=85)
+                            # Convert to base64
+                            img_buffer = io.BytesIO()
+                            img.save(img_buffer, format='JPEG', quality=85)
                         img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
 
                         content.append({
@@ -1458,11 +1458,9 @@ Requirements:
                     save_raw_thumbnail(img_bytes, output_path, logger)
 
                     # Load and resize to exact thumbnail dimensions
-                    img = Image.open(io.BytesIO(img_bytes))
-                    img = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-
-                    # Save
-                    img.save(output_path, 'PNG', quality=95)
+                    with Image.open(io.BytesIO(img_bytes)) as img:
+                        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+                        resized.save(output_path, 'PNG', quality=95)
                     logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
                     return output_path
 
@@ -1512,20 +1510,19 @@ def create_composite_thumbnail(
 
         # Load face frame
         if face_frame and face_frame.exists():
-            face_img = Image.open(face_frame)
+            with Image.open(face_frame) as face_img:
+                # Resize to fit nicely (about 60% of thumbnail height)
+                face_height = int(THUMBNAIL_HEIGHT * 0.8)
+                face_ratio = face_img.width / face_img.height
+                face_width = int(face_height * face_ratio)
 
-            # Resize to fit nicely (about 60% of thumbnail height)
-            face_height = int(THUMBNAIL_HEIGHT * 0.8)
-            face_ratio = face_img.width / face_img.height
-            face_width = int(face_height * face_ratio)
-
-            face_img = face_img.resize((face_width, face_height), Image.Resampling.LANCZOS)
+                face_resized = face_img.resize((face_width, face_height), Image.Resampling.LANCZOS)
 
             # Position on right side
             x_pos = THUMBNAIL_WIDTH - face_width - 20
             y_pos = (THUMBNAIL_HEIGHT - face_height) // 2
 
-            thumbnail.paste(face_img, (x_pos, y_pos))
+            thumbnail.paste(face_resized, (x_pos, y_pos))
 
         # Add gradient overlay on left for text area
         draw = ImageDraw.Draw(thumbnail)
@@ -2088,7 +2085,11 @@ if __name__ == "__main__":
     output = VideoOutput(Path("test_video.mp4"), OUTPUT_DIR)
     output.setup()
 
-    result = generate_thumbnail(test_prompt, [], output)
+    result = generate_thumbnails(
+        concepts=[],
+        best_frames=[],
+        output=output,
+    )
 
     if result:
         print(f"Thumbnail generated: {result}")

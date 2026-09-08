@@ -219,7 +219,7 @@ IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "gemini")
 # Gemini settings
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
 
-# Gemini 3 Pro output resolution (only for gemini-3-pro-image-preview)
+# Gemini 3+ output resolution (for gemini-3-pro and gemini-3.1-flash models)
 # Options: "1K" (1376x768), "2K" (2752x1536), "4K" (5504x3072) for 16:9
 # Note: gemini-2.5-flash-image does NOT support this parameter
 GEMINI_PRO_OUTPUT_RESOLUTION = os.getenv("GEMINI_PRO_OUTPUT_RESOLUTION", "2K")
@@ -244,11 +244,13 @@ POE_IMAGE_ASPECT = "16:9"
 GEMINI_MODELS = {
     "gemini-2.5-flash-image": "Fast, good quality",
     "gemini-3-pro-image-preview": "Best quality, 4K (Nano Banana Pro)",
+    "gemini-3.1-flash-image-preview": "Fast, 4K, 14 refs (Nano Banana 2)",
 }
 
 # OpenAI models for image generation
 OPENAI_MODELS = {
-    "gpt-image-1.5": "Best quality",
+    "gpt-image-2": "Latest, multilingual text, native reasoning (2026-04-21)",
+    "gpt-image-1.5": "High quality",
     "gpt-image-1": "Standard",
     "gpt-image-1-mini": "Faster, lower cost",
     "dall-e-3": "Legacy (deprecated)",
@@ -287,16 +289,20 @@ POE_MODEL_MAX_REFS = {
 
 # Maximum reference images per GEMINI model
 # gemini-3-pro-image-preview: 14 refs (up to 6 objects + 5 humans)
+# gemini-3.1-flash-image-preview: 14 refs, 5 characters (Nano Banana 2)
 # gemini-2.5-flash-image: 3 refs (recommended for best results per Google docs)
 GEMINI_MODEL_MAX_REFS = {
     "gemini-3-pro-image-preview": 14,
+    "gemini-3.1-flash-image-preview": 14,
     "gemini-2.5-flash-image": 3,
 }
 
 # Maximum reference images per OPENAI model
+# gpt-image-2: up to 16 images, always processed at high fidelity (input_fidelity param not supported)
 # gpt-image-1.5/1/mini: up to 16 images for editing/reference
 # dall-e-3: does not support reference images
 OPENAI_MODEL_MAX_REFS = {
+    "gpt-image-2": 16,
     "gpt-image-1.5": 16,
     "gpt-image-1": 16,
     "gpt-image-1-mini": 16,
@@ -387,7 +393,7 @@ For best face consistency:
 # =============================================================================
 
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8057"))
 DEBUG_MODE = os.getenv("DEBUG_MODE", "true").lower() == "true"
 
 # =============================================================================

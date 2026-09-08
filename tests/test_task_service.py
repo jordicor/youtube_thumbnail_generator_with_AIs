@@ -254,8 +254,8 @@ class TestGetTaskForVideo:
 class TestCancelTask:
     """Tests for TaskService.cancel_task()"""
 
-    async def test_cancel_analysis_resets_video_to_pending(self, test_db):
-        """Cancelling analysis should reset video status to pending."""
+    async def test_cancel_analysis_marks_video_cancelled(self, test_db):
+        """Keep cancellation visible until the worker acknowledges it."""
         service = TaskService(test_db)
         video_id = await insert_video(test_db, "test.mp4", "analyzing_faces")
 
@@ -266,7 +266,7 @@ class TestCancelTask:
         # Verify video status was reset
         async with test_db.execute("SELECT status FROM videos WHERE id = ?", (video_id,)) as cursor:
             row = await cursor.fetchone()
-            assert row[0] == 'pending'
+            assert row[0] == 'cancelled'
 
     async def test_cancel_generation_marks_job_cancelled(self, test_db):
         """Cancelling generation should mark job as cancelled."""

@@ -63,7 +63,7 @@ Switch between image generation providers based on your needs:
 | Provider | Best Models | Max References | Strengths |
 |----------|-------------|----------------|-----------|
 | **Google Gemini** | gemini-3-pro-image-preview | 14 images | Best identity preservation |
-| **OpenAI** | gpt-image-1.5 | 16 images | High fidelity |
+| **OpenAI** | gpt-image-2 | 16 images | Multilingual text, native reasoning |
 | **Poe** | nanobananapro, flux2pro | 14 images | Fast, reliable |
 | **Replicate** | FLUX 1.1 Pro | 1 image | Open-source option |
 
@@ -136,8 +136,8 @@ Server-Sent Events (SSE) provide instant feedback:
 
 ```bash
 # Clone the repository
-git clone https://github.com/jordicor/youtube_thumbnail_generator.git
-cd youtube_thumbnail_generator
+git clone https://github.com/jordicor/youtube_thumbnail_generator_with_AIs.git
+cd youtube_thumbnail_generator_with_AIs
 
 # Create virtual environment
 python -m venv venv
@@ -203,9 +203,7 @@ python main.py
 # Server starts at http://localhost:8000
 ```
 
-> **Port Conflict Note:** Both Gran Sabio and this project default to port 8000. You have two options:
-> - Run Gran Sabio on a different port: `python main.py --port 8001` and update `GRANSABIO_LLM_URL=http://localhost:8001`
-> - Or run this project on a different port: `uvicorn api.main:app --port 8080`
+> **Note:** This project defaults to port 8057 to avoid conflicts with Gran Sabio (which uses 8000).
 
 **4. Configure this project to use Gran Sabio:**
 
@@ -231,10 +229,18 @@ The CLI processes videos synchronously without a job queue, so Redis and Gran Sa
 Make sure Redis and Gran Sabio are running first, then:
 
 ```bash
-python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8057
 ```
 
-Open http://localhost:8000 in your browser.
+Open http://localhost:8057 in your browser.
+
+Start the job worker in a second terminal, using the same virtual environment:
+
+```bash
+arq workers.main.WorkerSettings
+```
+
+The web server accepts requests; the worker processes analysis and generation jobs.
 
 ### Run the CLI (No Redis/Gran Sabio needed)
 
@@ -326,7 +332,7 @@ python main.py
 python main.py --single "my_video.mp4"
 
 # Custom generation settings
-python main.py --num-prompts 5 --num-variations 3 --image-provider poe
+python main.py --num-images 5 --image-provider poe
 
 # Force regeneration
 python main.py --force-thumbnails
@@ -350,7 +356,21 @@ youtube_thumbnail_generator/
 └── output/                 # Generated files per video
 ```
 
-For detailed technical documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
+The web server queues work through `job_queue/`; `workers/` runs the analysis and
+generation services. Configure paths and providers using `.env.example`.
+
+### Tests
+
+Use Python 3.11 or later for the test suite, install `requirements.txt`, and make
+Node.js available on `PATH` for the modal regression tests. Node.js is only a test
+dependency; the application does not require a Node.js server.
+
+```bash
+python -m pytest tests
+```
+
+The tests use synthetic fixtures and mocked external services. Do not supply
+personal videos or production API credentials as test data.
 
 ---
 

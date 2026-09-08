@@ -200,9 +200,11 @@ def detect_scenes(video_path: Path, output: VideoOutput) -> Optional[SceneDetect
             logger.warning("No scenes detected, treating entire video as one scene")
             # Get video info to create a single scene
             cap = cv2.VideoCapture(str(video_path))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            cap.release()
+            try:
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            finally:
+                cap.release()
 
             scene_list = [(
                 FrameTimecode(0, fps=fps),
@@ -316,9 +318,8 @@ def extract_scene_frames(video_path: Path, result: SceneDetectionResult, output:
 
     extracted_frames = []
 
+    cap = cv2.VideoCapture(str(video_path))
     try:
-        cap = cv2.VideoCapture(str(video_path))
-
         if not cap.isOpened():
             logger.error("Could not open video file")
             return []
@@ -347,14 +348,14 @@ def extract_scene_frames(video_path: Path, result: SceneDetectionResult, output:
             else:
                 logger.warning(f"Could not read frame {frame_idx}")
 
-        cap.release()
-
         logger.success(f"Extracted {len(extracted_frames)} frames")
         return extracted_frames
 
     except Exception as e:
         logger.error(f"Frame extraction failed: {e}")
         return []
+    finally:
+        cap.release()
 
 
 # =============================================================================

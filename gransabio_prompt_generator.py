@@ -1189,20 +1189,22 @@ def get_prompt_history_for_video(video_id: int, limit: int = 50) -> List[str]:
         from config import DATABASE_PATH
 
         conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
-        cursor = conn.cursor()
+        try:
+            cursor = conn.cursor()
 
-        # Get previous prompts from thumbnails table
-        cursor.execute("""
-            SELECT DISTINCT t.prompt_text, t.suggested_title, t.text_overlay
-            FROM thumbnails t
-            JOIN generation_jobs gj ON t.job_id = gj.id
-            WHERE gj.video_id = ?
-            ORDER BY t.id DESC
-            LIMIT ?
-        """, [video_id, limit])
+            # Get previous prompts from thumbnails table
+            cursor.execute("""
+                SELECT DISTINCT t.prompt_text, t.suggested_title, t.text_overlay
+                FROM thumbnails t
+                JOIN generation_jobs gj ON t.job_id = gj.id
+                WHERE gj.video_id = ?
+                ORDER BY t.id DESC
+                LIMIT ?
+            """, [video_id, limit])
 
-        rows = cursor.fetchall()
-        conn.close()
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
 
         history = []
         for row in rows:

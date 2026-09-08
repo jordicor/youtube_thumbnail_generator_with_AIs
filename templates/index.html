@@ -278,7 +278,7 @@
                 const dirId = parseInt(btn.dataset.id);
                 const confirmed = await ThumbnailApp.showModal({
                     title: t('directory.delete_title'),
-                    message: t('directory.delete_confirm_short') + '<br><br>' + t('directory.delete_videos_remain'),
+                    htmlMessage: t('directory.delete_confirm_short') + '<br><br>' + t('directory.delete_videos_remain'),
                     type: 'warning',
                     confirmText: t('common.delete'),
                     cancelText: t('common.cancel')
@@ -919,12 +919,18 @@
     // ========================================================================
 
     let taskQueueUnsubscribe = null;
+    let _taskQueueRetryCount = 0;
+    const _taskQueueMaxRetries = 50;
 
-    // Setup integration with global TaskQueueManager
+    // M52: Setup integration with global TaskQueueManager (bounded retry)
     function setupTaskQueueIntegration() {
         if (!window.TaskQueue) {
-            console.warn('TaskQueue not available, retrying...');
-            setTimeout(setupTaskQueueIntegration, 500);
+            _taskQueueRetryCount++;
+            if (_taskQueueRetryCount >= _taskQueueMaxRetries) {
+                console.warn(`TaskQueue not available after ${_taskQueueMaxRetries} retries (${_taskQueueMaxRetries * 100}ms), giving up`);
+                return;
+            }
+            setTimeout(setupTaskQueueIntegration, 100);
             return;
         }
 

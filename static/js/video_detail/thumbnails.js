@@ -7,6 +7,10 @@
 import { CONFIG } from './constants.js';
 import { state } from './state.js';
 
+// H8: Store scroll indicator handler references for cleanup
+let _thumbScrollHandler = null;
+let _thumbResizeHandler = null;
+
 // =========================================================================
 // THUMBNAIL LOADING
 // =========================================================================
@@ -23,6 +27,8 @@ export async function loadExisting() {
 
     try {
         const response = await fetch(`/api/thumbnails/video/${state.videoId}`);
+        // H7: Check response before parsing
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
 
         state.existingThumbnails = data.thumbnails || [];
@@ -66,6 +72,14 @@ function setupScrollIndicator() {
 
     if (!wrapper || !container) return;
 
+    // H8: Remove old event listeners before adding new ones
+    if (_thumbScrollHandler) {
+        container.removeEventListener('scroll', _thumbScrollHandler);
+    }
+    if (_thumbResizeHandler) {
+        window.removeEventListener('resize', _thumbResizeHandler);
+    }
+
     const updateScrollState = () => {
         const hasScroll = container.scrollHeight > container.clientHeight;
         const scrolledToBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 10;
@@ -74,14 +88,18 @@ function setupScrollIndicator() {
         wrapper.classList.toggle('scrolled-bottom', scrolledToBottom);
     };
 
+    // Store references for future cleanup
+    _thumbScrollHandler = updateScrollState;
+    _thumbResizeHandler = updateScrollState;
+
     // Initial check (with slight delay to ensure rendering)
     setTimeout(updateScrollState, 100);
 
     // Update on scroll
-    container.addEventListener('scroll', updateScrollState);
+    container.addEventListener('scroll', _thumbScrollHandler);
 
     // Update on resize
-    window.addEventListener('resize', updateScrollState);
+    window.addEventListener('resize', _thumbResizeHandler);
 }
 
 /**

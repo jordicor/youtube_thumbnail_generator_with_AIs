@@ -4,12 +4,18 @@ Generation Service
 Business logic for thumbnail generation operations.
 """
 
+import asyncio
+import uuid
 from pathlib import Path
 from typing import Optional, List, Callable
 import aiosqlite
 import sqlite3
 import shutil
 import logging
+from contextlib import closing
+
+from PIL import Image as _PILImage
+_PILImage.MAX_IMAGE_PIXELS = 178956970  # Default PIL decompression bomb limit
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +35,10 @@ class ImageGenerationError(Exception):
     pass
 
 
+class GenerationNotReadyError(Exception):
+    """Raised when a video cannot be claimed for a new generation job."""
+
+
 class GenerationService:
     """Service for thumbnail generation operations."""
 
@@ -45,13 +55,13 @@ class GenerationService:
                 return dict(zip(columns, row))
             return None
 
-    async def get_cluster(self, video_id: int, cluster_index: int) -> Optional[dict]:
+    async def get_cluster(self, video_id: int, cluster_index: int, view_mode: str = 'person') -> Optional[dict]:
         """Get a specific cluster."""
         query = """
             SELECT * FROM clusters
-            WHERE video_id = ? AND cluster_index = ?
+            WHERE video_id = ? AND cluster_index = ? AND view_mode = ?
         """
-        async with self.db.execute(query, [video_id, cluster_index]) as cursor:
+        async with self.db.execute(query, [video_id, cluster_index, view_mode]) as cursor:
             row = await cursor.fetchone()
             if row:
                 columns = [description[0] for description in cursor.description]
@@ -103,23 +113,41 @@ class GenerationService:
         num_images: int = 5,
         preferred_expression: Optional[str] = None
     ) -> dict:
-        """Create a new generation job."""
+        """Atomically claim the video and create its owning generation job."""
         query = """
             INSERT INTO generation_jobs
             (video_id, cluster_id, num_images, preferred_expression, status)
             VALUES (?, ?, ?, ?, 'pending')
         """
 
-        cursor = await self.db.execute(query, [
-            video_id,
-            cluster_id,
-            num_images,
-            preferred_expression
-        ])
-        await self.db.commit()
+        job_id = None
+        try:
+            async with self.db.execute(
+                "UPDATE videos SET status = 'generating' "
+                "WHERE id = ? AND status IN ('analyzed', 'completed')",
+                [video_id],
+            ) as claim:
+                if claim.rowcount != 1:
+                    raise GenerationNotReadyError("Video is not ready for generation")
+            cursor = await self.db.execute(query, [
+                video_id,
+                cluster_id,
+                num_images,
+                preferred_expression
+            ])
+            job_id = cursor.lastrowid
+            await cursor.close()
+            await self.db.commit()
+        except BaseException:
+            await self.db.rollback()
+            # The SQLite thread may finish commit just as this coroutine is
+            # cancelled. If the row survived rollback, compensate that job.
+            if job_id is not None:
+                await self.fail_enqueue(job_id, 'Generation request stopped before enqueue')
+            raise
 
         return {
-            "id": cursor.lastrowid,
+            "id": job_id,
             "video_id": video_id,
             "cluster_id": cluster_id,
             "status": "pending"
@@ -130,24 +158,92 @@ class GenerationService:
         job_id: int,
         status: str,
         progress: int = 0,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        *,
+        release_video: bool = True,
     ):
-        """Update job status and progress."""
-        if error_message:
-            query = """
+        """Transition an active job; terminal states cannot be overwritten."""
+        terminal = status in ('completed', 'cancelled', 'error')
+        try:
+            async with self.db.execute("""
                 UPDATE generation_jobs
-                SET status = ?, progress = ?, error_message = ?
-                WHERE id = ?
-            """
-            await self.db.execute(query, [status, progress, error_message, job_id])
-        else:
-            query = """
-                UPDATE generation_jobs
-                SET status = ?, progress = ?
-                WHERE id = ?
-            """
-            await self.db.execute(query, [status, progress, job_id])
-        await self.db.commit()
+                SET status = ?, progress = ?, error_message = ?,
+                    completed_at = CASE WHEN ? = 'completed'
+                        THEN CURRENT_TIMESTAMP ELSE completed_at END
+                WHERE id = ? AND status IN ('pending', 'transcribing', 'prompting', 'generating')
+            """, [status, progress, error_message, status, job_id]) as cursor:
+                changed = cursor.rowcount == 1
+            if terminal and release_video:
+                # The most recently created job owns the video's generating
+                # state. A delayed worker must never release a newer job.
+                await self.db.execute("""
+                    UPDATE videos
+                    SET status = CASE WHEN EXISTS (
+                        SELECT 1 FROM generation_jobs done
+                        WHERE done.video_id = videos.id AND done.status = 'completed'
+                    ) THEN 'completed' ELSE 'analyzed' END
+                    WHERE status = 'generating'
+                      AND id = (SELECT video_id FROM generation_jobs WHERE id = ?)
+                      AND ? = (SELECT MAX(id) FROM generation_jobs WHERE video_id = videos.id)
+                      AND EXISTS (SELECT 1 FROM generation_jobs
+                          WHERE id = ? AND status = ?)
+                """, [job_id, job_id, job_id, status])
+            await self.db.commit()
+        except BaseException:
+            await self.db.rollback()
+            raise
+        if not changed and not terminal:
+            raise GenerationCancelledError(f"Job {job_id} is no longer active")
+        return changed
+
+    async def _run_generation_step(self, job_id, function, *args):
+        """Do not release shared video output while an executor is still writing."""
+        future = asyncio.get_running_loop().run_in_executor(None, function, *args)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Cancelling an asyncio future cannot stop its underlying thread.
+            # Keep ownership until the synchronous stage has actually exited.
+            try:
+                await self.update_job_status(job_id, 'cancelled', release_video=False)
+            finally:
+                while not future.done():
+                    try:
+                        await asyncio.shield(future)
+                    except asyncio.CancelledError:
+                        continue
+                    except GenerationCancelledError:
+                        break
+                try:
+                    future.result()
+                except GenerationCancelledError:
+                    pass
+            raise
+
+    @staticmethod
+    def save_generation_progress(database_path, job_id, progress, thumbnail_info=None):
+        """Persist progress atomically and always close the callback connection."""
+        with closing(sqlite3.connect(str(database_path), timeout=30)) as conn:
+            with conn:
+                cursor = conn.execute(
+                    "UPDATE generation_jobs SET progress = ? "
+                    "WHERE id = ? AND status = 'generating'",
+                    [progress, job_id],
+                )
+                if cursor.rowcount != 1:
+                    raise GenerationCancelledError(f"Job {job_id} is no longer generating")
+                if thumbnail_info and thumbnail_info.get('path'):
+                    img = thumbnail_info.get('image')
+                    conn.execute("""
+                        INSERT INTO thumbnails
+                        (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, [
+                        job_id, thumbnail_info['image_index'], str(thumbnail_info['path']),
+                        img.image_prompt if img else None,
+                        img.suggested_title if img else None,
+                        img.text_overlay if img else None,
+                    ])
 
     async def run_generation_pipeline(
         self,
@@ -237,7 +333,9 @@ class GenerationService:
             if force_transcription:
                 output.transcription_file.unlink(missing_ok=True)
 
-            transcription = transcribe_video(video_path, output)
+            transcription = await self._run_generation_step(
+                job_id, transcribe_video, video_path, output
+            )
 
             if not transcription:
                 transcription = video_path.stem
@@ -342,7 +440,9 @@ class GenerationService:
             # (user uploaded a style guide, inserted at position 0 of ref_images_for_prompts)
             has_external_style_ref_for_prompts = should_include_external and bool(reference_image_base64)
 
-            thumbnail_images = generate_thumbnail_images(
+            from functools import partial
+            _gen_prompts_fn = partial(
+                generate_thumbnail_images,
                 transcription=transcription,
                 video_title=video_path.stem,
                 output=output,
@@ -354,6 +454,7 @@ class GenerationService:
                 reference_images_base64=ref_images_for_prompts if ref_images_for_prompts else None,
                 has_style_reference=has_external_style_ref_for_prompts
             )
+            thumbnail_images = await self._run_generation_step(job_id, _gen_prompts_fn)
 
             if not thumbnail_images:
                 error_msg = 'Prompt generation failed'
@@ -375,7 +476,8 @@ class GenerationService:
             if reference_image_base64 and reference_image_include_in_refs:
                 external_ref_path = self._save_temp_reference_image(
                     reference_image_base64,
-                    output.output_dir
+                    output.output_dir,
+                    job_id,
                 )
                 if external_ref_path:
                     # Add external reference if it fits (frontend should have validated this)
@@ -408,51 +510,12 @@ class GenerationService:
                 else:
                     overall_progress = 50
 
-                # Use sync sqlite3 to update (generate_thumbnails is blocking)
-                # timeout=30 prevents indefinite blocking if DB is locked
-                # isolation_level=None enables autocommit for faster writes
-                conn = None
-                try:
-                    conn = sqlite3.connect(
-                        str(DATABASE_PATH),
-                        timeout=30,
-                        isolation_level=None
-                    )
-                    # Enable WAL mode for better concurrency
-                    conn.execute("PRAGMA journal_mode=WAL")
-                    conn.execute("PRAGMA busy_timeout=30000")
+                self.save_generation_progress(
+                    DATABASE_PATH, job_id, overall_progress, thumbnail_info
+                )
 
-                    # Update progress
-                    conn.execute(
-                        "UPDATE generation_jobs SET progress = ? WHERE id = ?",
-                        [overall_progress, job_id]
-                    )
-
-                    # Insert thumbnail if generated successfully
-                    if thumbnail_info and thumbnail_info.get('path'):
-                        img = thumbnail_info.get('image')
-                        conn.execute("""
-                            INSERT INTO thumbnails
-                            (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, [
-                            job_id,
-                            thumbnail_info['image_index'],
-                            str(thumbnail_info['path']),
-                            img.image_prompt if img else None,
-                            img.suggested_title if img else None,
-                            img.text_overlay if img else None
-                        ])
-
-                except GenerationCancelledError:
-                    raise  # Re-raise cancellation to stop generation
-                except Exception:
-                    pass  # Don't fail generation if progress/thumbnail update fails
-                finally:
-                    if conn:
-                        conn.close()
-
-            thumbnail_paths = generate_thumbnails_from_images(
+            _gen_thumbs_fn = partial(
+                generate_thumbnails_from_images,
                 images=thumbnail_images,
                 best_frames=best_frames,
                 output=output,
@@ -464,6 +527,7 @@ class GenerationService:
                 has_external_style_ref=has_external_style_ref,
                 cancellation_check=cancellation_check
             )
+            thumbnail_paths = await self._run_generation_step(job_id, _gen_thumbs_fn)
 
             if not thumbnail_paths:
                 error_msg = 'Thumbnail generation failed'
@@ -471,26 +535,14 @@ class GenerationService:
                 await self.update_job_status(job_id, 'error', 0, error_msg)
                 raise ImageGenerationError(f"Job {job_id}: {error_msg}")
 
-            # Thumbnails are already saved to database in progress_callback during generation
-            # Just update video status
-            await self.db.execute(
-                "UPDATE videos SET status = 'completed' WHERE id = ?",
-                [job['video_id']]
-            )
-
-            # Mark job as completed
-            await self.db.execute("""
-                UPDATE generation_jobs
-                SET status = 'completed', progress = 100, completed_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            """, [job_id])
-
-            await self.db.commit()
+            # A cancellation that won the race must remain terminal.
+            if not await self.update_job_status(job_id, 'completed', 100):
+                raise GenerationCancelledError(f"Job {job_id} stopped before completion")
 
         except GenerationCancelledError as e:
             # Handle cancellation gracefully
             logger.info(f"Generation job {job_id} cancelled: {e}")
-            await self.update_job_status(job_id, 'cancelled')
+            await self.update_job_status(job_id, 'cancelled', release_video=False)
             # Don't raise - just return so worker can handle cleanup
             return
 
@@ -557,15 +609,29 @@ class GenerationService:
 
     async def cancel_job(self, job_id: int) -> bool:
         """Cancel a generation job."""
-        job = await self.get_job(job_id)
-        if not job:
-            return False
+        return await self._stop_job(job_id, 'cancelled')
 
-        if job['status'] in ('completed', 'cancelled', 'error'):
-            return False
+    async def fail_enqueue(self, job_id: int, error_message: str) -> bool:
+        """Stop a failed enqueue, including an ambiguous accepted-then-timeout."""
+        return await self._stop_job(job_id, 'error', error_message)
 
-        await self.update_job_status(job_id, 'cancelled')
-        return True
+    async def _stop_job(self, job_id, pending_status, error_message=None):
+        # Serialize the read with the worker's pending -> transcribing claim.
+        # Pending jobs can release immediately; running stages must drain first.
+        try:
+            await self.db.execute('BEGIN IMMEDIATE')
+            job = await self.get_job(job_id)
+            if not job or job['status'] in ('completed', 'cancelled', 'error'):
+                await self.db.rollback()
+                return False
+            pending = job['status'] == 'pending'
+            return await self.update_job_status(
+                job_id, pending_status if pending else 'cancelled',
+                error_message=error_message, release_video=pending,
+            )
+        except BaseException:
+            await self.db.rollback()
+            raise
 
     async def get_video_jobs(self, video_id: int) -> List[dict]:
         """Get all generation jobs for a video."""
@@ -626,7 +692,8 @@ class GenerationService:
     def _save_temp_reference_image(
         self,
         base64_data: str,
-        output_dir: Path
+        output_dir: Path,
+        job_id: int,
     ) -> Optional[Path]:
         """
         Save base64 image to temporary file for reference.
@@ -634,6 +701,7 @@ class GenerationService:
         Args:
             base64_data: Base64 encoded image data
             output_dir: Directory to save the image
+            job_id: Owner of the temporary reference directory
 
         Returns:
             Path to saved image or None if failed
@@ -645,28 +713,37 @@ class GenerationService:
 
             # Decode base64
             img_bytes = base64.b64decode(base64_data)
-            img = Image.open(io.BytesIO(img_bytes))
+            buf = io.BytesIO(img_bytes)
+            try:
+                img = Image.open(buf)
 
-            # Resize if too large
-            if max(img.size) > 1024:
-                img.thumbnail((1024, 1024))
+                # M50: Validate image dimensions against decompression bomb
+                width, height = img.size
+                if width > 8192 or height > 8192:
+                    raise ValueError(
+                        f"Image dimensions {width}x{height} exceed maximum 8192x8192"
+                    )
 
-            # Convert to RGB if necessary (e.g., for PNG with transparency)
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
+                # Resize if too large
+                if max(img.size) > 1024:
+                    img.thumbnail((1024, 1024))
 
-            # Save to temp location
-            ref_dir = output_dir / "temp_refs"
-            ref_dir.mkdir(exist_ok=True)
-            ref_path = ref_dir / "external_reference.jpg"
+                # Convert to RGB if necessary (e.g., for PNG with transparency)
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
 
-            img.save(ref_path, 'JPEG', quality=90)
-            return ref_path
+                # Save to temp location with unique filename to avoid overwrites
+                ref_dir = output_dir / "temp_refs" / f"job_{job_id}"
+                ref_dir.mkdir(parents=True, exist_ok=True)
+                ref_path = ref_dir / f"external_reference_{uuid.uuid4().hex[:8]}.jpg"
+
+                img.save(ref_path, 'JPEG', quality=90)
+                return ref_path
+            finally:
+                img.close()
+                buf.close()
 
         except Exception as e:
-            # Log but don't fail - just skip the external reference
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"Could not save external reference image: {e}")
             return None
 
@@ -688,30 +765,30 @@ class GenerationService:
         import base64
         from PIL import Image
         import io
-        import logging
 
-        logger = logging.getLogger(__name__)
         result = []
 
         for path in frame_paths:
             if not path.exists():
                 continue
             try:
-                img = Image.open(path)
+                with Image.open(path) as img:
+                    # Resize if too large
+                    if max(img.size) > max_size:
+                        img.thumbnail((max_size, max_size))
 
-                # Resize if too large
-                if max(img.size) > max_size:
-                    img.thumbnail((max_size, max_size))
+                    # Convert to RGB if necessary
+                    if img.mode in ('RGBA', 'P'):
+                        img = img.convert('RGB')
 
-                # Convert to RGB if necessary
-                if img.mode in ('RGBA', 'P'):
-                    img = img.convert('RGB')
-
-                # Convert to base64
-                buffer = io.BytesIO()
-                img.save(buffer, format='JPEG', quality=85)
-                b64 = base64.b64encode(buffer.getvalue()).decode()
-                result.append(b64)
+                    # Convert to base64
+                    buffer = io.BytesIO()
+                    try:
+                        img.save(buffer, format='JPEG', quality=85)
+                        b64 = base64.b64encode(buffer.getvalue()).decode()
+                        result.append(b64)
+                    finally:
+                        buffer.close()
 
             except Exception as e:
                 logger.warning(f"Could not convert frame {path}: {e}")
@@ -725,7 +802,7 @@ class GenerationService:
 
         This method removes incomplete files and database records that were
         created during an interrupted generation job. It always cleans:
-        - temp_refs/ directory (temporary reference images)
+        - This job's temp_refs/job_ID/ directory (temporary reference images)
         - Thumbnail files that were generated for this job
         - Thumbnail database records for this job
 
@@ -742,6 +819,7 @@ class GenerationService:
             }
         """
         from utils import VideoOutput
+        from config import OUTPUT_DIR
 
         cleaned_files = []
         cleaned_db = 0
@@ -759,13 +837,22 @@ class GenerationService:
         if not video:
             return {"cleaned_files": [], "cleaned_db_records": 0, "job_status_was": job_status}
 
-        filename = video.get("filename", "")
-        output = VideoOutput(filename)
+        # A stopped worker retains its claim until cleanup finishes. A late
+        # duplicate delivery must never remove artifacts of a newer generation.
+        async with self.db.execute(
+            'SELECT MAX(id) FROM generation_jobs WHERE video_id = ?', [video_id]
+        ) as cursor:
+            latest_job_id = (await cursor.fetchone())[0]
+        if video['status'] != 'generating' or latest_job_id != job_id:
+            return {"cleaned_files": [], "cleaned_db_records": 0, "job_status_was": job_status}
+
+        video_path = Path(video.get("filepath", ""))
+        output = VideoOutput(video_path, Path(OUTPUT_DIR))
 
         logger.info(f"Cleaning up partial generation for job {job_id} (status was: {job_status})")
 
-        # 1. ALWAYS clean temp_refs/ directory
-        temp_refs_dir = output.output_dir / "temp_refs"
+        # 1. Never delete temporary references belonging to a newer job.
+        temp_refs_dir = output.output_dir / "temp_refs" / f"job_{job_id}"
         if temp_refs_dir.exists():
             try:
                 shutil.rmtree(temp_refs_dir, ignore_errors=True)

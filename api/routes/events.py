@@ -5,6 +5,7 @@ Real-time progress updates for analysis and generation operations.
 """
 
 import asyncio
+import json
 import orjson
 from typing import AsyncGenerator, Optional
 from fastapi import APIRouter, Request
@@ -367,10 +368,10 @@ async def stream_all_videos_status(request: Request):
                 try:
                     async with get_db() as db:
                         # Get all videos
-                        cursor = await db.execute(
+                        async with db.execute(
                             "SELECT id, filename, status FROM videos ORDER BY updated_at DESC LIMIT 50"
-                        )
-                        rows = await cursor.fetchall()
+                        ) as cursor:
+                            rows = await cursor.fetchall()
 
                     for row in rows:
                         video_id = row[0]
@@ -392,6 +393,7 @@ async def stream_all_videos_status(request: Request):
                 except Exception:
                     error_count += 1
                     if error_count >= 5:
+                        yield f"event: error\ndata: {json.dumps({'error': 'Too many errors, closing stream'})}\n\n"
                         break
 
                 await asyncio.sleep(2)

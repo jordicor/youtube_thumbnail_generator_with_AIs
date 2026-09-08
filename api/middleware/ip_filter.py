@@ -62,6 +62,8 @@ class LANOnlyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Get client IP
+        # Note: if deployed behind a reverse proxy, request.client.host will be the
+        # proxy IP. Consider X-Forwarded-For in that case.
         client_ip = request.client.host if request.client else None
 
         if not client_ip:

@@ -5,6 +5,7 @@ These tasks are executed by arq workers and communicate progress via Redis pub/s
 """
 
 import logging
+import asyncio
 import sys
 from pathlib import Path
 from typing import Optional, Any
@@ -15,7 +16,11 @@ sys.path.insert(0, str(ROOT_DIR))
 
 from database.db import get_db
 from services.analysis_service import AnalysisService
-from services.generation_service import GenerationService
+from services.generation_service import (
+    GenerationService,
+    PromptGenerationError,
+    ImageGenerationError,
+)
 from job_queue.pubsub import (
     publish_progress,
     publish_event,
@@ -48,18 +53,19 @@ def create_sync_cancellation_check(job_id: int):
     from config import DATABASE_PATH
 
     def check() -> bool:
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
         try:
-            conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
             cursor = conn.execute(
                 "SELECT status FROM generation_jobs WHERE id = ?",
                 [job_id]
             )
             row = cursor.fetchone()
-            conn.close()
             return row and row[0] == 'cancelled'
         except Exception as e:
             logger.warning(f"Error in sync cancellation check for job {job_id}: {e}")
             return False
+        finally:
+            conn.close()
 
     return check
 
@@ -80,19 +86,27 @@ def create_sync_analysis_cancellation_check(video_id: int):
     import sqlite3
     from config import DATABASE_PATH
 
+    # Active analysis states; if video is NOT in one of these, treat as cancelled
+    ACTIVE_ANALYSIS_STATES = (
+        'analyzing', 'analyzing_scenes', 'analyzing_faces',
+        'clustering', 'transcribing',
+    )
+
     def check() -> bool:
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
         try:
-            conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
             cursor = conn.execute(
                 "SELECT status FROM videos WHERE id = ?",
                 [video_id]
             )
             row = cursor.fetchone()
-            conn.close()
-            return row and row[0] == 'cancelled'
+            # If video is no longer in an active analysis state, it was cancelled
+            return row is not None and row[0] not in ACTIVE_ANALYSIS_STATES
         except Exception as e:
             logger.warning(f"Error in sync cancellation check for video {video_id}: {e}")
             return False
+        finally:
+            conn.close()
 
     return check
 
@@ -174,6 +188,7 @@ async def handle_cancellation(
             else:  # generation
                 service = GenerationService(db)
                 cleanup_result = await service.cleanup_partial_generation(task_id)
+                await service.update_job_status(task_id, 'cancelled')
 
         if cleanup_result.get("cleaned_files"):
             logger.info(
@@ -489,20 +504,16 @@ async def run_generation(
                 num_images = job_info.get("num_images", 0)
                 video = await service.get_video(video_id)
                 video_name = video.get("filename", "") if video else ""
-    except Exception:
-        pass
+        # Check if already cancelled before starting.
+        if await check_generation_cancelled(job_id):
+            return await handle_cancellation(
+                task_type="generation",
+                task_id=job_id,
+                video_id=video_id,
+                video_name=video_name,
+                arq_job_id=arq_job_id
+            )
 
-    # Check if already cancelled before starting
-    if await check_generation_cancelled(job_id):
-        return await handle_cancellation(
-            task_type="generation",
-            task_id=job_id,
-            video_id=video_id,
-            video_name=video_name,
-            arq_job_id=arq_job_id
-        )
-
-    try:
         # Notify start (specific channel)
         await publish_progress(
             CHANNEL_GENERATION,
@@ -628,17 +639,20 @@ async def run_generation(
             logger.error(f"[arq:{arq_job_id}] Generation failed for job {job_id}: {error_message}")
             return {"status": "error", "job_id": job_id, "error": error_message}
 
-    except Exception as e:
-        error_msg = str(e)
-        logger.exception(f"[arq:{arq_job_id}] Generation error for job {job_id}: {error_msg}")
+    except asyncio.CancelledError:
+        # arq timeouts/shutdowns cancel the coroutine rather than raising an
+        # Exception. Release this job without overwriting a newer generation.
+        async with get_db() as db:
+            await GenerationService(db).update_job_status(
+                job_id, "error", 0, "Generation worker was interrupted"
+            )
+        raise
 
-        # Update job status to error
-        try:
-            async with get_db() as db:
-                service = GenerationService(db)
-                await service.update_job_status(job_id, "error", 0, error_msg)
-        except Exception:
-            pass
+    except (PromptGenerationError, ImageGenerationError) as e:
+        # These exceptions are raised AFTER the job status has been set to 'error' in the database.
+        # We just need to notify via events and re-raise so arq counts this as j_failed (not j_complete).
+        error_msg = str(e)
+        logger.error(f"[arq:{arq_job_id}] Generation failed for job {job_id}: {error_msg}")
 
         # Notify error (specific channel)
         await publish_event(
@@ -660,4 +674,47 @@ async def run_generation(
             error_message=error_msg
         )
 
-        return {"status": "error", "job_id": job_id, "error": error_msg}
+        # Re-raise so arq registers this as a failed job (j_failed), not completed
+        raise
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.exception(f"[arq:{arq_job_id}] Generation error for job {job_id}: {error_msg}")
+
+        # Persist the failure and release its video before reporting it.
+        async with get_db() as db:
+            service = GenerationService(db)
+            await service.update_job_status(job_id, "error", 0, error_msg)
+
+        # Notify error (specific channel)
+        await publish_event(
+            CHANNEL_GENERATION,
+            "error",
+            {"status": "error", "error": error_msg},
+            job_id=job_id
+        )
+
+        # Notify error (global task channel)
+        await publish_task_event(
+            task_type="generation",
+            event_type="task_error",
+            task_id=job_id,
+            video_id=video_id,
+            video_name=video_name,
+            status="error",
+            progress=0,
+            error_message=error_msg
+        )
+
+        # Re-raise so arq registers this as a failed job
+        raise
+
+    finally:
+        # The pipeline drains any synchronous executor before it exits. Keep
+        # cancellation ownership through cleanup, then make the video retryable.
+        async with get_db() as db:
+            service = GenerationService(db)
+            job = await service.get_job(job_id)
+            if job and job['status'] == 'cancelled':
+                await service.cleanup_partial_generation(job_id)
+                await service.update_job_status(job_id, 'cancelled')

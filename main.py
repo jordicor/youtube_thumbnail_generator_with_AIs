@@ -48,8 +48,8 @@ from utils import (
 from scene_detection import process_video_scenes
 from face_extraction import process_faces
 from transcription import transcribe_video
-from prompt_generation import generate_thumbnail_prompts
-from image_generation import generate_thumbnails
+from prompt_generation import generate_thumbnail_prompts, ThumbnailImage
+from image_generation import generate_thumbnails_from_images
 
 # Setup main logger
 logger = setup_logger("main", LOG_FILE, LOG_LEVEL)
@@ -227,16 +227,31 @@ def process_single_video(
         # Step 5: Image Generation
         logger.info(f"\n[Step 5/5] Generating {n_images} Thumbnail Images...")
 
-        thumbnail_paths = generate_thumbnails(
-            prompts=thumbnail_prompts,
+        # Convert ThumbnailPrompt (legacy flat) to ThumbnailImage for generation
+        thumbnail_images = [
+            ThumbnailImage(
+                image_index=i + 1,
+                concept_name=p.suggested_title[:30],
+                thumbnail_concept=p.thumbnail_concept,
+                suggested_title=p.suggested_title,
+                image_prompt=p.image_prompt,
+                text_overlay=p.text_overlay,
+                mood=p.mood,
+                colors=p.colors,
+                key_topics=p.key_topics,
+            )
+            for i, p in enumerate(thumbnail_prompts)
+        ]
+
+        thumbnail_paths = generate_thumbnails_from_images(
+            images=thumbnail_images,
             best_frames=reference_frames,
             output=output,
-            num_variations_per_prompt=1,  # One image per prompt (no variations)
             use_composite=use_composite,
             gemini_model=selected_gemini_model,
             openai_model=openai_model,
             poe_model=poe_model,
-            image_provider=image_provider
+            image_provider=image_provider,
         )
 
         if not thumbnail_paths:
@@ -527,21 +542,21 @@ Examples:
         '--image-provider',
         choices=['gemini', 'openai', 'replicate', 'poe'],
         default=None,
-        help=f'Image generation provider (default from config: {IMAGE_PROVIDER}). Reference image support: gemini=YES, poe=YES, replicate=YES, openai=NO'
+        help=f'Image generation provider (default from config: {IMAGE_PROVIDER}). Reference image support depends on the selected model; GPT Image supports references, DALL-E 3 does not.'
     )
 
     parser.add_argument(
         '--gemini-model',
-        choices=['gemini-2.5-flash-image', 'gemini-3-pro-image-preview'],
+        choices=['gemini-2.5-flash-image', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview'],
         default=None,
-        help=f'Gemini model to use (default from config: {GEMINI_IMAGE_MODEL}). gemini-3-pro-image-preview is higher quality 4K'
+        help=f'Gemini model to use (default from config: {GEMINI_IMAGE_MODEL}). gemini-3.1-flash-image-preview is Nano Banana 2 (fast, 4K)'
     )
 
     parser.add_argument(
         '--openai-model',
-        choices=['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'dall-e-3'],
+        choices=['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-3'],
         default=None,
-        help=f'OpenAI model to use (default from config: {OPENAI_IMAGE_MODEL}). WARNING: OpenAI does NOT support reference images - generated person will not match the YouTuber'
+        help=f'OpenAI model to use (default from config: {OPENAI_IMAGE_MODEL}). gpt-image-2 is the latest (multilingual text, native reasoning). WARNING: dall-e-3 does NOT support reference images.'
     )
 
     parser.add_argument(

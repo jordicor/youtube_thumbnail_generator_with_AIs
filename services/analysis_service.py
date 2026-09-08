@@ -4,6 +4,7 @@ Analysis Service
 Business logic for video analysis (scenes, faces, clustering).
 """
 
+import asyncio
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Set, Callable
 import aiosqlite
@@ -12,8 +13,12 @@ import shutil
 import re
 import logging
 
-from config import MAX_REFERENCE_FRAMES
+from config import MAX_REFERENCE_FRAMES, OUTPUT_DIR
 from i18n import t
+from utils import VideoOutput
+from scene_detection import process_video_scenes
+from face_extraction import process_faces
+from transcription import transcribe_video
 
 logger = logging.getLogger(__name__)
 
@@ -87,15 +92,6 @@ class AnalysisService:
         3. Face clustering
         4. Audio transcription (ElevenLabs)
         """
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-
-        from config import OUTPUT_DIR
-        from utils import VideoOutput
-        from scene_detection import process_video_scenes
-        from face_extraction import process_faces
-        from transcription import transcribe_video
-
         try:
             # Get video info
             video = await self.get_video(video_id)
@@ -111,12 +107,14 @@ class AnalysisService:
 
             if force_scenes:
                 output.scenes_file.unlink(missing_ok=True)
-                import shutil
                 shutil.rmtree(output.frames_dir, ignore_errors=True)
                 output.frames_dir.mkdir(exist_ok=True)
 
             try:
-                scene_result, extracted_frames = process_video_scenes(video_path, output)
+                loop = asyncio.get_event_loop()
+                scene_result, extracted_frames = await loop.run_in_executor(
+                    None, process_video_scenes, video_path, output
+                )
                 if not scene_result or not extracted_frames:
                     await self.update_video_status(video_id, 'error', 'scene_detection_error: No scenes or frames extracted')
                     return
@@ -135,7 +133,9 @@ class AnalysisService:
                 output.faces_file.unlink(missing_ok=True)
 
             try:
-                face_result = process_faces(extracted_frames, output)
+                face_result = await loop.run_in_executor(
+                    None, process_faces, extracted_frames, output
+                )
             except Exception as e:
                 await self.update_video_status(video_id, 'error', f'face_extraction_error: {str(e)}')
                 return
@@ -173,7 +173,9 @@ class AnalysisService:
                 json_transcription.unlink(missing_ok=True)
 
             try:
-                transcription = transcribe_video(video_path, output)
+                transcription = await loop.run_in_executor(
+                    None, transcribe_video, video_path, output
+                )
                 if not transcription:
                     await self.update_video_status(video_id, 'error', 'transcription_error: Failed to transcribe audio')
                     return
@@ -233,7 +235,8 @@ class AnalysisService:
         if result.get('error'):
             return
 
-        # V2: Delete existing data
+        # V2: Delete existing data and insert new data in a single transaction
+        await self.db.execute("BEGIN IMMEDIATE")
         await self.db.execute("""
             DELETE FROM cluster_frame_assignments
             WHERE cluster_id IN (SELECT id FROM clusters WHERE video_id = ?)
@@ -606,14 +609,29 @@ class AnalysisService:
             WHERE video_id = ? AND view_mode = ? AND cluster_index = ?
         """, [video_id, view_mode, cluster_index])
 
+        # Capture old indices BEFORE reindex so _sync_cluster_folders can map folders correctly
+        old_index_by_id = await self._get_cluster_index_map(video_id, view_mode)
+
         # Reindex remaining clusters in this view_mode
         await self._reindex_clusters_v2(video_id, view_mode)
         await self.db.commit()
 
         # Sync physical cluster folders and update JSON files
-        await self._sync_cluster_folders(video_id, output_dir)
+        await self._sync_cluster_folders(video_id, output_dir, old_index_by_id)
 
         return True
+
+    async def _get_cluster_index_map(self, video_id: int, view_mode: str) -> Dict[int, int]:
+        """Get mapping of cluster_id -> cluster_index for all clusters in a view_mode.
+
+        Must be called BEFORE _reindex_clusters_v2 to capture old indices.
+        """
+        async with self.db.execute("""
+            SELECT id, cluster_index FROM clusters
+            WHERE video_id = ? AND view_mode = ?
+        """, [video_id, view_mode]) as cursor:
+            rows = await cursor.fetchall()
+            return {row[0]: row[1] for row in rows}
 
     async def merge_clusters(
         self,
@@ -712,6 +730,9 @@ class AnalysisService:
             if source_folder.exists():
                 shutil.rmtree(source_folder)
 
+        # Capture old indices BEFORE reindex so _sync_cluster_folders can map folders correctly
+        old_index_by_id = await self._get_cluster_index_map(video_id, view_mode)
+
         # Reindex clusters
         await self._reindex_clusters_v2(video_id, view_mode)
 
@@ -728,7 +749,7 @@ class AnalysisService:
         await self.db.commit()
 
         # Sync physical cluster folders and update JSON files
-        await self._sync_cluster_folders(video_id, output_dir)
+        await self._sync_cluster_folders(video_id, output_dir, old_index_by_id)
 
         return {
             'success': True,
@@ -742,7 +763,6 @@ class AnalysisService:
 
     def _get_video_output_dir(self, video: dict) -> Path:
         """Get the output directory for a video."""
-        from config import OUTPUT_DIR
         from utils import sanitize_filename
 
         video_name = Path(video['filepath']).stem
@@ -996,23 +1016,6 @@ class AnalysisService:
 
         with open(result_path, 'wb') as f:
             f.write(orjson.dumps(result, option=orjson.OPT_INDENT_2))
-
-    async def _reindex_clusters(self, video_id: int):
-        """Reindex clusters to maintain consecutive indices (0, 1, 2...)."""
-        # Get all remaining clusters ordered by current index
-        async with self.db.execute("""
-            SELECT id, cluster_index FROM clusters
-            WHERE video_id = ?
-            ORDER BY cluster_index
-        """, [video_id]) as cursor:
-            rows = await cursor.fetchall()
-
-        # Update indices to be consecutive
-        for new_index, (cluster_id, _) in enumerate(rows):
-            await self.db.execute(
-                "UPDATE clusters SET cluster_index = ? WHERE id = ?",
-                [new_index, cluster_id]
-            )
 
     # =========================================================================
     # V2 ARCHITECTURE HELPER METHODS
@@ -1957,15 +1960,13 @@ class AnalysisService:
                 'status_was': the status the video was in when cancelled
             }
         """
-        from utils import VideoOutput
-
         video = await self.get_video(video_id)
         if not video:
             return {"cleaned_files": [], "cleaned_db_records": 0, "status_was": None}
 
         status = video.get("status", "")
-        filename = video.get("filename", "")
-        output = VideoOutput(filename)
+        video_path = Path(video["filepath"])
+        output = VideoOutput(video_path, Path(OUTPUT_DIR))
 
         cleaned_files = []
         cleaned_db = 0
@@ -2014,8 +2015,8 @@ class AnalysisService:
                 "transcription.json",
                 "transcription_segments.json"
             ]
-            for filename in transcription_files:
-                filepath = output.output_dir / filename
+            for transcription_file in transcription_files:
+                filepath = output.output_dir / transcription_file
                 if filepath.exists():
                     try:
                         filepath.unlink()

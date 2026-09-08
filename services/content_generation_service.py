@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 # Gran Sabio LLM client singleton
 _gransabio_client = None
-_gransabio_available = None
 
 # Thinking budget tokens per level (for Claude)
 THINKING_BUDGET_TOKENS = {
@@ -312,14 +311,22 @@ class DescriptionGenerationResult:
 # =============================================================================
 
 def get_gransabio_client():
-    """Get or create Gran Sabio LLM client singleton."""
-    global _gransabio_client, _gransabio_available
+    """Get or create Gran Sabio LLM client singleton.
 
-    if _gransabio_available is False:
-        return None
+    Re-checks availability on every call (no permanent failure caching)
+    so the service recovers automatically when Gran Sabio comes back online.
+    """
+    global _gransabio_client
 
+    # If we already have a client, verify it is still reachable
     if _gransabio_client is not None:
-        return _gransabio_client
+        try:
+            if _gransabio_client.is_available():
+                return _gransabio_client
+        except Exception:
+            pass
+        # Client is stale; discard and re-create below
+        _gransabio_client = None
 
     try:
         from client import GranSabioClient
@@ -327,20 +334,16 @@ def get_gransabio_client():
 
         if client.is_available():
             _gransabio_client = client
-            _gransabio_available = True
             logger.info(f"Gran Sabio LLM client connected for content generation")
             return client
         else:
-            _gransabio_available = False
             logger.error(f"Gran Sabio LLM server not available at {GRANSABIO_LLM_URL}")
             return None
 
     except ImportError as e:
-        _gransabio_available = False
         logger.error(f"Gran Sabio LLM client not available: {e}")
-        return None
+        raise
     except Exception as e:
-        _gransabio_available = False
         logger.error(f"Could not connect to Gran Sabio LLM: {e}")
         return None
 
@@ -396,7 +399,6 @@ def call_gransabio(
             "prompt": prompt,
             "generator_model": generator_model,
             "qa_layers": [],
-            "max_tokens": 8000,
             "temperature": 0.7,
             "max_iterations": 1,
             "verbose": False,

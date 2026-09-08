@@ -4,7 +4,7 @@ arq worker entry point.
 Run with:
     arq workers.main.WorkerSettings
 
-Or use the start_worker.bat script.
+Use the same virtual environment and project directory as the web server.
 """
 
 import logging

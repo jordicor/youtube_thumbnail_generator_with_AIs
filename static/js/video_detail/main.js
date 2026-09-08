@@ -23,6 +23,8 @@ import * as QueueIndicator from './queue-indicator.js';
 async function loadVideoInfo() {
     try {
         const response = await fetch(`/api/videos/${state.videoId}`);
+        // H7: Check response before parsing
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const video = await response.json();
 
         document.getElementById('videoTitle').textContent = video.filename;
@@ -52,6 +54,8 @@ async function loadTranscription() {
 
     try {
         const response = await fetch(`/api/titles/transcription/${state.videoId}`);
+        // H7: Check response before parsing
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
 
         if (data.exists && data.text) {
@@ -253,6 +257,15 @@ async function initAnalysisOverlay() {
 
     // Subscribe to TaskQueue events for this video's analysis
     window.TaskQueue.subscribe((eventType, task) => {
+        // H6: Handle tasks_snapshot - find relevant task from the array
+        if (eventType === 'tasks_snapshot') {
+            const tasks = Array.isArray(task?.tasks) ? task.tasks : [];
+            const relevantTask = tasks.find(t => t.video_id === state.videoId && t.type === 'analysis');
+            if (!relevantTask) return;
+            showAnalysisOverlay(relevantTask);
+            return;
+        }
+
         if (task.video_id !== state.videoId || task.type !== 'analysis') return;
 
         switch (eventType) {
@@ -305,6 +318,23 @@ function setupGenerationTaskSubscription() {
     }
 
     window.TaskQueue.subscribe((eventType, task) => {
+        // H6: Handle tasks_snapshot for generation tasks
+        if (eventType === 'tasks_snapshot') {
+            const tasks = Array.isArray(task?.tasks) ? task.tasks : [];
+            const relevantTask = tasks.find(t => t.video_id === state.videoId && t.type === 'generation');
+            if (!relevantTask) return;
+            // Adopt the job if we don't have one
+            if (!state.currentJobId) {
+                console.log(`Detected generation job ${relevantTask.id} from snapshot, adopting`);
+                state.currentJobId = relevantTask.id;
+                import('./state.js').then(mod => {
+                    mod.saveGenerationJobState();
+                });
+                Generation.restoreGenerationState();
+            }
+            return;
+        }
+
         if (task.video_id !== state.videoId) return;
         if (task.type !== 'generation') return;
 

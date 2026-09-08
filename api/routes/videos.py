@@ -4,7 +4,7 @@ Videos API Routes
 Endpoints for video management.
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks, Query
 from fastapi.responses import FileResponse
 from pathlib import Path
 from typing import List, Optional
@@ -120,8 +120,8 @@ class BulkHideRequest(BaseModel):
 @router.get("", response_model=VideoListResponse)
 async def list_videos(
     status: Optional[str] = None,
-    skip: int = 0,
-    limit: int = 50
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=500)
 ):
     """
     List all registered videos.

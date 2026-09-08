@@ -7,6 +7,8 @@
 import { state, resetGenerationState, saveGenerationJobState, clearGenerationJobState } from './state.js';
 import { getTextConfig, getImageConfig, getCurrentModelMaxRefs, getCurrentModelName } from './ai-config.js';
 import { getSelectedArray as getSelectedTitles } from './titles.js';
+// C2: Import addNewToGallery from thumbnails module
+import { addNewToGallery } from './thumbnails.js';
 
 // Store reference image data
 let referenceImageData = null;
@@ -126,25 +128,52 @@ async function checkReferenceConflict() {
     // Return a promise that resolves when user makes a choice
     return new Promise((resolve) => {
         conflictResolve = resolve;
+        const modal = document.getElementById('refConflictModal');
+
+        // H9: Cleanup function to close modal and remove listeners
+        const closeAndResolve = (result) => {
+            modal.classList.remove('visible');
+            document.removeEventListener('keydown', escapeHandler);
+            modal.removeEventListener('click', backdropHandler);
+            conflictResolve = null;
+            resolve(result);
+        };
+
+        // H9: Escape key handler
+        const escapeHandler = (e) => {
+            if (e.key === 'Escape') {
+                closeAndResolve({ proceed: false });
+            }
+        };
+
+        // H9: Backdrop click handler
+        const backdropHandler = (e) => {
+            if (e.target === modal) {
+                closeAndResolve({ proceed: false });
+            }
+        };
+
+        document.addEventListener('keydown', escapeHandler);
+        modal.addEventListener('click', backdropHandler);
 
         // Setup button handlers
         reduceBtn.onclick = () => {
-            document.getElementById('refConflictModal').classList.remove('visible');
             // Update the num refs input to model_max - 1
             document.getElementById('imageAiNumRefs').value = modelMax - 1;
-            resolve({ proceed: true, adjustedNumRefs: modelMax - 1 });
+            closeAndResolve({ proceed: true, adjustedNumRefs: modelMax - 1 });
         };
 
         document.getElementById('refConflictRemoveStyle').onclick = () => {
-            document.getElementById('refConflictModal').classList.remove('visible');
             // User chose to not include the style reference
-            resolve({ proceed: true, skipStyleRef: true });
+            closeAndResolve({ proceed: true, skipStyleRef: true });
         };
     });
 }
 
 /**
  * Setup modal close handler to cancel generation if modal is closed.
+ * Note: Escape and backdrop are handled per-open in checkReferenceConflict (H9).
+ * This only handles the explicit cancel button.
  */
 function setupRefConflictModalClose() {
     const modal = document.getElementById('refConflictModal');
@@ -290,17 +319,20 @@ export function setupForm() {
             return;
         }
 
-        // Check for reference limit conflict before proceeding
-        const conflictResult = await checkReferenceConflict();
-        if (!conflictResult.proceed) {
-            // User cancelled
-            return;
-        }
-
-        // Disable submit button and change text during generation
+        // H14: Disable submit button BEFORE the conflict check to prevent double-click race
         submitBtn = document.getElementById('generateBtn');
         originalBtnText = submitBtn.textContent;
         submitBtn.disabled = true;
+
+        // Check for reference limit conflict before proceeding
+        const conflictResult = await checkReferenceConflict();
+        if (!conflictResult.proceed) {
+            // User cancelled - restore button
+            submitBtn.disabled = false;
+            return;
+        }
+
+        // Change text during generation
         submitBtn.textContent = t('generation.generating');
         submitBtn.classList.add('generating');
         showCancelButton();
@@ -408,8 +440,8 @@ export async function pollStatus() {
         return;
     }
 
-    // Fallback to polling
-    const interval = setInterval(async () => {
+    // M37: Store polling interval ID in state for cleanup
+    state.pollingInterval = setInterval(async () => {
         try {
             const response = await fetch(`/api/generation/jobs/${state.currentJobId}/status`);
             const data = await response.json();
@@ -419,12 +451,14 @@ export async function pollStatus() {
                 `${data.status} - ${data.progress}% (${data.thumbnails_generated}/${data.total_thumbnails})`;
 
             if (data.status === 'completed') {
-                clearInterval(interval);
+                clearInterval(state.pollingInterval);
+                state.pollingInterval = null;
                 clearGenerationJobState();
                 restoreSubmitButton();
                 loadResults();
             } else if (data.status === 'error' || data.status === 'cancelled') {
-                clearInterval(interval);
+                clearInterval(state.pollingInterval);
+                state.pollingInterval = null;
                 clearGenerationJobState();
                 restoreSubmitButton();
                 if (data.status === 'error') {
@@ -432,7 +466,8 @@ export async function pollStatus() {
                 }
             }
         } catch (error) {
-            clearInterval(interval);
+            clearInterval(state.pollingInterval);
+            state.pollingInterval = null;
             clearGenerationJobState();
             restoreSubmitButton();
         }

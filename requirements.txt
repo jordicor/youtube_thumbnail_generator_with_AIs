@@ -1,7 +1,7 @@
 # YouTube Thumbnail Generator - Dependencies
 # ==========================================
 # Install with: pip install -r requirements.txt
-# Or run: setup_environment.bat (creates fresh conda env)
+# Use a dedicated virtual environment; see README.md for setup commands.
 
 # Core dependencies
 numpy>=1.24.0
@@ -62,21 +62,21 @@ pytest-mock>=3.12.0        # Mocking utilities
 # INSTALLATION NOTES
 # =============================================================================
 #
-# 1. RECOMMENDED: Use setup_environment.bat to create a clean conda environment
-#    This avoids DLL conflicts with other ML libraries
+# 1. Create and activate a dedicated environment before installing dependencies.
+#    See README.md for Windows and Unix activation commands.
 #
 # 2. FFmpeg is REQUIRED for audio extraction:
 #    Windows: winget install FFmpeg
 #    Or download from: https://ffmpeg.org/download.html
 #
-# 3. GPU Support (RTX 4090):
-#    DeepFace will use TensorFlow with CUDA automatically
-#    Whisper will use PyTorch with CUDA automatically
+# 3. GPU support:
+#    InsightFace uses ONNX Runtime; Whisper uses PyTorch.
+#    CUDA libraries must match the installed runtime packages.
 #
 # 4. Model downloads (automatic on first use):
-#    - DeepFace models: ~500MB
-#    - Whisper turbo: ~800MB
-#    - Total: ~1.3GB
+#    - InsightFace face detection and recognition models
+#    - The configured Whisper model when local transcription is enabled
+#    Download sizes depend on the selected models.
 #
 # 5. API Keys needed (set in .env file, see .env.example):
 #    - ELEVENLABS_API_KEY (for transcription via API)
@@ -96,12 +96,11 @@ pytest-mock>=3.12.0        # Mocking utilities
 # =============================================================================
 #
 # If you get DLL errors:
-#   1. Run setup_environment.bat to create fresh environment
+#   1. Verify dependencies in the dedicated project environment.
 #   2. Make sure no other conda envs are active
 #   3. Ensure CUDA drivers are up to date
 #
-# If DeepFace fails to load:
-#   Face detection will still work with OpenCV fallback
-#   (just won't match against reference face)
+# If InsightFace fails to load:
+#   Check the reported ONNX Runtime and model-loading error before retrying.
 #
 # =============================================================================

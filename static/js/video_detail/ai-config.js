@@ -403,7 +403,11 @@ export function getImageConfig() {
     const provider = document.getElementById('imageAiProvider').value;
     const config = {
         provider: provider,
-        num_reference_images: parseInt(document.getElementById('imageAiNumRefs').value) || null
+        // M33: Properly handle 0 value instead of || null which treats 0 as falsy
+        num_reference_images: (() => {
+            const val = parseInt(document.getElementById('imageAiNumRefs').value);
+            return isNaN(val) ? null : val;
+        })()
     };
 
     if (provider === 'gemini') {
@@ -571,10 +575,13 @@ export function init() {
     updateImageModelOptions();
     setupPersistence();
 
-    // Close popovers on escape key
+    // M51: Close popovers on escape key only when a popover is actually visible
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
-            closeAllPopovers();
+            const hasVisiblePopover = document.querySelector('.ai-config-popover.visible');
+            if (hasVisiblePopover) {
+                closeAllPopovers();
+            }
         }
     });
 }

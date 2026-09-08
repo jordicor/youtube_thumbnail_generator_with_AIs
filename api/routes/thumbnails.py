@@ -6,7 +6,7 @@ Endpoints for serving and managing generated thumbnails.
 
 import io
 import zipfile
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pathlib import Path
 from typing import Optional
@@ -61,12 +61,10 @@ async def get_thumbnail_info(thumbnail_id: int):
         """
         async with db.execute(query, [thumbnail_id]) as cursor:
             row = await cursor.fetchone()
-
-    if not row:
-        raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_not_found'))
-
-    columns = [description[0] for description in cursor.description]
-    thumbnail = dict(zip(columns, row))
+            if not row:
+                raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_not_found'))
+            columns = [description[0] for description in cursor.description]
+            thumbnail = dict(zip(columns, row))
 
     return thumbnail
 
@@ -87,6 +85,10 @@ async def delete_thumbnail(thumbnail_id: int):
 
         filepath = Path(row[0])
 
+        # Security: validate path is within OUTPUT_DIR
+        if not filepath.resolve().is_relative_to(Path(OUTPUT_DIR).resolve()):
+            raise HTTPException(status_code=403, detail="Invalid filepath")
+
         # Delete from database
         await db.execute("DELETE FROM thumbnails WHERE id = ?", [thumbnail_id])
         await db.commit()
@@ -99,7 +101,11 @@ async def delete_thumbnail(thumbnail_id: int):
 
 
 @router.get("/video/{video_id}")
-async def get_video_thumbnails(video_id: int, limit: int = 50):
+async def get_video_thumbnails(
+    video_id: int,
+    limit: int = Query(default=50, ge=1, le=500),
+    skip: int = Query(default=0, ge=0)
+):
     """
     Get all thumbnails for a video.
     """
@@ -110,10 +116,10 @@ async def get_video_thumbnails(video_id: int, limit: int = 50):
             FROM thumbnails t
             JOIN generation_jobs j ON t.job_id = j.id
             WHERE j.video_id = ?
-            ORDER BY t.created_at DESC
-            LIMIT ?
+            ORDER BY t.created_at DESC, t.id DESC
+            LIMIT ? OFFSET ?
         """
-        async with db.execute(query, [video_id, limit]) as cursor:
+        async with db.execute(query, [video_id, limit, skip]) as cursor:
             rows = await cursor.fetchall()
             columns = [description[0] for description in cursor.description]
             thumbnails = [dict(zip(columns, row)) for row in rows]
@@ -157,10 +163,13 @@ async def download_all_thumbnails(job_id: int):
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
+    output_dir_resolved = Path(OUTPUT_DIR).resolve()
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         for filepath, title, image_idx in rows:
-            file_path = Path(filepath)
+            file_path = Path(filepath).resolve()
+            if not file_path.is_relative_to(output_dir_resolved):
+                continue
             if file_path.exists():
                 # Create a clean filename
                 safe_title = (title or f"thumbnail_{image_idx}").replace('/', '_').replace('\\', '_')[:50]
@@ -216,10 +225,13 @@ async def download_all_video_thumbnails(video_id: int):
 
     # Create ZIP in memory
     zip_buffer = io.BytesIO()
+    output_dir_resolved = Path(OUTPUT_DIR).resolve()
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         for filepath, title, image_idx, job_id in rows:
-            file_path = Path(filepath)
+            file_path = Path(filepath).resolve()
+            if not file_path.is_relative_to(output_dir_resolved):
+                continue
             if file_path.exists():
                 # Create a clean filename with job prefix
                 safe_title = (title or f"thumbnail_{image_idx}").replace('/', '_').replace('\\', '_')[:50]

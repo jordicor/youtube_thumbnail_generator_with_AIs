@@ -6,6 +6,10 @@
 
 import { state, clearClusterSelection, clearReferenceCluster } from './state.js';
 
+// H8: Store scroll indicator handler references for cleanup
+let _scrollHandler = null;
+let _resizeHandler = null;
+
 // =========================================================================
 // CLUSTER DISPLAY HELPERS
 // =========================================================================
@@ -145,6 +149,14 @@ function setupScrollIndicator() {
 
     if (!container || !grid) return;
 
+    // H8: Remove old event listeners before adding new ones
+    if (_scrollHandler) {
+        grid.removeEventListener('scroll', _scrollHandler);
+    }
+    if (_resizeHandler) {
+        window.removeEventListener('resize', _resizeHandler);
+    }
+
     const updateScrollState = () => {
         const hasScroll = grid.scrollHeight > grid.clientHeight;
         const scrolledToBottom = grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 10;
@@ -153,14 +165,18 @@ function setupScrollIndicator() {
         container.classList.toggle('scrolled-bottom', scrolledToBottom);
     };
 
+    // Store references for future cleanup
+    _scrollHandler = updateScrollState;
+    _resizeHandler = updateScrollState;
+
     // Initial check
     updateScrollState();
 
     // Update on scroll
-    grid.addEventListener('scroll', updateScrollState);
+    grid.addEventListener('scroll', _scrollHandler);
 
     // Update on resize
-    window.addEventListener('resize', updateScrollState);
+    window.addEventListener('resize', _resizeHandler);
 }
 
 // =========================================================================
@@ -338,8 +354,9 @@ export function showDeleteSelectedModal() {
         .reduce((sum, c) => sum + c.num_frames, 0);
 
     state.clusterToDelete = Array.from(state.selectedClusters);
+    // M30: Use the correct delete message key (not merge_message)
     document.getElementById('deleteClusterMessage').textContent =
-        t('clusters.merge_message', {count: count});
+        t('clusters.delete_message');
     document.getElementById('deleteClusterModal').classList.add('visible');
 }
 

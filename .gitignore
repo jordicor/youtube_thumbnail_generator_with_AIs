@@ -1,70 +1,60 @@
-# Output directory
-output/
-
-# Python cache
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Virtual environments
-venv/
-env/
-.env
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-database/*.db
-
-# Temporary files
-*.tmp
-*.temp
-
-# Claude Code config
-.claude/
-
-# SQLite WAL files
-*.db-shm
-*.db-wal
-
-# Claude Code config (personal settings)
-CLAUDE.md
-
-# Additional security patterns
-.env.*
+# User configuration and credentials
+.env*
+!.env.example
 *.pem
 *.key
 *.pfx
 *.p12
+*.crt
 secrets.*
 credentials.*
 
-# Documentation (screenshots pending)
-docs/
+# Personal input and generated output
+videos/
+output/
+outputs/
+uploads/
+frames/
+clusters/
+thumbnails/
+transcriptions/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
 
-# Development scripts (internal use only)
-scripts/
-
-# Windows batch files (local dev only)
-*.bat
-
-# One-time migration scripts
-migrate_*.py
-
-# Internal architecture docs
+# Development tools and internal documentation
+.claude/
+.codex/
+.vscode/
+.idea/
+AGENTS.md
+CLAUDE.md
+SYNC_GITHUB.md
 ARCHITECTURE.md
+AUDIT_REPORT.md
+TECHNICAL_REVIEW.md
+TASK_QUEUE_*.md
+tools/sync_github/
+scripts/
+docs/
+*.bat
+*.cmd
+nul
+
+# Runtime and temporary files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+node_modules/
+tmp/
+temp/
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db

@@ -109,13 +109,15 @@ async def start_analysis(
         if not video:
             raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
-        # Check if already analyzing (any analysis-related status)
-        analysis_in_progress_states = {'analyzing', 'analyzing_scenes', 'analyzing_faces', 'clustering', 'transcribing'}
-        if video['status'] in analysis_in_progress_states:
-            raise HTTPException(status_code=400, detail=t('api.errors.analysis_in_progress'))
-
-        # Update status
-        await service.update_video_status(video_id, 'analyzing')
+        # Atomic status update to prevent TOCTOU race
+        async with db.execute(
+            """UPDATE videos SET status = 'analyzing'
+               WHERE id = ? AND status NOT IN ('analyzing', 'analyzing_scenes', 'analyzing_faces', 'clustering', 'transcribing')""",
+            [video_id]
+        ) as cursor:
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=400, detail=t('api.errors.analysis_in_progress'))
+        await db.commit()
 
     # Enqueue analysis job to Redis
     job_id = await enqueue_analysis(
@@ -228,6 +230,13 @@ async def get_cluster_image_by_id(video_id: int, cluster_id: int):
     making it safe for browser caching even after cluster reindexing operations.
     """
     async with get_db() as db:
+        # Validate cluster belongs to the specified video
+        query = "SELECT id FROM clusters WHERE id = ? AND video_id = ?"
+        async with db.execute(query, [cluster_id, video_id]) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=t('api.errors.cluster_not_found'))
+
         service = AnalysisService(db)
         image_path = await service.get_cluster_representative_by_id(cluster_id)
 
@@ -354,9 +363,12 @@ async def get_frame_image(video_id: int, cluster_index: int, frame_id: int):
     V2 Architecture: frame_id refers to video_frames.id
     """
     async with get_db() as db:
-        # frame_id is video_frames.id
-        query = "SELECT frame_path FROM video_frames WHERE id = ?"
-        async with db.execute(query, [frame_id]) as cursor:
+        # frame_id is video_frames.id, validated against video_id
+        query = """
+            SELECT vf.frame_path FROM video_frames vf
+            WHERE vf.id = ? AND vf.video_id = ?
+        """
+        async with db.execute(query, [frame_id, video_id]) as cursor:
             row = await cursor.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail=t('api.errors.frame_not_found'))

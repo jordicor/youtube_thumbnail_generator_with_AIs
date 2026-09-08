@@ -41,6 +41,7 @@ export const state = {
 
     // Generation state
     currentEventSource: null,      // SSE EventSource instance
+    pollingInterval: null,         // M37: Polling setInterval ID for cleanup
 };
 
 /**
@@ -110,6 +111,11 @@ export function resetGenerationState(clearStorage = false) {
     if (state.currentEventSource) {
         state.currentEventSource.close();
         state.currentEventSource = null;
+    }
+    // M37: Clear polling interval if active
+    if (state.pollingInterval) {
+        clearInterval(state.pollingInterval);
+        state.pollingInterval = null;
     }
     if (clearStorage) {
         clearGenerationJobState();
