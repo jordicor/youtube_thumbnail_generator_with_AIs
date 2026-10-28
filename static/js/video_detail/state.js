@@ -18,26 +18,39 @@ export const state = {
     currentJobId: null,
 
     // Clusters state
-    clusters: [],
-    selectedClusters: new Set(),
+    clusters: [],                  // Clusters of the current view (Detected people tab)
+    personCount: null,             // People of the 'person' view, shown in the page header
+    selectedClusters: new Set(),   // Cluster indices checked for merge/delete
     currentClusterType: 'person',
     clusterToDelete: null,
-    referenceClusterIndex: null,  // Cluster selected for AI reference images
+    // People chosen for the thumbnail: ordered cluster objects (any view), kept by
+    // database ID. Position maps to the person_XX role: 0 → person_01, and so on.
+    selectedPeople: [],
+    peopleInitialized: false,      // The default person is only preselected once
 
     // Titles state
     titles: [],                    // Array of {text: string, dbId: number|null}
-    selectedTitles: new Set(),     // Set of selected title indices
+    selectedTitles: new Set(),     // Indices of the starred titles, which guide the thumbnails
 
     // Descriptions state
     descriptions: [],              // Array of {text: string, dbId: number|null}
 
     // Thumbnails state
-    existingThumbnails: [],
+    thumbnails: [],                // Thumbnails loaded in the gallery, in its order
+    thumbnailsSort: 'recent',      // Gallery order: 'recent' | 'failures_last' | 'match'
+    thumbnailsTotal: 0,            // Total thumbnails of the video (the gallery loads them by pages)
+    newestThumbnails: [],          // Newest page of thumbnails whatever the gallery order (recent results)
     lazyLoadObserver: null,
 
-    // AI Models state
-    promptModels: null,            // Loaded from API
-    modelsLoaded: false,
+    // Gran Sabio LLM availability: null until checked, then true/false.
+    // Every text generation (titles, descriptions, thumbnail prompts) needs it.
+    granSabioAvailable: null,
+
+    // Why face swap cannot run (its models are missing), from the page; '' when it can
+    faceSwapMissing: '',
+
+    // Style image of the next generation: {base64, filename, dataUrl}, or null
+    styleImage: null,
 
     // Generation state
     currentEventSource: null,      // SSE EventSource instance
@@ -142,11 +155,4 @@ export function clearDescriptions() {
  */
 export function clearClusterSelection() {
     state.selectedClusters.clear();
-}
-
-/**
- * Clear reference cluster selection.
- */
-export function clearReferenceCluster() {
-    state.referenceClusterIndex = null;
 }

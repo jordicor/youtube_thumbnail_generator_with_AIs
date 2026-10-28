@@ -13,8 +13,10 @@ from sklearn.metrics.pairwise import cosine_distances
 import orjson
 import shutil
 
-from utils import setup_logger
+from utils import setup_logger, resolve_output_path, to_output_relative
 from config import EXPRESSION_DISTRIBUTION
+from services.face_index import centroid_list
+from services.face_selection import character_groups, is_picture, look_vector
 
 logger = setup_logger(__name__)
 
@@ -116,18 +118,22 @@ def cluster_faces(
                 clusters_dict[label] = []
             clusters_dict[label].append(face_info)
 
-    # Process and filter clusters
+    # Process and filter clusters. The same face with clearly different hair
+    # (a wig, a disguise) is another character: each one becomes a cluster.
     processed_clusters = []
+    characters = []
+    for _, identity in sorted(clusters_dict.items()):
+        looks = {position: look_vector(face.get('portrait_quality') or {}) for position, face in enumerate(identity)}
+        characters += [[identity[position] for position in group] for group in character_groups(looks)]
 
-    for cluster_id, faces in sorted(clusters_dict.items()):
+    for faces in characters:
         if len(faces) < MIN_CLUSTER_FRAMES:
             # Too few frames, treat as outliers
             outliers.extend(faces)
             continue
 
         # Calculate cluster centroid
-        cluster_indices = [i for i, l in enumerate(labels) if l == cluster_id]
-        cluster_embeddings = embeddings[cluster_indices]
+        cluster_embeddings = np.array([face['embedding'] for face in faces])
         centroid = np.mean(cluster_embeddings, axis=0)
 
         # Find most representative frame (closest to centroid)
@@ -149,11 +155,12 @@ def cluster_faces(
             'representative_quality': representative_frame.get('quality_score', 0),
             'centroid': centroid.tolist(),
             'frames': faces_sorted,
-            'expression_distribution': _count_expressions(faces)
+            'expression_distribution': _count_expressions(faces),
+            'is_picture': is_picture([(Path(face['frame_path']).name, face['bbox']) for face in faces]),
         })
 
-    # Sort clusters by number of frames (descending)
-    processed_clusters.sort(key=lambda x: x['num_frames'], reverse=True)
+    # People by number of frames (descending), pictures (paintings, posters) last
+    processed_clusters.sort(key=lambda x: (x['is_picture'], -x['num_frames']))
 
     # Re-index after sorting
     for i, cluster in enumerate(processed_clusters):
@@ -346,7 +353,9 @@ def save_cluster_representatives(
             {
                 'index': c['cluster_index'],
                 'num_frames': c['num_frames'],
-                'representative': c.get('representative_frame_local', c.get('representative_frame', '')),
+                'representative': to_output_relative(
+                    c.get('representative_frame_local', c['representative_frame'])
+                ),
                 'expressions': c['expression_distribution']
             }
             for c in clusters
@@ -385,12 +394,17 @@ def load_faces_with_embeddings(faces_json_path: Path) -> List[Dict[str, Any]]:
 
     # Handle both list format and dict with 'all_faces' key
     if isinstance(data, list):
-        return data
+        faces = data
     elif isinstance(data, dict) and 'all_faces' in data:
-        return data['all_faces']
+        faces = data['all_faces']
     else:
         logger.error("Invalid faces.json format")
         return []
+
+    # Frame paths are stored relative to OUTPUT_DIR
+    for face in faces:
+        face['frame_path'] = str(resolve_output_path(face['frame_path']))
+    return faces
 
 
 def run_clustering_pipeline(
@@ -439,7 +453,9 @@ def run_clustering_pipeline(
     # Save clustering result (without full embeddings to save space)
     clusters_result_path = video_output_dir / "clustering_result.json"
 
+    stat = faces_json.stat()
     result_to_save = {
+        'faces_fingerprint': [stat.st_mtime_ns, stat.st_size],
         'num_clusters': result['num_clusters'],
         'total_faces': result['total_faces'],
         'num_outliers': len(result['outliers']),
@@ -451,10 +467,18 @@ def run_clustering_pipeline(
             {
                 'cluster_index': c['cluster_index'],
                 'num_frames': c['num_frames'],
-                'representative_frame': c['representative_frame'],
+                # Paths are stored relative to OUTPUT_DIR
+                'representative_frame': to_output_relative(c['representative_frame']),
                 'representative_quality': c.get('representative_quality', 0),
                 'expression_distribution': c['expression_distribution'],
-                'top_frames': [f.get('frame_path', '') for f in c['frames'][:10]]
+                # Keep all members: a cached rerun must not shrink a person
+                # to the old top ten or lose the quality used for selection.
+                'frames': [{'frame_path': to_output_relative(f['frame_path']),
+                            'quality_score': f['quality_score'], 'expression': f['expression']}
+                           for f in c['frames']],
+                # The person's face, which a rerun from this file needs
+                'centroid': centroid_list(np.asarray(c['centroid']) / np.linalg.norm(c['centroid'])),
+                'is_picture': c['is_picture'],
             }
             for c in result['clusters']
         ]

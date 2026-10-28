@@ -1,12 +1,13 @@
 /**
  * Video Detail Page - Titles Module
  * ==================================
- * Handles title generation, saving, selection, and deletion.
+ * Handles title generation, saving, starring and deletion. Starred titles
+ * guide the thumbnail ideas (Generate tab).
  */
 
 import { CONFIG } from './constants.js';
-import { state, clearTitles } from './state.js';
-import { getTextConfig } from './ai-config.js';
+import { state } from './state.js';
+import { getTextConfig, ensureGranSabioAvailable } from './ai-config.js';
 
 // =========================================================================
 // TITLE LOADING
@@ -84,9 +85,19 @@ export async function saveToDb(titles, style, language, provider, model) {
 // =========================================================================
 
 /**
+ * Write the number of titles to generate in the button.
+ */
+export function updateGenerateLabel() {
+    const count = parseInt(document.getElementById('titleQuantity').value, 10) || 1;
+    document.getElementById('generateTitlesLabel').textContent = t('titles_form.generate_button', { count });
+}
+
+/**
  * Generate new titles using AI.
  */
 export async function generate() {
+    if (!ensureGranSabioAvailable()) return;
+
     const textAiConfig = getTextConfig();
     const style = document.getElementById('titleStyle').value;
     const language = document.getElementById('titleLanguage').value;
@@ -167,20 +178,12 @@ export async function generate() {
             throw new Error(data.detail || t('errors.generate_titles'));
         }
 
-        if (!data.success) {
-            throw new Error(data.error || t('errors.generate_titles'));
-        }
-
         const titleObjects = data.titles.map(text => ({ text, dbId: null }));
         display(titleObjects);
 
         saveToDb(data.titles, style, language, data.provider, data.model);
 
-        if (data.transcription_generated) {
-            ThumbnailApp.showToast(t('titles.generating', {count: data.titles.length}), 'success');
-        } else {
-            ThumbnailApp.showToast(t('titles.generating', {count: data.titles.length}), 'success');
-        }
+        ThumbnailApp.showToast(t('titles.generated', {count: data.titles.length}), 'success');
 
     } catch (error) {
         if (generatingTimeout) clearTimeout(generatingTimeout);
@@ -216,40 +219,37 @@ export function display(titles, append = true) {
     titles.forEach((titleObj, i) => {
         const index = startIndex + i;
         const titleText = typeof titleObj === 'string' ? titleObj : titleObj.text;
-        const item = document.createElement('div');
-        item.className = 'title-item';
+        const starred = state.selectedTitles.has(index);
+        const item = document.createElement('li');
+        item.className = `title-item${starred ? ' starred' : ''}`;
         item.dataset.titleIndex = index;
         item.innerHTML = `
-            <div class="title-select-wrapper" onclick="VideoDetail.toggleTitleSelection(${index})" title="${t('titles_form.select_tooltip')}">
-                <input type="checkbox" class="title-checkbox" id="title-cb-${index}"
-                       ${state.selectedTitles.has(index) ? 'checked' : ''}
-                       onclick="event.stopPropagation(); VideoDetail.toggleTitleSelection(${index})">
-            </div>
-            <span class="title-text" onclick="VideoDetail.toggleTitleSelection(${index})">${escapeHtml(titleText)}</span>
-            <div class="title-actions">
-                <button class="title-copy-btn" onclick="event.stopPropagation(); VideoDetail.copyTitle(${index})" title="${t('titles_form.copy_tooltip')}">
-                    &#128203;
-                </button>
-                <button class="title-delete-btn" onclick="event.stopPropagation(); VideoDetail.deleteTitle(${index})" title="${t('titles_form.delete_tooltip')}">
-                    &#128465;
-                </button>
-            </div>
+            <button type="button" class="title-star" data-action="star" aria-pressed="${starred}"
+                    title="${escapeHtml(t('titles_form.star_tooltip'))}" aria-label="${escapeHtml(t('titles_form.star_tooltip'))}">
+                ${ThumbnailApp.icon('star')}
+            </button>
+            <span class="title-text">${escapeHtml(titleText)}</span>
+            <span class="title-actions">
+                <button type="button" class="icon-btn" data-action="copy"
+                        title="${escapeHtml(t('titles_form.copy_tooltip'))}" aria-label="${escapeHtml(t('titles_form.copy_tooltip'))}">${ThumbnailApp.icon('copy', 'icon-sm')}</button>
+                <button type="button" class="icon-btn danger" data-action="delete"
+                        title="${escapeHtml(t('titles_form.delete_tooltip'))}" aria-label="${escapeHtml(t('titles_form.delete_tooltip'))}">${ThumbnailApp.icon('trash', 'icon-sm')}</button>
+            </span>
         `;
         resultsList.appendChild(item);
     });
 
     resultsSection.style.display = 'block';
     updateSelectionInfo();
-    updateSelectAllButton();
     updateCount();
 }
 
 // =========================================================================
-// TITLE SELECTION
+// TITLE STARRING (guides the thumbnails)
 // =========================================================================
 
 /**
- * Toggle selection of a single title.
+ * Star a title, or remove its star.
  * @param {number} index - Title index
  */
 export function toggleSelection(index) {
@@ -259,47 +259,18 @@ export function toggleSelection(index) {
         state.selectedTitles.add(index);
     }
 
-    const checkbox = document.getElementById(`title-cb-${index}`);
-    if (checkbox) checkbox.checked = state.selectedTitles.has(index);
-
     const item = document.querySelector(`.title-item[data-title-index="${index}"]`);
-    if (item) item.classList.toggle('selected', state.selectedTitles.has(index));
-
-    updateSelectionInfo();
-    updateSelectAllButton();
-}
-
-/**
- * Toggle selection of all titles.
- */
-export function toggleSelectAll() {
-    const validIndices = state.titles
-        .map((t, i) => t !== null ? i : null)
-        .filter(i => i !== null);
-
-    const allSelected = validIndices.every(i => state.selectedTitles.has(i));
-
-    if (allSelected) {
-        state.selectedTitles.clear();
-    } else {
-        validIndices.forEach(i => state.selectedTitles.add(i));
+    if (item) {
+        item.classList.toggle('starred', state.selectedTitles.has(index));
+        item.querySelector('.title-star').setAttribute('aria-pressed', String(state.selectedTitles.has(index)));
     }
 
-    validIndices.forEach(index => {
-        const checkbox = document.getElementById(`title-cb-${index}`);
-        if (checkbox) checkbox.checked = state.selectedTitles.has(index);
-
-        const item = document.querySelector(`.title-item[data-title-index="${index}"]`);
-        if (item) item.classList.toggle('selected', state.selectedTitles.has(index));
-    });
-
     updateSelectionInfo();
-    updateSelectAllButton();
 }
 
 /**
- * Get array of selected title texts.
- * @returns {string[]} Selected title texts
+ * Get array of starred title texts.
+ * @returns {string[]} Starred title texts
  */
 export function getSelectedArray() {
     return Array.from(state.selectedTitles)
@@ -311,68 +282,35 @@ export function getSelectedArray() {
 }
 
 /**
- * Update selection info display.
+ * Say how many titles guide the thumbnails.
  */
 export function updateSelectionInfo() {
-    const selectedCount = state.selectedTitles.size;
-    const infoEl = document.getElementById('titlesSelectionInfo');
-    if (infoEl) {
-        if (selectedCount > 0) {
-            infoEl.textContent = t('selection.selected_count', {count: selectedCount});
-            infoEl.classList.add('has-selection');
-        } else {
-            infoEl.textContent = t('titles_form.selection_info');
-            infoEl.classList.remove('has-selection');
-        }
-    }
-    updateDeleteSelectedButton();
+    const starred = state.selectedTitles.size;
+    document.getElementById('titlesSelectionInfo').textContent = starred > 0
+        ? t('titles_form.starred_info', {count: starred})
+        : t('titles_form.star_hint');
+    notifyChange();
 }
 
 /**
- * Update select all button text.
+ * Tell other parts of the page (the Generate tab's guiding titles) that the
+ * titles or their stars changed.
  */
-export function updateSelectAllButton() {
-    const btn = document.getElementById('selectAllTitlesBtn');
-    if (!btn) return;
-
-    const validIndices = state.titles
-        .map((t, i) => t !== null ? i : null)
-        .filter(i => i !== null);
-
-    const allSelected = validIndices.length > 0 && validIndices.every(i => state.selectedTitles.has(i));
-
-    if (allSelected) {
-        btn.innerHTML = `&#9745; ${t('common.none')}`;
-        btn.title = t('common.deselect_all');
-    } else {
-        btn.innerHTML = `&#9744; ${t('common.all')}`;
-        btn.title = t('common.select_all');
-    }
-}
-
-/**
- * Update delete selected button visibility.
- */
-export function updateDeleteSelectedButton() {
-    const btn = document.getElementById('deleteSelectedTitlesBtn');
-    if (btn) {
-        if (state.selectedTitles.size > 0) {
-            btn.classList.add('visible');
-        } else {
-            btn.classList.remove('visible');
-        }
-    }
+function notifyChange() {
+    document.dispatchEvent(new CustomEvent('titles:changed'));
 }
 
 /**
  * Update titles count display.
  */
 export function updateCount() {
-    const countEl = document.getElementById('titlesCount');
-    if (!countEl) return;
-
     const validCount = state.titles.filter(t => t !== null).length;
-    countEl.textContent = validCount > 0 ? `(${validCount})` : '';
+    document.getElementById('titlesCount').textContent = validCount > 0 ? validCount : '';
+    document.getElementById('textsTabCount').textContent = validCount > 0 ? validCount : '';
+    if (validCount === 0) {
+        document.getElementById('titlesResultsSection').style.display = 'none';
+    }
+    notifyChange();
 }
 
 // =========================================================================
@@ -388,18 +326,22 @@ export async function deleteOne(index) {
     if (!titleObj) return;
 
     // M32: Confirm before deleting (matching pattern from thumbnails.js)
-    if (!confirm(t('common.delete'))) return;
+    const confirmed = await ThumbnailApp.showModal({
+        title: t('titles_form.delete_title'),
+        message: t('titles_form.delete_count_message', {count: 1}),
+        type: 'danger',
+        confirmText: t('common.delete'),
+        cancelText: t('common.cancel')
+    });
+    if (!confirmed) return;
 
     if (titleObj.dbId) {
-        try {
-            const response = await fetch(`/api/titles/delete/${titleObj.dbId}`, {
-                method: 'DELETE'
-            });
-            if (!response.ok) {
-                console.error('Error deleting title from database');
-            }
-        } catch (error) {
-            console.error('Error deleting title:', error);
+        const response = await fetch(`/api/titles/delete/${titleObj.dbId}`, {
+            method: 'DELETE'
+        });
+        if (!response.ok) {
+            ThumbnailApp.showToast(t('errors.delete_failed'), 'error');
+            return;
         }
     }
 
@@ -413,67 +355,8 @@ export async function deleteOne(index) {
     }
 
     updateSelectionInfo();
-    updateSelectAllButton();
     updateCount();
-    ThumbnailApp.showToast(t('common.success'), 'success');
-}
-
-/**
- * Delete all selected titles.
- */
-export async function deleteSelected() {
-    const selectedCount = state.selectedTitles.size;
-    if (selectedCount === 0) return;
-
-    const confirmMsg = selectedCount === 1
-        ? t('common.delete')
-        : t('common.delete');
-
-    if (!confirm(confirmMsg)) return;
-
-    const indicesToDelete = Array.from(state.selectedTitles);
-
-    const dbIds = indicesToDelete
-        .filter(idx => state.titles[idx] && state.titles[idx].dbId)
-        .map(idx => state.titles[idx].dbId);
-
-    if (dbIds.length > 0) {
-        try {
-            const response = await fetch('/api/titles/delete-batch', {
-                method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ids: dbIds })
-            });
-            if (!response.ok) {
-                console.error('Error deleting titles from database');
-            }
-        } catch (error) {
-            console.error('Error deleting titles:', error);
-        }
-    }
-
-    indicesToDelete.forEach(index => {
-        const item = document.querySelector(`.title-item[data-title-index="${index}"]`);
-        if (item) {
-            item.classList.add('removing');
-        }
-        state.titles[index] = null;
-    });
-
-    state.selectedTitles.clear();
-
-    setTimeout(() => {
-        indicesToDelete.forEach(index => {
-            const item = document.querySelector(`.title-item[data-title-index="${index}"]`);
-            if (item) item.remove();
-        });
-
-        updateSelectionInfo();
-        updateSelectAllButton();
-        updateCount();
-    }, CONFIG.ANIMATION_DURATION_MS);
-
-    ThumbnailApp.showToast(t('common.success'), 'success');
+    ThumbnailApp.showToast(t('titles_form.deleted'), 'success');
 }
 
 // =========================================================================
@@ -492,19 +375,6 @@ export async function copy(index) {
 
     try {
         await navigator.clipboard.writeText(titleText);
-
-        const item = document.querySelector(`.title-item[data-title-index="${index}"]`);
-        const btn = item?.querySelector('.title-copy-btn');
-        if (btn) {
-            btn.classList.add('copied');
-            btn.innerHTML = '&#10003;';
-
-            setTimeout(() => {
-                btn.classList.remove('copied');
-                btn.innerHTML = '&#128203;';
-            }, CONFIG.COPY_FEEDBACK_DURATION_MS);
-        }
-
         ThumbnailApp.showToast(t('titles.copied'), 'success');
     } catch (error) {
         ThumbnailApp.showToast(t('errors.generic'), 'error');
@@ -544,7 +414,7 @@ export function updateStyleUI() {
     const customPromptTextarea = document.getElementById('titleCustomPrompt');
 
     if (style === 'custom') {
-        customPromptGroup.style.display = 'block';
+        customPromptGroup.style.display = '';
         customInstructionsGroup.style.display = 'none';
 
         customPromptTextarea.classList.remove('attention');
@@ -554,7 +424,27 @@ export function updateStyleUI() {
         setTimeout(() => customPromptTextarea.focus(), 100);
     } else {
         customPromptGroup.style.display = 'none';
-        customInstructionsGroup.style.display = 'block';
+        customInstructionsGroup.style.display = '';
         customPromptTextarea.classList.remove('attention');
     }
+}
+
+/**
+ * Bind the form and the list of titles.
+ */
+export function setupControls() {
+    document.getElementById('titleStyle').addEventListener('change', updateStyleUI);
+    document.getElementById('titleQuantity').addEventListener('input', updateGenerateLabel);
+    document.getElementById('generateTitlesBtn').addEventListener('click', generate);
+    document.getElementById('copyAllTitlesBtn').addEventListener('click', copyAll);
+    document.getElementById('titlesResultsList').addEventListener('click', (e) => {
+        const button = e.target.closest('button[data-action]');
+        if (!button) return;
+        const index = parseInt(button.closest('.title-item').dataset.titleIndex, 10);
+        if (button.dataset.action === 'star') toggleSelection(index);
+        else if (button.dataset.action === 'copy') copy(index);
+        else if (button.dataset.action === 'delete') deleteOne(index);
+    });
+    updateGenerateLabel();
+    updateSelectionInfo();
 }

@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS directories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL UNIQUE,
     name TEXT,                        -- Optional user-friendly alias
+    alternative_paths TEXT NOT NULL DEFAULT '[]',  -- JSON list: the same folder from other machines, by preference
     last_scanned_at TIMESTAMP,        -- When directory was last scanned
     video_count INTEGER DEFAULT 0,    -- Cached count of videos
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -40,6 +41,9 @@ CREATE TABLE IF NOT EXISTS videos (
     --   error       - An error occurred
     error_message TEXT,
     is_hidden BOOLEAN DEFAULT FALSE,  -- Hidden videos don't appear in normal lists
+    -- Background of its thumbnails (Generate step 2): 'photos' (its setting photos)
+    -- or 'ai' (the AI chooses); NULL until the user picks one
+    environment_source TEXT CHECK(environment_source IN ('photos', 'ai')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (directory_id) REFERENCES directories(id) ON DELETE SET NULL
@@ -59,6 +63,7 @@ CREATE TABLE IF NOT EXISTS videos (
 -- This allows two views: unified by person, or split by person+scene.
 
 CREATE TABLE IF NOT EXISTS clusters (
+    reference_format TEXT NOT NULL DEFAULT 'photos',
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id INTEGER NOT NULL,
     cluster_index INTEGER NOT NULL,  -- 0, 1, 2... (ordered by size)
@@ -72,6 +77,9 @@ CREATE TABLE IF NOT EXISTS clusters (
     scene_index INTEGER DEFAULT NULL,  -- Scene number (only for person_scene clusters)
     view_mode TEXT,                   -- 'person' or 'person_scene' (V2 architecture)
     representative_frame_id INTEGER REFERENCES video_frames(id) ON DELETE SET NULL,
+    physical_description TEXT,        -- Cached LLM-generated facial description (face/hair/skin/build)
+    physical_description_updated_at TIMESTAMP,  -- When physical_description was last generated
+    is_picture INTEGER NOT NULL DEFAULT 0,  -- A face that never moves: a painting, poster or photo
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
     FOREIGN KEY (parent_cluster_id) REFERENCES clusters(id) ON DELETE CASCADE,
@@ -105,7 +113,6 @@ CREATE TABLE IF NOT EXISTS cluster_frames (
 CREATE TABLE IF NOT EXISTS generation_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id INTEGER NOT NULL,
-    cluster_id INTEGER NOT NULL,     -- Selected cluster for face reference
     num_images INTEGER DEFAULT 5,    -- Number of images to generate
     preferred_expression TEXT,       -- smiling, mouth_closed, neutral
     status TEXT DEFAULT 'pending',
@@ -121,7 +128,22 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     error_message TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP,
-    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
+    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- GENERATION JOB CLUSTERS TABLE (multi-cluster references per job)
+-- =============================================================================
+-- Each row maps one cluster to a person_id (person_01, person_02, ...) within
+-- a generation job, so the LLM and image generator can label reference frames
+-- deterministically.
+CREATE TABLE IF NOT EXISTS generation_job_clusters (
+    job_id INTEGER NOT NULL,
+    cluster_id INTEGER NOT NULL,
+    person_id TEXT NOT NULL,           -- 'person_01', 'person_02', ...
+    cluster_order INTEGER NOT NULL,    -- 0, 1, 2... (UI order)
+    PRIMARY KEY (job_id, cluster_id),
+    FOREIGN KEY (job_id) REFERENCES generation_jobs(id) ON DELETE CASCADE,
     FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
 );
 
@@ -134,10 +156,16 @@ CREATE TABLE IF NOT EXISTS thumbnails (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL,
     image_index INTEGER NOT NULL,     -- 1, 2, 3... (sequential image number)
-    filepath TEXT NOT NULL,           -- Path to generated image
+    filepath TEXT NOT NULL,           -- Path to the FINAL image shown to the user (swap-applied if any)
     prompt_text TEXT,                 -- The image prompt used
     suggested_title TEXT,             -- Suggested video title
     text_overlay TEXT,                -- Suggested text overlay
+    raw_path TEXT,                    -- Path to the pre-face-swap image (NULL if swap never applied)
+    face_swap_applied INTEGER DEFAULT 0,  -- 1 if a face swap was applied to produce filepath
+    face_swap_metadata TEXT,          -- JSON: FaceSwapResult.to_metadata() — per-face decisions
+    face_match_status TEXT,           -- NULL (not scored) | matched | missing | no_reference (services/face_match.py)
+    face_match_score REAL,            -- Lowest similarity of the job's people to their faces (when matched)
+    face_match_people TEXT,           -- JSON: [{person_id, cluster_id, similarity}], similarity NULL when not found
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (job_id) REFERENCES generation_jobs(id) ON DELETE CASCADE
 );
@@ -182,6 +210,18 @@ CREATE TABLE IF NOT EXISTS generated_descriptions (
 );
 
 -- =============================================================================
+-- APP SETTINGS TABLE
+-- =============================================================================
+-- One row: the AI engines and the values every video's Generate form starts
+-- with, as JSON (services/settings_service.py). No row: config.py defaults.
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    data TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
 -- INDICES FOR PERFORMANCE
 -- =============================================================================
 
@@ -198,6 +238,8 @@ CREATE INDEX IF NOT EXISTS idx_cluster_frames_reference ON cluster_frames(cluste
 CREATE INDEX IF NOT EXISTS idx_cluster_frames_scene ON cluster_frames(cluster_id, scene_index);
 CREATE INDEX IF NOT EXISTS idx_jobs_video ON generation_jobs(video_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON generation_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_job_clusters_job ON generation_job_clusters(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_clusters_cluster ON generation_job_clusters(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_thumbnails_job ON thumbnails(job_id);
 CREATE INDEX IF NOT EXISTS idx_generated_titles_video ON generated_titles(video_id);
 CREATE INDEX IF NOT EXISTS idx_generated_descriptions_video ON generated_descriptions(video_id);
@@ -206,8 +248,10 @@ CREATE INDEX IF NOT EXISTS idx_generated_descriptions_video ON generated_descrip
 -- TRIGGERS FOR UPDATED_AT
 -- =============================================================================
 
+-- A new path (its directory moved) is not activity on the video
 CREATE TRIGGER IF NOT EXISTS update_videos_timestamp
 AFTER UPDATE ON videos
+WHEN NEW.filepath IS OLD.filepath
 BEGIN
     UPDATE videos SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;

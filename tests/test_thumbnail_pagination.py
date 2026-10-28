@@ -13,7 +13,7 @@ async def thumbnail_pages(test_db, sample_generation_job):
     ]):
         cursor = await test_db.execute(
             "INSERT INTO thumbnails (job_id, image_index, filepath, created_at) VALUES (?, ?, ?, ?)",
-            (sample_generation_job["id"], index, f"/tmp/synthetic_{index}.png", timestamp),
+            (sample_generation_job["id"], index, f"synthetic/thumbnails/{index}.png", timestamp),
         )
         ids.append(cursor.lastrowid)
 
@@ -22,7 +22,7 @@ async def thumbnail_pages(test_db, sample_generation_job):
     other_job = await insert_job(test_db, other_video, other_cluster, "completed")
     await test_db.execute(
         "INSERT INTO thumbnails (job_id, image_index, filepath, created_at) VALUES (?, ?, ?, ?)",
-        (other_job, 0, "/tmp/other.png", "2026-01-03 00:00:00"),
+        (other_job, 0, "other/thumbnails/0.png", "2026-01-03 00:00:00"),
     )
     await test_db.commit()
     return sample_generation_job["video_id"], list(reversed(ids))
@@ -43,6 +43,14 @@ async def test_page_size_and_default_offset(client, thumbnail_pages):
     response = await client.get(f"/api/thumbnails/video/{video_id}", params={"limit": 2})
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["thumbnails"]] == expected_ids[:2]
+
+
+async def test_total_counts_every_thumbnail_of_the_video(client, thumbnail_pages):
+    video_id, expected_ids = thumbnail_pages
+    for skip in (0, 2, 10):
+        response = await client.get(f"/api/thumbnails/video/{video_id}", params={"limit": 1, "skip": skip})
+        assert response.status_code == 200
+        assert response.json()["total"] == len(expected_ids)
 
 
 @pytest.mark.parametrize("params", [{"skip": -1}, {"limit": 0}, {"limit": 501}])

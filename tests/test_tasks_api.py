@@ -45,7 +45,7 @@ async def test_client(mock_task_service):
                     mock_redis.return_value = False
 
                     transport = ASGITransport(app=app)
-                    async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    async with AsyncClient(transport=transport, base_url="http://localhost") as client:
                         yield client, mock_task_service
 
 

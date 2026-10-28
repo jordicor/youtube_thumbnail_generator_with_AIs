@@ -2,7 +2,7 @@
 YouTube Thumbnail Generator - Image Generation Module
 ======================================================
 Generates thumbnail images using Gemini (Nano Banana Pro),
-OpenAI DALL-E, or Replicate APIs.
+OpenAI GPT Image, or Replicate APIs.
 """
 
 import base64
@@ -33,20 +33,24 @@ from config import (
     THUMBNAIL_HEIGHT,
     IMAGE_PROVIDER,
     KEEP_RAW_THUMBNAILS,
-    USE_PROMPT_SYSTEM_V3,
 )
-from utils import setup_logger, VideoOutput
-from prompt_generation import (
-    ThumbnailPrompt,
-    ThumbnailConcept,
-    ThumbnailVariation,
-    ThumbnailImage,
-    enhance_prompt_with_face_description,
-    enhance_prompt_with_face_description_from_text,
-    get_json_prompt_for_generation
-)
+from utils import load_reference_images, setup_logger, VideoOutput
+from prompt_generation import ThumbnailImage
+from gransabio_prompt_generator import environment_references, image_numbers, split_sides
 
 logger = setup_logger(__name__)
+
+
+class ImageProviderError(RuntimeError):
+    """An image provider gave no image; the message names it and says why, in its own words."""
+
+
+def _api_error_detail(error: Exception) -> str:
+    """What an API error says: the message and code of its body, not the SDK's dump of it."""
+    body = getattr(error, "body", None)
+    if isinstance(body, dict) and body.get("message"):
+        return f"{body['message']} ({body['code']})" if body.get("code") else body["message"]
+    return str(error) or type(error).__name__
 
 
 # =============================================================================
@@ -117,119 +121,8 @@ def get_effective_model(provider: str, gemini_model: str = None,
     elif provider == "poe":
         return poe_model or POE_IMAGE_MODEL
     elif provider == "replicate":
-        return "flux-1-1-pro"
+        return "flux-1.1-pro"
     return "unknown"
-
-
-# =============================================================================
-# V1 PROMPT HELPERS - SUBJECTS SECTION FOR TEXT PROMPTS
-# =============================================================================
-
-def build_subjects_section(
-    subjects: list[dict],
-    face_groups: dict = None,
-    style_source: str = None
-) -> str:
-    """
-    Build a subjects identification section for image generation prompts.
-
-    This section tells the image generation AI how to identify each person
-    in the reference images, which faces are the same person, and which
-    outfit to use for the final image.
-
-    Args:
-        subjects: List of subject dictionaries with:
-                  id, visual_identifier, inferred_role, face_group,
-                  is_costume_variant, variant_of
-        face_groups: Dict mapping face_group IDs to member lists, e.g.:
-                     {"face_A": {"members": ["person_01", "person_02"], "description": "..."}}
-        style_source: Subject ID whose outfit should be used in the final image
-
-    Returns:
-        Formatted string section for the image prompt, or empty string if no subjects
-    """
-    if not subjects:
-        return ""
-
-    lines = [
-        "═══════════════════════════════════════════════════════════════════════════════",
-        "REFERENCE IMAGE IDENTITY MAPPING - CLONE THESE EXACT FACES",
-        "═══════════════════════════════════════════════════════════════════════════════",
-        "The attached reference images contain REAL PEOPLE. You MUST clone their",
-        "EXACT faces from those images. Each person_XX ID maps to specific references.",
-        ""
-    ]
-
-    # Face groups section - critical for same-person-different-outfit scenarios
-    if face_groups:
-        lines.append("FACE GROUPS (same person, different outfits - use ALL images to learn face):")
-        lines.append("─────────────────────────────────────────────────────────────────────────────")
-        for group_id, group_data in face_groups.items():
-            if isinstance(group_data, dict):
-                members = group_data.get("members", [])
-                description = group_data.get("description", "")
-            else:
-                # Handle case where group_data is just a list
-                members = group_data if isinstance(group_data, list) else []
-                description = ""
-
-            members_str = ", ".join(members) if members else "unknown"
-            lines.append(f"  • {group_id}: [{members_str}]")
-            lines.append(f"    → Use ALL reference images of these IDs to learn this ONE face")
-            if description:
-                lines.append(f"    → {description}")
-        lines.append("")
-
-    # Subjects section
-    lines.append("SUBJECTS FROM REFERENCE IMAGES:")
-    lines.append("─────────────────────────────────────────────────────────────────────────────")
-
-    for s in subjects:
-        subject_id = s.get('id', 'unknown')
-        visual_id = s.get('visual_identifier', 'no description')
-        role = s.get('inferred_role', '')
-        face_group = s.get('face_group', '')
-        is_variant = s.get('is_costume_variant', False)
-        variant_of = s.get('variant_of')
-        is_style = (style_source == subject_id) if style_source else False
-
-        # Build the subject line
-        line = f"  • {subject_id}"
-        if face_group:
-            line += f" (face: {face_group})"
-        line += f": {visual_id}"
-
-        if role:
-            line += f" → {role}"
-
-        lines.append(line)
-
-        # Add annotations
-        if is_variant and variant_of:
-            lines.append(f"    ↳ SAME FACE as {variant_of} - clone IDENTICAL facial features")
-        if is_style:
-            lines.append(f"    ↳ ★ USE THIS OUTFIT/STYLING FOR THE FINAL IMAGE ★")
-
-    # Style source explicit mention
-    lines.append("")
-    if style_source:
-        lines.append(f"OUTFIT/STYLING: Use {style_source}'s appearance (clothing, hair style, accessories)")
-    else:
-        lines.append("OUTFIT/STYLING: Use the first subject's appearance")
-
-    lines.extend([
-        "",
-        "CRITICAL GENERATION RULES:",
-        "─────────────────────────────────────────────────────────────────────────────",
-        "1. FACE: Clone the EXACT face from ALL reference images in the same face_group",
-        "2. OUTFIT: Use the outfit from the subject marked as style_source",
-        "3. VERIFICATION: A friend of this person MUST recognize them INSTANTLY",
-        "4. NO MODIFICATIONS: Same nose, eyes, lips, skin tone, body type as references",
-        "═══════════════════════════════════════════════════════════════════════════════",
-        ""
-    ])
-
-    return "\n".join(lines)
 
 
 # =============================================================================
@@ -249,17 +142,27 @@ import re
 
 def _build_clone_rules() -> dict:
     """
-    Build static clone rules section for V3 prompt.
+    Edit Equation block: Change + Preserve + Physical Realism.
 
-    These rules instruct the image AI on how to use reference images
-    for face cloning vs outfit cloning. Includes hard restrictions.
+    This is the prompting pattern that empirically reduces face drift in
+    Gemini Nano Banana and GPT-image-2: explicit list of what changes vs
+    what must stay exactly as in the reference images, plus a realism
+    anchor. Identity phrases ("same person", "returning character") are
+    measurably more effective than long lists of negations.
     """
     return {
-        "CLONE_MODE": "EXACT_FACE_MATCH",
-        "face": "Clone from ALL reference images showing this person (multiple angles = better accuracy)",
-        "outfit": "Use outfit from style_source character",
-        "FORBIDDEN": "generating new faces, using stock faces, modifying facial features",
-        "test": "Would a friend recognize them instantly?"
+        "change": "Compose the scene described in 'scene.description' below.",
+        "preserve": [
+            "faces from reference images — exact pixel-level identity",
+            "skin tone and texture from references",
+            "hair color, length and style from references",
+            "facial hair status from references (clean-shaven stays clean-shaven, beard stays beard)",
+            "body type and build from references",
+            "ear shape and any visible distinctive features"
+        ],
+        "physical_realism": "Natural lighting consistent with the scene. Realistic shadows and skin texture. No idealization, no plastic skin, no beauty filtering.",
+        "identity_phrases": "same person from reference, consistent facial features, returning character, identical face",
+        "verification": "A friend should recognize them INSTANTLY."
     }
 
 
@@ -267,14 +170,15 @@ def _build_generation_constraints() -> dict:
     """
     Build hard constraints for face/character generation.
 
-    These constraints MUST appear at the top of the JSON to establish
-    the absolute rules before any creative content.
+    Kept short and declarative; the longer Edit Equation lives in
+    clone_rules so the model can scan rules first and then act on the
+    detailed preserve list.
     """
     return {
         "RULE": "CLONE_FACES_FROM_REFERENCES",
         "faces": "ONLY from attached reference images - NO generated/stock faces allowed",
-        "matching": "Use physical_description in face_groups to identify each person across ALL reference images",
-        "enforcement": "STRICT"
+        "identity_source": "Use the reference_mapping block to know which image shows which person_XX",
+        "enforcement": "STRICT — if you cannot match a person to a reference, do not invent one"
     }
 
 
@@ -385,7 +289,8 @@ def _build_characters_v3(image: ThumbnailImage) -> dict:
     """
     Build characters section for V3 prompt.
 
-    Prefers native V3 format (image.characters dict) if available.
+    Prefers native V3 format (image.characters dict) if available, with the
+    concept's outfit_changes replacing those characters' outfit.
     Falls back to converting legacy subjects array.
 
     Args:
@@ -396,7 +301,15 @@ def _build_characters_v3(image: ThumbnailImage) -> dict:
     """
     # V3 native: use characters dict directly if available
     if image.characters:
-        return image.characters
+        characters = {person: dict(character) for person, character in image.characters.items()}
+        for change in image.outfit_changes or []:
+            # The photos show the video's clothes; this image asks for others
+            characters[change["person_id"]].update(
+                outfit=change["outfit"],
+                outfit_note="Changed for this thumbnail: dress them as described in outfit, "
+                            "not in the clothes of the reference photos.",
+            )
+        return characters
 
     # Fallback: convert legacy subjects array to characters dict
     if not image.subjects:
@@ -467,6 +380,37 @@ def _extract_active_characters_from_scene(
     return active
 
 
+def _build_camera_and_lighting(image: ThumbnailImage) -> dict:
+    """
+    Standardised camera & lighting block.
+
+    Locking camera and lighting across generations is what stops face
+    "drift" when running the same prompt several times: when the angle
+    and light vary, the model re-imagines features. Defaults are
+    cinematic and identity-friendly (eye-level, 85mm-ish, soft daylight).
+    """
+    return {
+        "framing": image.framing or "medium close-up, eye-level",
+        "equipment": image.equipment or "85mm lens equivalent, f/1.8 shallow depth of field",
+        "lighting": image.lighting or "soft natural daylight from camera-left, realistic skin shadows",
+        "composition": image.composition or "rule of thirds, subject slightly off-centre with negative space for text overlay",
+    }
+
+
+def _attached_setting(settings: list) -> str:
+    """The V3 setting when the user attached photos of it, by their relationship."""
+    mode = settings[0]["environment_mode"]
+    keep = "Keep it as it is: same walls, furniture, objects and colors; do not replace, relocate or redecorate it."
+    if mode == "same":
+        return f"The real place shown in {image_numbers(settings)} (ENVIRONMENT reference). {keep}"
+    if mode == "alternatives":
+        return (f"ONE of the real places shown in {image_numbers(settings)} (ENVIRONMENT references): the one "
+                f"framing_and_lighting names; never a mix of them. {keep}")
+    left, right = split_sides(settings)
+    return (f"Split screen: the left panel is the real place shown in {left}, the right panel the one in "
+            f"{right} (ENVIRONMENT references). {keep}")
+
+
 def _build_scene_v3(image: ThumbnailImage) -> dict:
     """
     Build scene section for V3 prompt.
@@ -474,7 +418,7 @@ def _build_scene_v3(image: ThumbnailImage) -> dict:
     Creates scene with:
     - description: what's happening (with clone prefixes for each active character)
     - character_directions: pose/expression for ACTIVE characters only (with MUST_CLONE_FACE)
-    - environment: setting, props, lighting, effects
+    - environment: setting, props, and effects (lighting/camera live in camera_and_lighting)
 
     Args:
         image: ThumbnailImage with scene data
@@ -518,12 +462,20 @@ def _build_scene_v3(image: ThumbnailImage) -> dict:
             "expression": image.subject_expression or "engaging expression"
         }
 
-    # Build environment
-    environment = {
-        "setting": image.background or "professional studio background",
-        "props": image.visual_elements or [],
-        "lighting": image.lighting or "professional three-point lighting"
-    }
+    # Build environment (setting + props; lighting/camera moved to camera_and_lighting)
+    settings = environment_references(image.reference_mapping)
+    if settings:
+        # The setting photos are the place: the concept only frames and lights it
+        environment = {
+            "setting": _attached_setting(settings),
+            "framing_and_lighting": image.background,
+            "props": image.visual_elements or [],
+        }
+    else:
+        environment = {
+            "setting": image.background or "professional studio background",
+            "props": image.visual_elements or [],
+        }
 
     # Add effects if present (V3 field)
     if image.environment_effects:
@@ -578,7 +530,13 @@ def build_image_prompt_v3(
             "composition_style": style.get("composition_style"),
             "line_work": style.get("line_work"),
             "overall_aesthetic": style.get("overall_aesthetic"),
-            "instruction": "Generate the image in THIS style. The FIRST reference image shows the target style. Do NOT default to photorealistic if a different style is specified."
+            "instruction": (
+                "Generate the image in THIS style. "
+                + ("Use the attached style image identified in reference_mapping. " if any(
+                    entry.get("is_style_reference") for entry in (image.reference_mapping or [])
+                ) else "Use this style description; the identity photos do not define the style. ")
+                + "Do NOT default to photorealistic if a different style is specified."
+            )
         }
 
     # Check if we have identity data (V3 characters or legacy subjects)
@@ -592,6 +550,22 @@ def build_image_prompt_v3(
         # Clone rules with enforcement
         prompt_dict["clone_rules"] = _build_clone_rules()
 
+        # Deterministic image_index → person_id mapping (from face clustering).
+        # When present, this is the GROUND TRUTH for which reference image shows
+        # which person. The generator MUST trust this mapping over visual inference.
+        if image.reference_mapping:
+            prompt_dict["reference_mapping"] = [
+                {
+                    "image_index": entry.get("image_index"),
+                    "person_id": entry.get("person_id"),
+                    "is_style_reference": entry.get("is_style_reference", False),
+                    **({"face_sheet_views": entry["face_sheet_views"]} if entry.get("face_sheet_views") else {}),
+                    "reference_role": entry.get("reference_role", "style" if entry.get("is_style_reference") else "face"),
+                    **({key: entry[key] for key in ("body_coverage", "body_posture", "body_reference_status", "environment_mode", "environment_side", "environment_instruction", "source_type", "source_asset", "is_primary", "view", "expression") if entry.get(key)}),
+                }
+                for entry in image.reference_mapping
+            ]
+
         # Face groups with physical descriptions
         face_groups = _build_face_groups_v3(image)
         if face_groups:
@@ -601,6 +575,9 @@ def build_image_prompt_v3(
         characters = _build_characters_v3(image)
         if characters:
             prompt_dict["characters"] = characters
+
+    # Standardised camera & lighting block — locking these reduces face drift
+    prompt_dict["camera_and_lighting"] = _build_camera_and_lighting(image)
 
     # Scene with character_directions for active characters only
     prompt_dict["scene"] = _build_scene_v3(image)
@@ -622,7 +599,7 @@ def build_image_prompt_v3(
             "aspect_ratio": "16:9"
         }
 
-    # Optional: text_in_image (different from text_overlay which is for UI)
+    # The concept supplies the visible wording; its UI label is derived from it.
     if image.text_in_image:
         prompt_dict["text_in_image"] = image.text_in_image
 
@@ -633,19 +610,78 @@ def build_image_prompt_v3(
     return prompt_dict
 
 
-def _build_face_source_header() -> str:
+def _build_face_source_header(reference_mapping: Optional[list] = None) -> str:
     """
     Build a mandatory header that establishes face source restrictions.
 
     This header appears BEFORE the JSON to ensure the image AI reads
-    the constraints before processing any creative content.
+    the constraints before processing any creative content. When a
+    reference_mapping is provided, an explicit "image N → person_XX"
+    list is rendered so the AI does not have to infer identity by
+    visual similarity.
     """
-    return """### FACE CLONING REQUIRED ###
-Clone ALL faces from attached reference images ONLY.
-NO generated/stock faces allowed - each person_XX must match a reference photo exactly.
+    base = """### FACE CLONING REQUIRED ###
+Preserve the selected people's facial identities from their dedicated FACE references only.
+BODY references describe visible proportions. ENVIRONMENT references describe the place, not additional people.
+Each person_XX must match their own face references.
 A friend must recognize them INSTANTLY.
-
 """
+
+    if not reference_mapping:
+        return base + "\n"
+
+    # Group consecutive image indices that share the same person_id into ranges
+    # so the header reads "Images 1-2: person_01" instead of one line per image.
+    lines = []
+    runs: list[tuple] = []  # (label, first_idx, last_idx)
+    for entry in reference_mapping:
+        idx = entry.get("image_index")
+        if entry.get("is_style_reference"):
+            label = "STYLE REFERENCE (visual style only, NOT a person to clone)"
+        elif entry.get("reference_role") == "environment":
+            label = "ENVIRONMENT: " + entry.get("environment_instruction", "Preserve the setting.") + " Use dedicated references for each person's identity and body."
+        elif entry.get("reference_role") == "body":
+            label = (
+                f"BODY REFERENCE for {entry['person_id']}: {entry['body_coverage']}, "
+                f"view {entry.get('view') or 'unspecified'}, estimated posture {entry['body_posture']}; preserve observed proportions, not the pose or clothing. "
+                "Do not beautify, slim, inflate, or normalize the person's build. "
+                "Observed body proportions take precedence over earlier textual build descriptions. "
+                "Face identity, hair, and character appearance come from the PRIMARY face reference. "
+                "Do not copy a costume, wig, hairstyle, or accessories from a body-only reference."
+            )
+        elif entry.get("person_id") and entry.get("face_sheet_views"):
+            label = (
+                f"face sheet for {entry['person_id']}: a grid of crops of that one face "
+                f"({entry['face_sheet_views']}), not a layout to copy"
+            )
+        elif entry.get("person_id"):
+            kind = "PRIMARY face reference" if entry.get("is_primary") else "face reference"
+            label = f"{kind} for {entry['person_id']}"
+            observed = " / ".join(filter(None, (entry.get("view"), entry.get("expression"))))
+            if observed:
+                label += f"; observed view/expression: {observed}"
+            if entry.get("body_reference_status") == "unavailable":
+                label += "; no reliable body reference available: do not claim full-body proportions are observed"
+        else:
+            label = "unlabelled reference"
+
+        if runs and runs[-1][0] == label and runs[-1][2] == idx - 1:
+            runs[-1] = (label, runs[-1][1], idx)
+        else:
+            runs.append((label, idx, idx))
+
+    for label, first, last in runs:
+        if first == last:
+            lines.append(f"- Image {first}: {label}")
+        else:
+            lines.append(f"- Images {first}-{last}: {label}")
+
+    return (
+        base
+        + "\nREFERENCE IMAGES — DETERMINISTIC ROLE MAPPING (trust this, do not re-infer):\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
 
 
 def build_v3_prompt_string(
@@ -668,22 +704,9 @@ def build_v3_prompt_string(
     # Add header only when we have references and identity data
     has_identity_data = image.characters or image.subjects
     if has_reference_images and has_identity_data:
-        return _build_face_source_header() + json_content
+        return _build_face_source_header(image.reference_mapping) + json_content
 
     return json_content
-
-
-def get_prompt_system_version() -> str:
-    """
-    Get the currently active prompt system version.
-
-    Returns:
-        "V3" if USE_PROMPT_SYSTEM_V3 is True (default)
-        "V1" otherwise (legacy fallback)
-    """
-    if USE_PROMPT_SYSTEM_V3:
-        return "V3"
-    return "V1"
 
 
 # =============================================================================
@@ -695,10 +718,8 @@ def generate_with_gemini(
     reference_images: list[Path] = None,
     output_path: Path = None,
     model: str = None,
-    concept: ThumbnailConcept = None,
-    variation: ThumbnailVariation = None,
     image: ThumbnailImage = None
-) -> Optional[Path]:
+) -> Path:
     """
     Generate image using Google Gemini API (Nano Banana / Nano Banana Pro / Nano Banana 2).
 
@@ -707,93 +728,39 @@ def generate_with_gemini(
         reference_images: Optional list of reference image paths
         output_path: Where to save the generated image
         model: Gemini model to use
-        concept: V2 - ThumbnailConcept with structured fields (legacy)
-        variation: V2 - ThumbnailVariation with structured fields (legacy)
-        image: New flat ThumbnailImage structure (preferred)
+        image: ThumbnailImage with structured V2/V3 fields used to build the prompt
 
     Returns:
-        Path to generated image or None if failed
+        Path to the generated image
+
+    Raises:
+        ImageProviderError: Gemini gave no image (the message says why)
     """
 
+    # Use provided model or default
+    gemini_model = model or GEMINI_IMAGE_MODEL
     if not GEMINI_API_KEY:
-        logger.error("Gemini API key not set")
-        return None
+        raise ImageProviderError("Gemini: GEMINI_API_KEY is not set")
+    if gemini_model not in GEMINI_MODEL_MAX_REFS:
+        raise ValueError(f"Unknown Gemini image model: {gemini_model}")
 
-    try:
-        from google import genai
-        from google.genai import types
+    has_refs = bool(reference_images)
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
-
-        has_refs = reference_images and len(reference_images) > 0
-
-        # V3: Optimized JSON structure (default when ThumbnailImage available)
-        if USE_PROMPT_SYSTEM_V3 and image and image.has_v2_fields():
-            logger.info("Using V3 optimized JSON prompt from ThumbnailImage (~1,000 chars)")
-            full_prompt = build_v3_prompt_string(image, has_refs)
-            logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
-
-        # V1: Legacy text prompt with negations (~3,500 chars)
-        elif has_refs:
-            # Build subjects section if available (from image or legacy concept)
-            subjects_text = ""
-            subjects = (image.subjects if image else None) or (concept.subjects if concept else None)
-            face_groups = (image.face_groups if image else None) or (getattr(concept, 'face_groups', None) if concept else None)
-            style_source = (image.style_source if image else None) or (getattr(concept, 'style_source', None) if concept else None)
-            if subjects:
-                subjects_text = build_subjects_section(subjects, face_groups, style_source) + "\n"
-
-            full_prompt = f"""{subjects_text}STRICT IDENTITY CLONING - THIS IS THE SAME PERSON, NOT A SIMILAR ONE:
-The generated image MUST show an EXACT CLONE of the person(s) in the reference photos.
-This is NOT "inspired by" or "similar to" - it must be THE EXACT SAME PERSON(S).
-
-═══════════════════════════════════════════════════════════════
-ABSOLUTELY FORBIDDEN - DO NOT DO ANY OF THESE:
-═══════════════════════════════════════════════════════════════
-❌ Add facial hair (beard, mustache, stubble) if NOT present in reference
-❌ Remove facial hair if present in reference
-❌ Change body weight or build (no thinner, no heavier, no more muscular)
-❌ Modify face shape, jaw line, chin, or cheekbones
-❌ Alter nose size, shape, or bridge
-❌ Change eye size, shape, spacing, or color
-❌ Modify lip size, shape, or fullness
-❌ Add or remove glasses/sunglasses
-❌ Change hairstyle, hair length, or hair color
-❌ Alter skin tone, complexion, or texture
-❌ Add wrinkles, scars, moles, or marks not in reference
-❌ "Beautify", "idealize", or "enhance" any features
-❌ Age the person (older or younger)
-❌ Change clothing style or colors from reference
-
-═══════════════════════════════════════════════════════════════
-MANDATORY - COPY EXACTLY FROM REFERENCE:
-═══════════════════════════════════════════════════════════════
-✅ Exact facial proportions (interpupillary distance, nose-to-lip ratio)
-✅ Same body type and physical build
-✅ Identical skin texture, tone, and any visible features
-✅ Same hair (exact style, color, length, texture)
-✅ Same facial hair status (if clean-shaven in reference, MUST be clean-shaven)
-✅ Same clothing from reference images
-✅ Same accessories (glasses, earrings, etc.)
-
-SCENE TO CREATE (uses subject IDs from above if provided):
-{prompt}
-
-IMPORTANT: The scene description uses subject IDs (person_01, person_02, etc.) to
-indicate which person from the references does what. Match each ID to the
-corresponding reference image based on the subject identification above.
-Reference images provide identity to preserve; the scene describes actions/poses.
-
-TECHNICAL:
-- 16:9 aspect ratio (1280x720)
-- Eye-catching and professional
-- Bold, contrasting colors
-- DO NOT include any text in the image
-
-VERIFICATION: A friend of these people should recognize them INSTANTLY.
-"""
-        else:
-            full_prompt = f"""Create a professional YouTube thumbnail.
+    # V3 optimized JSON structure - requires V2 fields populated by LLM
+    if image and image.has_v2_fields():
+        logger.info("Using V3 optimized JSON prompt from ThumbnailImage")
+        full_prompt = build_v3_prompt_string(image, has_refs)
+        logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
+    elif has_refs:
+        # Fail-fast: references provided but no V2 fields means the LLM
+        # didn't populate scene/subject_pose, or cached prompts are stale.
+        raise ValueError(
+            "Cannot build the Gemini prompt: reference images were given but the "
+            "ThumbnailImage has no V2 fields (scene/subject_pose). "
+            "Regenerate prompts with force_prompts=True."
+        )
+    else:
+        full_prompt = f"""Create a professional YouTube thumbnail.
 
 {prompt}
 
@@ -804,99 +771,82 @@ Requirements:
 - DO NOT include any text in the image
 """
 
-        # Use provided model or default
-        gemini_model = model or GEMINI_IMAGE_MODEL
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as error:
+        raise ImageProviderError("Gemini: google-genai package not installed. Install with: pip install google-genai") from error
 
-        logger.info(f"Generating image with Gemini ({gemini_model})...")
+    logger.info(f"Generating image with Gemini ({gemini_model})...")
 
-        # Prepare content parts
-        contents = []
+    # Prepare content parts
+    contents = []
 
-        # Add reference images if provided
-        # Limit depends on model: Gemini 3 Pro = 14, Gemini 2.5 Flash = 3
-        if reference_images:
-            max_refs = GEMINI_MODEL_MAX_REFS.get(gemini_model, 3)  # Default 3 for Flash
-            logger.info(f"Using up to {max_refs} reference images for {gemini_model}")
-            for img_path in reference_images[:max_refs]:
-                if img_path.exists():
-                    try:
-                        with Image.open(img_path) as img:
-                            if max(img.size) > 1024:
-                                img.thumbnail((1024, 1024))
+    # All references must be valid and within the model's count limit.
+    if reference_images:
+        for data in load_reference_images(reference_images, GEMINI_MODEL_MAX_REFS[gemini_model]):
+            contents.append(types.Part.from_bytes(data=data, mime_type="image/png"))
 
-                            img_buffer = io.BytesIO()
-                            img.save(img_buffer, format='JPEG', quality=85)
-                            img_bytes = img_buffer.getvalue()
+    # Add text prompt
+    contents.append(full_prompt)
 
-                        contents.append(types.Part.from_bytes(
-                            data=img_bytes,
-                            mime_type="image/jpeg"
-                        ))
-                        logger.info(f"Added reference image: {img_path.name}")
-                    except Exception as e:
-                        logger.warning(f"Could not load reference image {img_path}: {e}")
+    # Build generation config: every supported model takes image_size and aspect_ratio
+    gen_config = types.GenerateContentConfig(
+        response_modalities=["IMAGE", "TEXT"],
+        image_config=types.ImageConfig(
+            aspect_ratio="16:9",
+            image_size=GEMINI_PRO_OUTPUT_RESOLUTION,  # "1K", "2K", or "4K"
+        ),
+    )
+    logger.info(f"Using {gemini_model} with {GEMINI_PRO_OUTPUT_RESOLUTION} resolution (16:9)")
 
-        # Add text prompt
-        contents.append(full_prompt)
-
-        # Build generation config
-        # Gemini 3 Pro and Gemini 3.1 Flash support image_size and aspect_ratio
-        supports_image_config = "gemini-3-pro" in gemini_model or "gemini-3.1-flash" in gemini_model
-
-        if supports_image_config:
-            gen_config = types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="16:9",
-                    image_size=GEMINI_PRO_OUTPUT_RESOLUTION,  # "1K", "2K", or "4K"
-                ),
-            )
-            logger.info(f"Using {gemini_model} with {GEMINI_PRO_OUTPUT_RESOLUTION} resolution (16:9)")
-        else:
-            # Standard config for other models (gemini-2.5-flash-image, etc.)
-            gen_config = types.GenerateContentConfig(
-                response_modalities=["IMAGE", "TEXT"],
-            )
-
-        # Generate with image output modality
+    # Generate with image output modality
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
         response = client.models.generate_content(
             model=gemini_model,
             contents=contents,
             config=gen_config,
         )
+    except Exception as error:
+        raise ImageProviderError(f"Gemini {gemini_model}: {_api_error_detail(error)}") from error
 
-        # Extract image from response
-        if response.candidates:
-            for candidate in response.candidates:
-                if candidate.content and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        if hasattr(part, 'inline_data') and part.inline_data:
-                            if part.inline_data.mime_type.startswith('image/'):
-                                image_data = part.inline_data.data
+    # Extract image from response
+    image_data = next((
+        part.inline_data.data
+        for candidate in response.candidates or []
+        if candidate.content and candidate.content.parts
+        for part in candidate.content.parts
+        if getattr(part, 'inline_data', None) and part.inline_data.mime_type.startswith('image/')
+    ), None)
+    if image_data is None:
+        raise ImageProviderError(f"Gemini {gemini_model}: no image in the answer ({_gemini_no_image_reason(response)})")
 
-                                # Save image
-                                if output_path:
-                                    # Save raw image first (if enabled)
-                                    save_raw_thumbnail(image_data, output_path, logger)
+    # Save raw image first (if enabled)
+    save_raw_thumbnail(image_data, output_path, logger)
 
-                                    # Load image for resizing
-                                    with Image.open(io.BytesIO(image_data)) as img:
-                                        # Resize to exact thumbnail dimensions
-                                        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-                                        resized.save(output_path, 'PNG', quality=95)
+    # Resize to exact thumbnail dimensions
+    with Image.open(io.BytesIO(image_data)) as img:
+        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+        resized.save(output_path, 'PNG', quality=95)
 
-                                    logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
-                                    return output_path
+    logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
+    return output_path
 
-        logger.warning("No image in Gemini response")
-        return None
 
-    except ImportError:
-        logger.error("google-genai package not installed. Install with: pip install google-genai")
-        return None
-    except Exception as e:
-        logger.error(f"Gemini image generation failed: {e}")
-        return None
+def _gemini_no_image_reason(response) -> str:
+    """Why a Gemini answer holds no image: its block and finish reasons, and any text it wrote instead."""
+    reasons = []
+    feedback = getattr(response, "prompt_feedback", None)
+    if feedback is not None and getattr(feedback, "block_reason", None):
+        reasons.append(f"prompt blocked: {getattr(feedback.block_reason, 'name', feedback.block_reason)}")
+    for candidate in response.candidates or []:
+        finish_reason = getattr(candidate, "finish_reason", None)
+        if finish_reason:
+            reasons.append(f"finish reason: {getattr(finish_reason, 'name', finish_reason)}")
+        parts = candidate.content.parts if candidate.content and candidate.content.parts else []
+        reasons += [part.text.strip() for part in parts if getattr(part, "text", None)]
+    return "; ".join(reasons) or "no reason given"
 
 
 def generate_with_openai(
@@ -904,234 +854,127 @@ def generate_with_openai(
     reference_images: list[Path] = None,
     output_path: Path = None,
     model: str = None,
-    concept: ThumbnailConcept = None,
-    variation: ThumbnailVariation = None,
     image: ThumbnailImage = None
-) -> Optional[Path]:
+) -> Path:
     """
-    Generate image using OpenAI GPT Image or DALL-E.
+    Generate image using OpenAI GPT Image.
 
-    Supports:
-    - gpt-image-2 (latest, multilingual text, native reasoning) - up to 16 reference images
-    - gpt-image-1.5 (high quality) - up to 16 reference images
-    - gpt-image-1 (standard) - up to 16 reference images
-    - gpt-image-1-mini (faster, lower cost) - up to 16 reference images
-    - dall-e-3 (legacy, deprecated) - NO reference support
+    Supports (all with up to 16 reference images, sent to images.edit):
+    - gpt-image-2.5-sunburst (most capable, precise editing)
+    - gpt-image-2.5-flare (fast, high quality)
+    - gpt-image-2 (previous generation)
 
     Args:
         prompt: Text prompt for image generation (V1) or fallback (V2)
         reference_images: Reference images are passed as base64 encoded images
         output_path: Where to save the generated image
         model: OpenAI model to use
-        concept: V2 - ThumbnailConcept with structured fields (legacy)
-        variation: V2 - ThumbnailVariation with structured fields (legacy)
-        image: New flat ThumbnailImage structure (preferred)
+        image: ThumbnailImage with structured V2/V3 fields used to build the prompt
+
+    Returns:
+        Path to the generated image
+
+    Raises:
+        ImageProviderError: OpenAI gave no image (the message says why, e.g. its safety system)
     """
 
+    # Use provided model or default from config
+    selected_model = model or OPENAI_IMAGE_MODEL
     if not OPENAI_API_KEY:
-        logger.error("OpenAI API key not set")
-        return None
+        raise ImageProviderError("OpenAI: OPENAI_API_KEY is not set")
+    if selected_model not in OPENAI_MODEL_MAX_REFS:
+        raise ValueError(f"Unknown OpenAI image model: {selected_model}")
 
+    max_refs = OPENAI_MODEL_MAX_REFS[selected_model]
+    has_refs = bool(reference_images)
+
+    logger.info(f"Generating image with OpenAI ({selected_model})...")
+    if has_refs:
+        logger.info(f"Using up to {max_refs} reference images")
+
+    # V3 optimized JSON structure - requires V2 fields populated by LLM
+    if image and image.has_v2_fields():
+        logger.info("Using V3 optimized JSON prompt from ThumbnailImage")
+        full_prompt = build_v3_prompt_string(image, has_refs)
+        logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
+    elif has_refs:
+        # Fail-fast: references provided but no V2 fields means the LLM
+        # didn't populate scene/subject_pose, or cached prompts are stale.
+        raise ValueError(
+            "Cannot build the OpenAI prompt: reference images were given but the "
+            "ThumbnailImage has no V2 fields (scene/subject_pose). "
+            "Regenerate prompts with force_prompts=True."
+        )
+    else:
+        full_prompt = f"""Professional YouTube video thumbnail.
+
+{prompt}
+
+Style: Bold, eye-catching YouTube thumbnail with high contrast colors.
+Do NOT include any text or letters in the image.
+Photorealistic style, professional quality.
+"""
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    references = load_reference_images(reference_images, max_refs, max_bytes=50_000_000) if has_refs else []
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-        # Use provided model or default from config
-        selected_model = model or OPENAI_IMAGE_MODEL
-        is_gpt_image = selected_model.startswith("gpt-image")
-
-        # Check reference image support for this model
-        max_refs = OPENAI_MODEL_MAX_REFS.get(selected_model, 0)
-        has_refs = reference_images and len(reference_images) > 0 and max_refs > 0
-
-        if reference_images and max_refs == 0:
-            logger.warning(
-                f"{selected_model} does NOT support reference images. "
-                f"The {len(reference_images)} provided reference image(s) will be IGNORED."
-            )
-
-        logger.info(f"Generating image with OpenAI ({selected_model})...")
         if has_refs:
-            logger.info(f"Using up to {max_refs} reference images")
-
-        # V3: Optimized JSON structure (default when ThumbnailImage available)
-        if USE_PROMPT_SYSTEM_V3 and image and image.has_v2_fields():
-            logger.info("Using V3 optimized JSON prompt from ThumbnailImage (~1,000 chars)")
-            full_prompt = build_v3_prompt_string(image, has_refs)
-            logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
-
-        # V1: Legacy text prompt
-        elif has_refs:
-            # Build subjects section if available (from image or legacy concept)
-            subjects_text = ""
-            subjects = (image.subjects if image else None) or (concept.subjects if concept else None)
-            face_groups = (image.face_groups if image else None) or (getattr(concept, 'face_groups', None) if concept else None)
-            style_source = (image.style_source if image else None) or (getattr(concept, 'style_source', None) if concept else None)
-            if subjects:
-                subjects_text = build_subjects_section(subjects, face_groups, style_source) + "\n"
-
-            # Build prompt with reference image instructions
-            ref_count = min(len(reference_images), max_refs)
-            full_prompt = f"""{subjects_text}STRICT IDENTITY CLONING from the {ref_count} reference image(s) provided.
-The generated image MUST show the EXACT SAME PERSON(S) from the reference photos.
-
-Professional YouTube video thumbnail.
-
-SCENE (uses subject IDs if provided above):
-{prompt}
-
-MANDATORY - COPY EXACTLY FROM REFERENCE:
-- Exact facial features and proportions for each person
-- Same hair style, color, and length
-- Same skin tone and texture
-- Same body type
-- Costume variants (same person in different outfit) = IDENTICAL face
-
-Style: Bold, eye-catching YouTube thumbnail with high contrast colors.
-Do NOT include any text or letters in the image.
-Photorealistic style, professional quality.
-
-VERIFICATION: A friend of these people should recognize them INSTANTLY.
-"""
+            image_tuples = [(f"ref_{i}.png", data, "image/png") for i, data in enumerate(references)]
+            response = client.images.edit(
+                model=selected_model,
+                image=image_tuples if len(image_tuples) > 1 else image_tuples[0],
+                prompt=full_prompt,
+                size=OPENAI_IMAGE_SIZE,
+                quality=OPENAI_IMAGE_QUALITY,
+            )
         else:
-            full_prompt = f"""Professional YouTube video thumbnail.
-
-{prompt}
-
-Style: Bold, eye-catching YouTube thumbnail with high contrast colors.
-Do NOT include any text or letters in the image.
-Photorealistic style, professional quality.
-"""
-
-        if is_gpt_image:
-            # GPT Image models (gpt-image-2, gpt-image-1.5, gpt-image-1, gpt-image-1-mini)
-            response = None
-
-            if has_refs:
-                # Use images.edit endpoint with reference images
-                # images.edit accepts an array of images (up to 16 for gpt-image models)
-                ref_image_files = []
-                for img_path in reference_images[:max_refs]:
-                    if img_path.exists():
-                        try:
-                            # Load and resize image for efficiency
-                            with Image.open(img_path) as img:
-                                if max(img.size) > 1024:
-                                    img.thumbnail((1024, 1024))
-
-                                # Convert to PNG bytes (required format)
-                                img_buffer = io.BytesIO()
-                                img.save(img_buffer, format='PNG')
-                                img_buffer.seek(0)
-                            ref_image_files.append(img_buffer)
-                            logger.info(f"Added reference image: {img_path.name}")
-                        except Exception as e:
-                            logger.warning(f"Could not load reference image {img_path}: {e}")
-
-                if ref_image_files:
-                    # Use images.edit with reference images
-                    # input_fidelity="high" preserves facial features better (not supported on mini)
-                    # Pass as tuples with filename and mime type for proper detection
-                    image_tuples = [
-                        (f"ref_{i}.png", img_buffer, "image/png")
-                        for i, img_buffer in enumerate(ref_image_files)
-                    ]
-
-                    # Build edit params.
-                    # input_fidelity is only supported on gpt-image-1 and gpt-image-1.5.
-                    # gpt-image-2 always processes inputs at high fidelity automatically (param not allowed).
-                    edit_params = {
-                        "model": selected_model,
-                        "image": image_tuples if len(image_tuples) > 1 else image_tuples[0],
-                        "prompt": full_prompt,
-                        "size": OPENAI_IMAGE_SIZE,
-                    }
-                    if selected_model in {"gpt-image-1", "gpt-image-1.5"}:
-                        edit_params["input_fidelity"] = "high"
-
-                    response = client.images.edit(**edit_params)
-
-            # Fallback to standard generation if no refs or refs failed to load
-            if response is None:
-                response = client.images.generate(
-                    model=selected_model,
-                    prompt=full_prompt,
-                    size=OPENAI_IMAGE_SIZE,
-                    quality=OPENAI_IMAGE_QUALITY,
-                    n=1,
-                )
-
-            # Extract image from response
-            if response.data and len(response.data) > 0:
-                image_data = response.data[0]
-
-                # GPT Image returns b64_json by default
-                if hasattr(image_data, 'b64_json') and image_data.b64_json:
-                    img_bytes = base64.b64decode(image_data.b64_json)
-                elif hasattr(image_data, 'url') and image_data.url:
-                    # Fallback to URL if available
-                    import requests
-                    img_response = requests.get(image_data.url)
-                    if img_response.status_code != 200:
-                        logger.error("Failed to download image from URL")
-                        return None
-                    img_bytes = img_response.content
-                else:
-                    logger.error("No image data in response")
-                    return None
-
-                # Save raw image first (if enabled)
-                save_raw_thumbnail(img_bytes, output_path, logger)
-
-                # Load and resize to exact thumbnail dimensions
-                with Image.open(io.BytesIO(img_bytes)) as img:
-                    resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-
-                    # Save with configured format
-                    save_format = OPENAI_IMAGE_FORMAT.upper()
-                    if save_format == "JPG":
-                        save_format = "JPEG"
-
-                    resized.save(output_path, save_format, quality=95)
-                logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
-                return output_path
-
-        else:
-            # Legacy DALL-E 3 (deprecated but still supported until 2026)
             response = client.images.generate(
                 model=selected_model,
-                prompt=full_prompt[:4000],  # DALL-E 3 has a 4000 char limit
-                size="1792x1024",  # Closest to 16:9
-                quality="hd",
+                prompt=full_prompt,
+                size=OPENAI_IMAGE_SIZE,
+                quality=OPENAI_IMAGE_QUALITY,
                 n=1,
             )
+    except Exception as error:
+        raise ImageProviderError(f"OpenAI {selected_model}: {_api_error_detail(error)}") from error
 
-            if response.data and len(response.data) > 0:
-                image_url = response.data[0].url
+    # Extract image from response
+    if not response.data:
+        raise ImageProviderError(f"OpenAI {selected_model}: no image in the answer")
+    image_data = response.data[0]
 
-                # Download image
-                import requests
-                img_response = requests.get(image_url)
+    # GPT Image returns b64_json by default
+    if hasattr(image_data, 'b64_json') and image_data.b64_json:
+        img_bytes = base64.b64decode(image_data.b64_json)
+    elif hasattr(image_data, 'url') and image_data.url:
+        # Fallback to URL if available
+        import requests
+        img_response = requests.get(image_data.url)
+        if img_response.status_code != 200:
+            raise ImageProviderError(
+                f"OpenAI {selected_model}: downloading the image failed (HTTP {img_response.status_code})"
+            )
+        img_bytes = img_response.content
+    else:
+        raise ImageProviderError(f"OpenAI {selected_model}: no image data in the answer")
 
-                if img_response.status_code == 200:
-                    img_bytes = img_response.content
+    # Save raw image first (if enabled)
+    save_raw_thumbnail(img_bytes, output_path, logger)
 
-                    # Save raw image first (if enabled)
-                    save_raw_thumbnail(img_bytes, output_path, logger)
+    # Load and resize to exact thumbnail dimensions
+    with Image.open(io.BytesIO(img_bytes)) as img:
+        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
 
-                    # Load and resize to exact thumbnail dimensions
-                    with Image.open(io.BytesIO(img_bytes)) as img:
-                        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-                        resized.save(output_path, 'PNG', quality=95)
-                    logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
-                    return output_path
+        # Save with configured format
+        save_format = OPENAI_IMAGE_FORMAT.upper()
+        if save_format == "JPG":
+            save_format = "JPEG"
 
-        return None
-
-    except Exception as e:
-        logger.error(f"OpenAI image generation failed: {e}")
-        return None
+        resized.save(output_path, save_format, quality=95)
+    logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
+    return output_path
 
 
 def generate_with_replicate(
@@ -1139,7 +982,7 @@ def generate_with_replicate(
     reference_images: list[Path] = None,
     output_path: Path = None,
     model: str = None
-) -> Optional[Path]:
+) -> Path:
     """
     Generate image using Replicate API (FLUX, SDXL, etc.).
 
@@ -1147,60 +990,44 @@ def generate_with_replicate(
     Reference limits per model:
     - flux-1.1-pro: 1 image (via image_prompt)
     - face-to-many: 1 face image
+
+    Raises:
+        ImageProviderError: Replicate gave no image (the message says why)
     """
 
     try:
         import replicate
         import requests
+    except ImportError as error:
+        raise ImageProviderError("Replicate: replicate package not installed") from error
 
-        # Use provided model or default
-        selected_model = model or "black-forest-labs/flux-1.1-pro"
-        model_short_name = selected_model.split("/")[-1] if "/" in selected_model else selected_model
+    # Use provided model or default
+    selected_model = model or "black-forest-labs/flux-1.1-pro"
+    model_short_name = selected_model.split("/")[-1] if "/" in selected_model else selected_model
 
-        # Get max refs for this model
-        max_refs = REPLICATE_MODEL_MAX_REFS.get(model_short_name, 1)
+    # Get max refs for this model
+    max_refs = REPLICATE_MODEL_MAX_REFS.get(model_short_name, 1)
 
-        logger.info(f"Generating image with Replicate ({selected_model})...")
+    logger.info(f"Generating image with Replicate ({selected_model})...")
 
-        # Prepare input
-        input_data = {
-            "prompt": f"Professional YouTube thumbnail. {prompt}. Bold colors, eye-catching, 16:9 aspect ratio.",
-            "aspect_ratio": "16:9",
-            "output_format": "png",
-            "output_quality": 95,
-        }
+    # Prepare input
+    input_data = {
+        "prompt": f"Professional YouTube thumbnail. {prompt}. Bold colors, eye-catching, 16:9 aspect ratio.",
+        "aspect_ratio": "16:9",
+        "output_format": "png",
+        "output_quality": 95,
+    }
 
-        # If we have reference images, use them according to model limits
-        if reference_images and len(reference_images) > 0:
-            ref_img = reference_images[0]  # Most Replicate models only support 1 reference
-            if ref_img.exists():
-                try:
-                    logger.info(f"Using {min(len(reference_images), max_refs)} reference image(s) for {model_short_name}")
+    if reference_images:
+        references = load_reference_images(reference_images, max_refs)
+        image_url = "data:image/png;base64," + base64.b64encode(references[0]).decode('ascii')
+        if "face-to-many" in selected_model:
+            input_data = {"image": image_url, "prompt": prompt, "style": "Video game",
+                          "negative_prompt": "blurry, low quality"}
+        else:
+            input_data["image_prompt"] = image_url
 
-                    # Resize image for efficiency
-                    with Image.open(ref_img) as img:
-                        if max(img.size) > 1024:
-                            img.thumbnail((1024, 1024))
-                        img_buffer = io.BytesIO()
-                        img.save(img_buffer, format='JPEG', quality=85)
-                    img_data = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
-
-                    if "face-to-many" in selected_model:
-                        # Use face-to-many for stylized face transformations
-                        input_data = {
-                            "image": f"data:image/jpeg;base64,{img_data}",
-                            "prompt": prompt,
-                            "style": "Video game",  # or "3D", "Emoji", etc.
-                            "negative_prompt": "blurry, low quality",
-                        }
-                    else:
-                        # FLUX 1.1 Pro uses image_prompt for reference
-                        input_data["image_prompt"] = f"data:image/jpeg;base64,{img_data}"
-                        logger.info(f"Added reference image: {ref_img.name}")
-
-                except Exception as e:
-                    logger.warning(f"Could not use face reference: {e}")
-
+    try:
         output = replicate.run(selected_model, input=input_data)
 
         # Handle output (can be URL or list)
@@ -1209,30 +1036,26 @@ def generate_with_replicate(
         else:
             image_url = output
 
-        if image_url:
-            # Download and save
-            response = requests.get(image_url)
-            if response.status_code == 200:
-                img_bytes = response.content
+        # Download
+        response = requests.get(image_url) if image_url else None
+    except Exception as error:
+        raise ImageProviderError(f"Replicate {selected_model}: {_api_error_detail(error)}") from error
 
-                # Save raw image first (if enabled)
-                save_raw_thumbnail(img_bytes, output_path, logger)
+    if response is None:
+        raise ImageProviderError(f"Replicate {selected_model}: no image in the answer")
+    if response.status_code != 200:
+        raise ImageProviderError(f"Replicate {selected_model}: downloading the image failed (HTTP {response.status_code})")
+    img_bytes = response.content
 
-                # Load and resize
-                with Image.open(io.BytesIO(img_bytes)) as img:
-                    resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-                    resized.save(output_path, 'PNG', quality=95)
-                logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
-                return output_path
+    # Save raw image first (if enabled)
+    save_raw_thumbnail(img_bytes, output_path, logger)
 
-        return None
-
-    except ImportError:
-        logger.error("replicate package not installed")
-        return None
-    except Exception as e:
-        logger.error(f"Replicate image generation failed: {e}")
-        return None
+    # Load and resize
+    with Image.open(io.BytesIO(img_bytes)) as img:
+        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+        resized.save(output_path, 'PNG', quality=95)
+    logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
+    return output_path
 
 
 def generate_with_poe(
@@ -1240,20 +1063,19 @@ def generate_with_poe(
     reference_images: list[Path] = None,
     output_path: Path = None,
     model: str = None,
-    concept: ThumbnailConcept = None,
-    variation: ThumbnailVariation = None,
     image: ThumbnailImage = None
-) -> Optional[Path]:
+) -> Path:
     """
     Generate image using Poe API with FLUX/Ideogram models.
 
     Supports reference images for character/face consistency.
-    Available models (bot names verified 2025-12-28):
+    Available models (bot names verified 2025-12-28, Nano Banana 2026-10-24):
         - flux2pro: Best quality, up to 8 references
         - flux2flex: High resolution (14MP)
         - fluxkontextpro: Best prompt following
         - seedream40: Good for combining references
-        - nanobananapro: Gemini 3 Pro via Poe
+        - nano-banana-pro: Gemini 3 Pro Image via Poe
+        - nano-banana-2.1: Nano Banana 2.1 via Poe
         - Ideogram-v3: Best for text/logos
 
     Args:
@@ -1261,127 +1083,55 @@ def generate_with_poe(
         reference_images: Optional list of reference image paths (up to 3)
         output_path: Where to save the generated image
         model: Model to use (default from config: flux2pro)
-        concept: V2 - ThumbnailConcept with structured fields (legacy)
-        variation: V2 - ThumbnailVariation with structured fields (legacy)
-        image: New flat ThumbnailImage structure (preferred)
+        image: ThumbnailImage with structured V2/V3 fields used to build the prompt
 
     Returns:
-        Path to generated image or None if failed
+        Path to the generated image
+
+    Raises:
+        ImageProviderError: Poe gave no image (the message says why, with the bot's answer)
     """
 
+    selected_model = model or POE_IMAGE_MODEL
     if not POE_API_KEY:
-        logger.error("Poe API key not set")
-        return None
+        raise ImageProviderError("Poe: POE_API_KEY is not set")
+    if selected_model not in POE_MODEL_MAX_REFS:
+        raise ValueError(f"Unknown Poe image model: {selected_model}")
 
-    try:
-        from openai import OpenAI
-        import requests
+    from openai import OpenAI
+    import requests
 
-        # Initialize Poe client (OpenAI-compatible)
-        client = OpenAI(
-            api_key=POE_API_KEY,
-            base_url="https://api.poe.com/v1",
+    # Initialize Poe client (OpenAI-compatible)
+    client = OpenAI(
+        api_key=POE_API_KEY,
+        base_url="https://api.poe.com/v1",
+    )
+    logger.info(f"Generating image with Poe ({selected_model})...")
+
+    # Build message content
+    content = []
+
+    has_refs = bool(reference_images)
+    if reference_images:
+        for data in load_reference_images(reference_images, POE_MODEL_MAX_REFS[selected_model]):
+            encoded = base64.b64encode(data).decode('ascii')
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}})
+
+    # V3 optimized JSON structure - requires V2 fields populated by LLM
+    if image and image.has_v2_fields():
+        logger.info("Using V3 optimized JSON prompt from ThumbnailImage")
+        full_prompt = build_v3_prompt_string(image, has_refs)
+        logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
+    elif has_refs:
+        # Fail-fast: references provided but no V2 fields means the LLM
+        # didn't populate scene/subject_pose, or cached prompts are stale.
+        raise ValueError(
+            "Cannot build the Poe prompt: reference images were given but the "
+            "ThumbnailImage has no V2 fields (scene/subject_pose). "
+            "Regenerate prompts with force_prompts=True."
         )
-
-        selected_model = model or POE_IMAGE_MODEL
-        logger.info(f"Generating image with Poe ({selected_model})...")
-
-        # Build message content
-        content = []
-
-        # Add reference images
-        # Each model has different limits (nanobananapro: 14, fluxkontextpro: 1, etc.)
-        has_refs = reference_images and len(reference_images) > 0
-        if reference_images:
-            max_images = POE_MODEL_MAX_REFS.get(selected_model, 8)
-            for img_path in reference_images[:max_images]:
-                if img_path.exists():
-                    try:
-                        # Load and resize image for efficiency
-                        with Image.open(img_path) as img:
-                            if max(img.size) > 1024:
-                                img.thumbnail((1024, 1024))
-
-                            # Convert to base64
-                            img_buffer = io.BytesIO()
-                            img.save(img_buffer, format='JPEG', quality=85)
-                        img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
-
-                        content.append({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{img_b64}"
-                            }
-                        })
-                        logger.info(f"Added reference image: {img_path.name}")
-                    except Exception as e:
-                        logger.warning(f"Could not load reference image {img_path}: {e}")
-
-        # V3: Optimized JSON structure (default when ThumbnailImage available)
-        if USE_PROMPT_SYSTEM_V3 and image and image.has_v2_fields():
-            logger.info("Using V3 optimized JSON prompt from ThumbnailImage (~1,000 chars)")
-            full_prompt = build_v3_prompt_string(image, has_refs)
-            logger.debug(f"V3 prompt length: {len(full_prompt)} chars")
-
-        # V1: Legacy text prompt with negations (~3,500 chars)
-        elif has_refs:
-            # Build subjects section if available (from image or legacy concept)
-            subjects_text = ""
-            subjects = (image.subjects if image else None) or (concept.subjects if concept else None)
-            face_groups = (image.face_groups if image else None) or (getattr(concept, 'face_groups', None) if concept else None)
-            style_source = (image.style_source if image else None) or (getattr(concept, 'style_source', None) if concept else None)
-            if subjects:
-                subjects_text = build_subjects_section(subjects, face_groups, style_source) + "\n"
-
-            full_prompt = f"""{subjects_text}STRICT IDENTITY CLONING - THIS IS THE SAME PERSON, NOT A SIMILAR ONE:
-The generated image MUST show an EXACT CLONE of the person(s) in the reference photos.
-This is NOT "inspired by" or "similar to" - it must be THE EXACT SAME PERSON(S).
-
-═══════════════════════════════════════════════════════════════
-ABSOLUTELY FORBIDDEN - DO NOT DO ANY OF THESE:
-═══════════════════════════════════════════════════════════════
-❌ Add facial hair (beard, mustache, stubble) if NOT present in reference
-❌ Remove facial hair if present in reference
-❌ Change body weight or build (no thinner, no heavier, no more muscular)
-❌ Modify face shape, jaw line, chin, or cheekbones
-❌ Alter nose size, shape, or bridge
-❌ Change eye size, shape, spacing, or color
-❌ Modify lip size, shape, or fullness
-❌ Add or remove glasses/sunglasses
-❌ Change hairstyle, hair length, or hair color
-❌ Alter skin tone, complexion, or texture
-❌ Add wrinkles, scars, moles, or marks not in reference
-❌ "Beautify", "idealize", or "enhance" any features
-❌ Age the person (older or younger)
-❌ Change clothing style or colors from reference
-
-═══════════════════════════════════════════════════════════════
-MANDATORY - COPY EXACTLY FROM REFERENCE:
-═══════════════════════════════════════════════════════════════
-✅ Exact facial proportions (interpupillary distance, nose-to-lip ratio)
-✅ Same body type and physical build
-✅ Identical skin texture, tone, and any visible features
-✅ Same hair (exact style, color, length, texture)
-✅ Same facial hair status (if clean-shaven in reference, MUST be clean-shaven)
-✅ Same clothing from reference images
-✅ Same accessories (glasses, earrings, etc.)
-
-SCENE TO CREATE (uses subject IDs from above if provided):
-{prompt}
-
-IMPORTANT: The scene description uses subject IDs (person_01, person_02, etc.) to
-indicate which person from the references does what. Match each ID to the
-corresponding reference image based on the subject identification above.
-
-TECHNICAL:
-- YouTube thumbnail style: bold, eye-catching, professional
-- 16:9 aspect ratio (1280x720)
-- High contrast colors
-- DO NOT include any text in the image
-
-VERIFICATION: A friend of these people should recognize them INSTANTLY."""
-        else:
-            full_prompt = f"""Create a professional YouTube thumbnail.
+    else:
+        full_prompt = f"""Create a professional YouTube thumbnail.
 
 {prompt}
 
@@ -1391,12 +1141,13 @@ Requirements:
 - Professional YouTube thumbnail style
 - DO NOT include any text in the image"""
 
-        content.append({
-            "type": "text",
-            "text": full_prompt
-        })
+    content.append({
+        "type": "text",
+        "text": full_prompt
+    })
 
-        # Make API call (stream=False is required for image models)
+    # Make API call (stream=False is required for image models)
+    try:
         response = client.chat.completions.create(
             model=selected_model,
             messages=[{"role": "user", "content": content}],
@@ -1406,78 +1157,64 @@ Requirements:
                 "quality": POE_IMAGE_QUALITY
             }
         )
+    except Exception as error:
+        raise ImageProviderError(f"Poe {selected_model}: {_api_error_detail(error)}") from error
 
-        # Extract image from response
-        if response.choices and len(response.choices) > 0:
-            message = response.choices[0].message
+    # Extract image from response
+    response_content = response.choices[0].message.content if response.choices else None
 
-            # Check for image in content
-            if hasattr(message, 'content') and message.content:
-                response_content = message.content
+    # Handle different response formats
+    image_url = None
 
-                # Handle different response formats
-                image_url = None
+    # If response is a list of content blocks
+    if isinstance(response_content, list):
+        for block in response_content:
+            if isinstance(block, dict):
+                if block.get('type') == 'image_url':
+                    image_url = block.get('image_url', {}).get('url')
+                elif block.get('type') == 'image':
+                    image_url = block.get('url') or block.get('image_url')
+            elif hasattr(block, 'image_url'):
+                image_url = block.image_url.url if hasattr(block.image_url, 'url') else block.image_url
 
-                # If response is a list of content blocks
-                if isinstance(response_content, list):
-                    for block in response_content:
-                        if isinstance(block, dict):
-                            if block.get('type') == 'image_url':
-                                image_url = block.get('image_url', {}).get('url')
-                            elif block.get('type') == 'image':
-                                image_url = block.get('url') or block.get('image_url')
-                        elif hasattr(block, 'image_url'):
-                            image_url = block.image_url.url if hasattr(block.image_url, 'url') else block.image_url
+    # If response contains markdown image
+    elif isinstance(response_content, str):
+        # Look for markdown image: ![...](URL)
+        match = re.search(r'!\[.*?\]\((https?://[^\)]+)\)', response_content)
+        if match:
+            image_url = match.group(1)
+        # Look for direct URL
+        elif response_content.startswith('http'):
+            image_url = response_content.strip()
 
-                # If response contains markdown image
-                elif isinstance(response_content, str):
-                    import re
-                    # Look for markdown image: ![...](URL)
-                    match = re.search(r'!\[.*?\]\((https?://[^\)]+)\)', response_content)
-                    if match:
-                        image_url = match.group(1)
-                    # Look for direct URL
-                    elif response_content.startswith('http'):
-                        image_url = response_content.strip()
+    if not image_url:
+        # The bot answers in words when it will not draw: that answer is the reason
+        answer = str(response_content)[:500] if response_content else "an empty answer"
+        raise ImageProviderError(f"Poe {selected_model}: no image in the answer, it said: {answer}")
 
-                # Download and save image
-                if image_url:
-                    if image_url.startswith('data:image'):
-                        # Base64 encoded image
-                        header, data = image_url.split(',', 1)
-                        img_bytes = base64.b64decode(data)
-                    else:
-                        # URL - download image
-                        img_response = requests.get(image_url, timeout=60)
-                        if img_response.status_code != 200:
-                            logger.error(f"Failed to download image: HTTP {img_response.status_code}")
-                            return None
-                        img_bytes = img_response.content
+    if image_url.startswith('data:image'):
+        # Base64 encoded image
+        header, data = image_url.split(',', 1)
+        img_bytes = base64.b64decode(data)
+    else:
+        # URL - download image
+        try:
+            img_response = requests.get(image_url, timeout=60)
+        except requests.RequestException as error:
+            raise ImageProviderError(f"Poe {selected_model}: downloading the image failed: {error}") from error
+        if img_response.status_code != 200:
+            raise ImageProviderError(f"Poe {selected_model}: downloading the image failed (HTTP {img_response.status_code})")
+        img_bytes = img_response.content
 
-                    # Save raw image first (if enabled)
-                    save_raw_thumbnail(img_bytes, output_path, logger)
+    # Save raw image first (if enabled)
+    save_raw_thumbnail(img_bytes, output_path, logger)
 
-                    # Load and resize to exact thumbnail dimensions
-                    with Image.open(io.BytesIO(img_bytes)) as img:
-                        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
-                        resized.save(output_path, 'PNG', quality=95)
-                    logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
-                    return output_path
-
-                else:
-                    logger.warning(f"No image URL found in Poe response. Content: {response_content[:500] if response_content else 'None'}")
-
-        logger.warning("No image in Poe response")
-        return None
-
-    except ImportError:
-        logger.error("openai package not installed. Install with: pip install openai")
-        return None
-    except Exception as e:
-        logger.error(f"Poe image generation failed: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
-        return None
+    # Load and resize to exact thumbnail dimensions
+    with Image.open(io.BytesIO(img_bytes)) as img:
+        resized = img.resize((THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT), Image.Resampling.LANCZOS)
+        resized.save(output_path, 'PNG', quality=95)
+    logger.success(f"Image saved to: {output_path} ({THUMBNAIL_WIDTH}x{THUMBNAIL_HEIGHT})")
+    return output_path
 
 
 # =============================================================================
@@ -1490,7 +1227,7 @@ def create_composite_thumbnail(
     text_overlay: str,
     output_path: Path,
     colors: list[str] = None
-) -> Optional[Path]:
+) -> Path:
     """
     Create a composite thumbnail with:
     - AI-generated or solid background
@@ -1564,244 +1301,11 @@ def create_composite_thumbnail(
         return output_path
 
     except Exception as e:
-        logger.error(f"Composite thumbnail creation failed: {e}")
-        return None
+        raise ImageProviderError(f"Composite thumbnail: {e}") from e
 
 
 # =============================================================================
-# MAIN GENERATION FUNCTION
-# =============================================================================
-
-def generate_thumbnails(
-    concepts: list[ThumbnailConcept],
-    best_frames: list[Path],
-    output: VideoOutput,
-    use_composite: bool = False,
-    gemini_model: str = None,
-    openai_model: str = None,
-    poe_model: str = None,
-    image_provider: str = None,
-    progress_callback: callable = None,
-    has_external_style_ref: bool = False
-) -> list[Path]:
-    """
-    Generate thumbnails from concepts with variations.
-
-    Args:
-        concepts: List of ThumbnailConcept objects, each containing variations
-        best_frames: List of best frame paths for reference
-        output: VideoOutput instance
-        use_composite: If True, create composite instead of full AI generation
-        gemini_model: Override Gemini model (e.g., "gemini-3-pro-image-preview")
-        openai_model: Override OpenAI model (e.g., "gpt-image-1.5")
-        poe_model: Override Poe model (e.g., "flux2pro", "fluxkontextpro", "Ideogram-v3")
-        image_provider: Override image provider ("gemini", "openai", "replicate", "poe")
-        progress_callback: Optional callback function(current, total, thumbnail_info) to report progress
-                          thumbnail_info is a dict with: path, concept_index, variation_index, concept, variation
-        has_external_style_ref: If True, first reference image is an external style reference (not a person)
-
-    Returns:
-        List of paths to generated thumbnails
-    """
-
-    thumbnails_dir = output.output_dir / "thumbnails"
-    thumbnails_dir.mkdir(exist_ok=True)
-
-    # Calculate total images from concepts and their variations
-    total_images = sum(len(concept.variations) for concept in concepts)
-    num_concepts = len(concepts)
-    logger.info(f"Generating {total_images} thumbnails ({num_concepts} concepts with variations)")
-
-    generated_thumbnails = []
-    image_counter = 0
-
-    for concept in concepts:
-        concept_idx = concept.concept_index
-        logger.info(f"\n[Concept {concept_idx}/{num_concepts}] {concept.concept_name}: {concept.suggested_title}")
-
-        for variation in concept.variations:
-            variation_idx = variation.variation_index
-            image_counter += 1
-            timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-
-            # Determine model prefix for filename
-            selected_provider = image_provider or IMAGE_PROVIDER
-            effective_model = get_effective_model(
-                selected_provider, gemini_model, openai_model, poe_model
-            )
-            model_prefix = normalize_model_name_for_filename(effective_model)
-
-            output_path = thumbnails_dir / f"{model_prefix}_{timestamp}_c{concept_idx}_v{variation_idx}.png"
-
-            logger.info(f"  Variation {variation_idx} [{variation.variation_focus}] ({image_counter}/{total_images})...")
-
-            # Option 1: Composite thumbnail
-            if use_composite and best_frames:
-                composite_path = thumbnails_dir / f"composite_{timestamp}_c{concept_idx}_v{variation_idx}.png"
-                result = create_composite_thumbnail(
-                    background_prompt=variation.image_prompt,
-                    face_frame=best_frames[0],
-                    text_overlay=variation.text_overlay,
-                    output_path=composite_path,
-                    colors=concept.colors
-                )
-                if result:
-                    generated_thumbnails.append(result)
-                    if progress_callback:
-                        progress_callback(image_counter, total_images, {
-                            'path': result,
-                            'concept_index': concept_idx,
-                            'variation_index': variation_idx,
-                            'concept': concept,
-                            'variation': variation
-                        })
-                else:
-                    if progress_callback:
-                        progress_callback(image_counter, total_images, None)
-                continue
-
-            # Option 2: Full AI generation
-            # Each variation has its own unique image_prompt from the LLM
-            enhanced_prompt = enhance_prompt_with_face_description_from_text(
-                variation.image_prompt,
-                best_frames[0] if best_frames else None
-            )
-
-            # Add note about external style reference if present
-            if has_external_style_ref and best_frames:
-                style_ref_note = """
-═══════════════════════════════════════════════════════════════════════════════
-STYLE REFERENCE (INSPIRATION ONLY - DO NOT COPY EXACTLY):
-═══════════════════════════════════════════════════════════════════════════════
-The FIRST reference image is for STYLE INSPIRATION only:
-- Use it as a loose guide for colors, mood, or aesthetic if relevant
-- The SCENE DESCRIPTION BELOW takes PRIORITY over the style reference
-- Do NOT replicate the style reference exactly - use it as inspiration only
-- Do NOT try to clone any person from the style reference
-
-PRIORITY ORDER:
-1. HIGHEST: The scene description below (image prompt)
-2. SECOND: Identity of the person from reference images 2 onwards
-3. LOWEST: Style inspiration from first reference (use loosely)
-
-The remaining reference images show the actual person who must appear in the
-thumbnail. Clone their identity ONLY from reference images 2 onwards.
-═══════════════════════════════════════════════════════════════════════════════
-
-"""
-                enhanced_prompt = style_ref_note + enhanced_prompt
-
-            # Try configured provider
-            selected_provider = image_provider or IMAGE_PROVIDER
-
-            generators = {
-                "gemini": generate_with_gemini,
-                "openai": generate_with_openai,
-                "replicate": generate_with_replicate,
-                "poe": generate_with_poe,
-            }
-
-            success = False
-
-            # Try primary provider
-            primary_generator = generators.get(selected_provider)
-            if primary_generator:
-                kwargs = {
-                    "prompt": enhanced_prompt,
-                    "reference_images": best_frames[:14] if best_frames else None,
-                    "output_path": output_path,
-                    # V2: Pass concept and variation for structured prompts
-                    "concept": concept,
-                    "variation": variation
-                }
-                if selected_provider == "gemini" and gemini_model:
-                    kwargs["model"] = gemini_model
-                elif selected_provider == "openai" and openai_model:
-                    kwargs["model"] = openai_model
-                elif selected_provider == "poe" and poe_model:
-                    kwargs["model"] = poe_model
-                # Replicate doesn't support V2 yet, remove concept/variation
-                if selected_provider == "replicate":
-                    kwargs.pop("concept", None)
-                    kwargs.pop("variation", None)
-
-                result = primary_generator(**kwargs)
-                if result:
-                    generated_thumbnails.append(result)
-                    success = True
-
-            # Try fallbacks if primary failed
-            if not success:
-                for provider, generator in generators.items():
-                    if provider != selected_provider:
-                        logger.info(f"    Trying fallback provider: {provider}")
-
-                        fallback_model = get_effective_model(
-                            provider, gemini_model, openai_model, poe_model
-                        )
-                        fallback_prefix = normalize_model_name_for_filename(fallback_model)
-                        fallback_path = thumbnails_dir / f"{fallback_prefix}_{timestamp}_c{concept_idx}_v{variation_idx}.png"
-
-                        kwargs = {
-                            "prompt": enhanced_prompt,
-                            "reference_images": best_frames[:14] if best_frames else None,
-                            "output_path": fallback_path,
-                            # V2: Pass concept and variation for structured prompts
-                            "concept": concept,
-                            "variation": variation
-                        }
-                        if provider == "gemini" and gemini_model:
-                            kwargs["model"] = gemini_model
-                        elif provider == "openai" and openai_model:
-                            kwargs["model"] = openai_model
-                        elif provider == "poe" and poe_model:
-                            kwargs["model"] = poe_model
-                        # Replicate doesn't support V2 yet, remove concept/variation
-                        if provider == "replicate":
-                            kwargs.pop("concept", None)
-                            kwargs.pop("variation", None)
-
-                        result = generator(**kwargs)
-                        if result:
-                            generated_thumbnails.append(result)
-                            success = True
-                            break
-
-            # Last resort: composite
-            if not success and best_frames:
-                logger.warning("    All AI providers failed, creating composite")
-                composite_path = thumbnails_dir / f"composite_{timestamp}_c{concept_idx}_v{variation_idx}.png"
-                result = create_composite_thumbnail(
-                    background_prompt=variation.image_prompt,
-                    face_frame=best_frames[0],
-                    text_overlay=variation.text_overlay,
-                    output_path=composite_path,
-                    colors=concept.colors
-                )
-                if result:
-                    generated_thumbnails.append(result)
-                    success = True
-
-            # Report progress after each image
-            if progress_callback:
-                last_thumbnail = generated_thumbnails[-1] if success and generated_thumbnails else None
-                thumbnail_info = {
-                    'path': last_thumbnail,
-                    'concept_index': concept_idx,
-                    'variation_index': variation_idx,
-                    'concept': concept,
-                    'variation': variation
-                } if last_thumbnail else None
-                progress_callback(image_counter, total_images, thumbnail_info)
-
-    logger.success(f"Generated {len(generated_thumbnails)}/{total_images} thumbnails")
-    logger.info(f"Thumbnails saved to: {thumbnails_dir}")
-
-    return generated_thumbnails
-
-
-# =============================================================================
-# NEW IMAGE-BASED GENERATION (flat structure, no variations)
+# THUMBNAIL GENERATION (ThumbnailImage-based)
 # =============================================================================
 
 def generate_thumbnails_from_images(
@@ -1815,7 +1319,11 @@ def generate_thumbnails_from_images(
     image_provider: str = None,
     progress_callback: callable = None,
     has_external_style_ref: bool = False,
-    cancellation_check: callable = None
+    cancellation_check: callable = None,
+    allow_provider_fallback: bool = False,
+    comfyui_workflow: str = None,
+    comfyui_config: dict = None,
+    comfyui_profile: dict = None,
 ) -> list[Path]:
     """
     Generate thumbnails from a flat list of ThumbnailImage objects.
@@ -1837,10 +1345,24 @@ def generate_thumbnails_from_images(
         has_external_style_ref: If True, first reference image is an external style reference
         cancellation_check: Optional callback that returns True if generation should be cancelled.
                            Checked before each image generation to allow early abort.
+        allow_provider_fallback: When the chosen provider fails, try the other providers
+                           and, if all fail, a composite of a frame. Off: that image fails.
 
     Returns:
         List of paths to generated thumbnails (may be partial if cancelled)
+
+    Raises:
+        ImageProviderError: an image could not be generated (after the other providers,
+                           when fallback is allowed). The message names the image and
+                           what each provider said; the images before it are kept.
     """
+
+    if (image_provider or IMAGE_PROVIDER) == "comfyui":
+        if allow_provider_fallback or use_composite:
+            raise ValueError("ComfyUI does not allow provider fallback or composite generation")
+        from services.comfyui_service import generate_batch
+        return generate_batch(images, best_frames, output, comfyui_workflow, comfyui_config,
+                              comfyui_profile, progress_callback, cancellation_check)
 
     thumbnails_dir = output.output_dir / "thumbnails"
     thumbnails_dir.mkdir(exist_ok=True)
@@ -1881,24 +1403,20 @@ def generate_thumbnails_from_images(
                 output_path=composite_path,
                 colors=img.colors
             )
-            if result:
-                generated_thumbnails.append(result)
-                if progress_callback:
-                    progress_callback(image_idx, total_images, {
-                        'path': result,
-                        'image_index': image_idx,
-                        'image': img
-                    })
-            else:
-                if progress_callback:
-                    progress_callback(image_idx, total_images, None)
+            generated_thumbnails.append(result)
+            if progress_callback:
+                progress_callback(image_idx, total_images, {
+                    'path': result,
+                    'image_index': image_idx,
+                    'image': img
+                })
             continue
 
         # Option 2: Full AI generation
-        enhanced_prompt = enhance_prompt_with_face_description_from_text(
-            img.image_prompt,
-            best_frames[0] if best_frames else None
-        )
+        # V3 providers (Gemini/OpenAI/Poe) rebuild the prompt from `img` directly
+        # via build_v3_prompt_string(). This text is only used by Replicate (no V3 support)
+        # and by the plain fallback inside providers when no V2 fields are present.
+        enhanced_prompt = img.image_prompt
 
         # Add note about external style reference if present
         if has_external_style_ref and best_frames:
@@ -1970,38 +1488,44 @@ The remaining reference images show people whose identity you must preserve.
             "poe": generate_with_poe,
         }
 
-        success = False
+        if selected_provider not in generators:
+            raise ValueError(f"Unknown image provider: {selected_provider}")
+
+        # What each provider said when it gave no image
+        failures = []
+        result = None
 
         # Try primary provider
-        primary_generator = generators.get(selected_provider)
-        if primary_generator:
-            kwargs = {
-                "prompt": enhanced_prompt,
-                "reference_images": best_frames[:14] if best_frames else None,
-                "output_path": output_path,
-            }
-            # For V2 prompt support, pass ThumbnailImage
-            # Convert to concept/variation format for backward compatibility with providers
-            if selected_provider in ["gemini", "openai", "poe"]:
-                kwargs["image"] = img
+        kwargs = {
+            "prompt": enhanced_prompt,
+            "reference_images": best_frames or None,  # Already within the model limit (generation service)
+            "output_path": output_path,
+        }
+        # For V2 prompt support, pass ThumbnailImage
+        # Convert to concept/variation format for backward compatibility with providers
+        if selected_provider in ["gemini", "openai", "poe"]:
+            kwargs["image"] = img
 
-            if selected_provider == "gemini" and gemini_model:
-                kwargs["model"] = gemini_model
-            elif selected_provider == "openai" and openai_model:
-                kwargs["model"] = openai_model
-            elif selected_provider == "poe" and poe_model:
-                kwargs["model"] = poe_model
-            # Replicate doesn't support image parameter
-            if selected_provider == "replicate":
-                kwargs.pop("image", None)
+        if selected_provider == "gemini" and gemini_model:
+            kwargs["model"] = gemini_model
+        elif selected_provider == "openai" and openai_model:
+            kwargs["model"] = openai_model
+        elif selected_provider == "poe" and poe_model:
+            kwargs["model"] = poe_model
+        # Replicate doesn't support image parameter
+        if selected_provider == "replicate":
+            kwargs.pop("image", None)
 
-            result = primary_generator(**kwargs)
-            if result:
-                generated_thumbnails.append(result)
-                success = True
+        try:
+            result = generators[selected_provider](**kwargs)
+        except ImageProviderError as error:
+            if not allow_provider_fallback:
+                raise ImageProviderError(f"Image {image_idx} of {total_images}: {error}") from error
+            logger.warning(f"    {error}")
+            failures.append(str(error))
 
-        # Try fallbacks if primary failed
-        if not success:
+        # Try fallbacks if primary failed (only when the user allows it)
+        if result is None:
             for provider, generator in generators.items():
                 if provider != selected_provider:
                     logger.info(f"    Trying fallback provider: {provider}")
@@ -2009,12 +1533,21 @@ The remaining reference images show people whose identity you must preserve.
                     fallback_model = get_effective_model(
                         provider, gemini_model, openai_model, poe_model
                     )
+                    fallback_limits = {
+                        "gemini": GEMINI_MODEL_MAX_REFS,
+                        "openai": OPENAI_MODEL_MAX_REFS,
+                        "poe": POE_MODEL_MAX_REFS,
+                        "replicate": REPLICATE_MODEL_MAX_REFS,
+                    }
+                    if len(best_frames or []) > fallback_limits[provider][fallback_model]:
+                        logger.warning(f"    Skipping {provider}: it cannot accept all identity references")
+                        continue
                     fallback_prefix = normalize_model_name_for_filename(fallback_model)
                     fallback_path = thumbnails_dir / f"{fallback_prefix}_{timestamp}_{image_idx}.png"
 
                     kwargs = {
                         "prompt": enhanced_prompt,
-                        "reference_images": best_frames[:14] if best_frames else None,
+                        "reference_images": best_frames or None,  # Already within the model limit (generation service)
                         "output_path": fallback_path,
                     }
                     if provider in ["gemini", "openai", "poe"]:
@@ -2028,70 +1561,41 @@ The remaining reference images show people whose identity you must preserve.
                     if provider == "replicate":
                         kwargs.pop("image", None)
 
-                    result = generator(**kwargs)
-                    if result:
-                        generated_thumbnails.append(result)
-                        success = True
+                    try:
+                        result = generator(**kwargs)
                         break
+                    except ImageProviderError as error:
+                        logger.warning(f"    {error}")
+                        failures.append(str(error))
 
         # Last resort: composite
-        if not success and best_frames:
+        if result is None and best_frames:
             logger.warning("    All AI providers failed, creating composite")
             composite_path = thumbnails_dir / f"composite_{timestamp}_{image_idx}.png"
-            result = create_composite_thumbnail(
-                background_prompt=img.image_prompt,
-                face_frame=best_frames[0],
-                text_overlay=img.text_overlay,
-                output_path=composite_path,
-                colors=img.colors
-            )
-            if result:
-                generated_thumbnails.append(result)
-                success = True
+            try:
+                result = create_composite_thumbnail(
+                    background_prompt=img.image_prompt,
+                    face_frame=best_frames[0],
+                    text_overlay=img.text_overlay,
+                    output_path=composite_path,
+                    colors=img.colors
+                )
+            except ImageProviderError as error:
+                failures.append(str(error))
+
+        if result is None:
+            raise ImageProviderError(f"Image {image_idx} of {total_images}: {'; '.join(failures)}")
+        generated_thumbnails.append(result)
 
         # Report progress after each image
         if progress_callback:
-            last_thumbnail = generated_thumbnails[-1] if success and generated_thumbnails else None
-            thumbnail_info = {
-                'path': last_thumbnail,
+            progress_callback(image_idx, total_images, {
+                'path': result,
                 'image_index': image_idx,
                 'image': img
-            } if last_thumbnail else None
-            progress_callback(image_idx, total_images, thumbnail_info)
+            })
 
     logger.success(f"Generated {len(generated_thumbnails)}/{total_images} thumbnails")
     logger.info(f"Thumbnails saved to: {thumbnails_dir}")
 
     return generated_thumbnails
-
-
-if __name__ == "__main__":
-    # Test thumbnail generation
-    from prompt_generation import ThumbnailPrompt
-
-    test_prompt = ThumbnailPrompt(
-        video_title="Test Video",
-        suggested_title="Amazing Gaming Tips",
-        thumbnail_concept="A gamer looking excited at the camera",
-        image_prompt="Professional YouTube thumbnail, excited gamer with headphones, gaming setup background, neon lights, bold colors",
-        text_overlay="PRO TIPS",
-        mood="excited",
-        colors=["#FF0000", "#00FF00", "#0000FF"],
-        key_topics=["gaming", "tips", "youtube"]
-    )
-
-    from config import OUTPUT_DIR
-
-    output = VideoOutput(Path("test_video.mp4"), OUTPUT_DIR)
-    output.setup()
-
-    result = generate_thumbnails(
-        concepts=[],
-        best_frames=[],
-        output=output,
-    )
-
-    if result:
-        print(f"Thumbnail generated: {result}")
-    else:
-        print("Thumbnail generation failed")

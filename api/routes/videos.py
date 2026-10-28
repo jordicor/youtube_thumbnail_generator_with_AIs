@@ -4,7 +4,7 @@ Videos API Routes
 Endpoints for video management.
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pathlib import Path
 from typing import List, Optional
@@ -13,78 +13,12 @@ from pydantic import BaseModel
 from database.db import get_db
 from services.video_service import VideoService
 from services.analysis_service import AnalysisService
+from services.directory_service import DirectoryService
 from job_queue.queue import enqueue_analysis
 from i18n.i18n import translate as t
 
 
 router = APIRouter()
-
-
-# ============================================================================
-# VIDEO MIME TYPE VALIDATION
-# ============================================================================
-
-# Magic bytes (file signatures) for common video formats
-VIDEO_SIGNATURES = {
-    # MP4/M4V (ftyp box)
-    b'\x00\x00\x00\x14ftyp': 'video/mp4',
-    b'\x00\x00\x00\x18ftyp': 'video/mp4',
-    b'\x00\x00\x00\x1cftyp': 'video/mp4',
-    b'\x00\x00\x00\x20ftyp': 'video/mp4',
-    # AVI (RIFF....AVI)
-    b'RIFF': 'video/x-msvideo',
-    # MKV/WebM (EBML header)
-    b'\x1a\x45\xdf\xa3': 'video/x-matroska',
-    # MOV (ftyp qt or moov)
-    b'moov': 'video/quicktime',
-    b'mdat': 'video/quicktime',
-    b'free': 'video/quicktime',
-}
-
-# Extended check for MP4/MOV variants (check for 'ftyp' anywhere in first 12 bytes)
-MP4_BRANDS = [b'isom', b'iso2', b'mp41', b'mp42', b'M4V ', b'M4A ', b'qt  ', b'avc1']
-
-
-def validate_video_content(content: bytes) -> tuple[bool, str]:
-    """
-    Validate that file content matches a known video format.
-    Returns (is_valid, detected_type_or_error).
-    """
-    if len(content) < 12:
-        return False, "File too small to be a valid video"
-
-    header = content[:32]
-
-    # Check for EBML (MKV/WebM)
-    if header[:4] == b'\x1a\x45\xdf\xa3':
-        return True, "video/x-matroska"
-
-    # Check for RIFF (AVI)
-    if header[:4] == b'RIFF' and len(header) >= 12 and header[8:12] == b'AVI ':
-        return True, "video/x-msvideo"
-
-    # Check for MP4/MOV/M4V (ftyp box)
-    # ftyp can be at offset 4 with various box sizes
-    for offset in [4, 0]:
-        if header[offset:offset+4] == b'ftyp':
-            # Found ftyp, check brand
-            brand = header[offset+4:offset+8]
-            if brand in MP4_BRANDS or brand.startswith(b'mp4') or brand.startswith(b'M4'):
-                return True, "video/mp4"
-            if brand == b'qt  ' or brand.startswith(b'qt'):
-                return True, "video/quicktime"
-            # Unknown brand but has ftyp - likely still valid video
-            return True, "video/mp4"
-
-    # Check for moov/mdat atoms (MOV without ftyp)
-    if header[:4] in [b'moov', b'mdat', b'free', b'wide', b'skip']:
-        return True, "video/quicktime"
-
-    # Check if it looks like ftyp with different box size
-    if b'ftyp' in header[:16]:
-        return True, "video/mp4"
-
-    return False, "Unknown file format - not a recognized video type"
 
 
 # ============================================================================
@@ -151,18 +85,6 @@ async def list_videos(
     return VideoListResponse(videos=video_responses, total=total)
 
 
-@router.get("/scan")
-async def scan_videos_directory():
-    """
-    Scan the videos directory and register new videos found.
-    """
-    async with get_db() as db:
-        service = VideoService(db)
-        result = await service.scan_videos_directory()
-
-    return result
-
-
 @router.patch("/bulk/hide")
 async def bulk_hide_videos(request: BulkHideRequest):
     """Hide multiple videos at once."""
@@ -192,45 +114,6 @@ async def get_video(video_id: int):
         error_message=video.get('error_message'),
         created_at=str(video['created_at'])
     )
-
-
-@router.post("/upload")
-async def upload_video(
-    file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None
-):
-    """
-    Upload a new video.
-    Validates both file extension and content (magic bytes).
-    """
-    # Validate extension
-    allowed_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.webm', '.m4v'}
-    ext = Path(file.filename).suffix.lower()
-
-    if ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=t('api.errors.invalid_file_extension', extensions=', '.join(sorted(allowed_extensions)))
-        )
-
-    # Read first bytes to validate content type (magic bytes)
-    first_bytes = await file.read(4096)
-    is_valid, result = validate_video_content(first_bytes)
-
-    if not is_valid:
-        raise HTTPException(
-            status_code=400,
-            detail=t('api.errors.invalid_file_content', error=result, ext=ext)
-        )
-
-    # Reset file position for actual upload
-    await file.seek(0)
-
-    async with get_db() as db:
-        service = VideoService(db)
-        video = await service.upload_video(file)
-
-    return {"id": video['id'], "filename": video['filename'], "status": video['status']}
 
 
 @router.delete("/{video_id}")
@@ -296,6 +179,9 @@ async def reanalyze_video(video_id: int):
     Keeps: video record, preview image.
     """
     async with get_db() as db:
+        # The analysis reads the video file: its directory must answer here
+        await DirectoryService(db).switch_video_directory(video_id)
+
         service = VideoService(db)
         success = await service.reanalyze_video(video_id)
 

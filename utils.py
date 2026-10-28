@@ -4,12 +4,15 @@ YouTube Thumbnail Generator - Utilities
 Common utilities, logging, and helper functions.
 """
 
+import os
 import sys
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 import orjson
+
+import config
 
 # Configure stdout encoding for Windows
 if sys.platform == 'win32':
@@ -173,11 +176,18 @@ def find_videos(source_dir: Path, extensions: set, exclude_folders: list) -> lis
 
 
 def sanitize_filename(name: str) -> str:
-    """Remove invalid characters from filename"""
+    """Remove invalid characters from a file or folder name.
+
+    A name left empty or made only of dots ("..") would point at the folder
+    itself or its parent: it raises ValueError instead.
+    """
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         name = name.replace(char, '_')
-    return name.strip()
+    name = name.strip()
+    if not name.strip('.'):
+        raise ValueError(f"Not a usable file or folder name: {name!r}")
+    return name
 
 
 def safe_parse_fps(fps_string: str) -> float:
@@ -245,6 +255,35 @@ def ensure_dir(path: Path) -> Path:
 
 
 # =============================================================================
+# IMAGE FILES
+# =============================================================================
+# cv2.imread and cv2.imwrite cannot open a non-ASCII path on Windows, and an
+# accent in a video's name reaches every path under its output folder: imwrite
+# writes under a mangled name, or nowhere, and still returns True. These read
+# and write the file with Python instead and let OpenCV only decode and encode.
+
+def read_image(path: Path):
+    """Read an image file as a BGR array. Raises if it is missing or not an image."""
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Not a readable image: {path}")
+    return image
+
+
+def write_image(path: Path, image, params: Sequence[int] = ()) -> None:
+    """Write a BGR array in the format of the path's suffix. Raises if it cannot."""
+    import cv2
+
+    ok, encoded = cv2.imencode(path.suffix, image, list(params))
+    if not ok:
+        raise ValueError(f"Could not encode an image as {path.suffix}: {path}")
+    path.write_bytes(encoded.tobytes())
+
+
+# =============================================================================
 # FRAME EXTRACTION UTILITIES
 # =============================================================================
 
@@ -278,12 +317,48 @@ def extract_first_frame(video_path: Path, output_path: Path) -> Optional[Path]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Save the frame
-        cv2.imwrite(str(output_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        write_image(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
-        return output_path if output_path.exists() else None
+        return output_path
 
     except Exception:
         return None
+
+
+# =============================================================================
+# OUTPUT PATHS
+# =============================================================================
+# Files under OUTPUT_DIR are persisted (database and JSON caches) relative to
+# OUTPUT_DIR, so the project and its output folder can move freely. In memory
+# and in API responses they are absolute paths.
+
+def to_output_relative(path) -> str:
+    """Return the stored form of an absolute path inside OUTPUT_DIR (POSIX, relative)."""
+    if not Path(path).is_absolute():
+        raise ValueError(f"Expected an absolute path inside OUTPUT_DIR: {path}")
+    output_dir = Path(os.path.abspath(config.OUTPUT_DIR))
+    try:
+        return Path(os.path.abspath(path)).relative_to(output_dir).as_posix()
+    except ValueError:
+        raise ValueError(f"Path is outside OUTPUT_DIR ({output_dir}): {path}") from None
+
+
+def resolve_output_path(stored: str) -> Path:
+    """Return the absolute path of a value stored by to_output_relative()."""
+    if not stored or '\\' in stored:
+        raise ValueError(f"Invalid stored output path: {stored!r}")
+    relative = PurePosixPath(stored)
+    if relative.is_absolute() or PureWindowsPath(stored).drive or '..' in relative.parts:
+        raise ValueError(f"Stored output path must be relative to OUTPUT_DIR: {stored!r}")
+    return Path(config.OUTPUT_DIR).joinpath(*relative.parts)
+
+
+def resolve_row_paths(row: dict, *keys: str) -> dict:
+    """Replace stored output paths in a database row with absolute path strings."""
+    for key in keys:
+        if row.get(key):
+            row[key] = str(resolve_output_path(row[key]))
+    return row
 
 
 # =============================================================================
@@ -338,3 +413,44 @@ class VideoOutput:
         if not thumbnails_dir.exists():
             return False
         return any(thumbnails_dir.glob("*_p*_v*.png"))
+
+
+class ReferenceImageError(ValueError):
+    """A required reference cannot be sent faithfully to an image provider."""
+
+
+def reference_png(data: bytes, label: str) -> bytes:
+    """Decode a reference fully and keep its native resolution in lossless PNG."""
+    import io
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            if image.format == 'PNG' and image.mode in ('RGB', 'RGBA') and image.getexif().get(274, 1) == 1:
+                return data
+            oriented = ImageOps.exif_transpose(image)
+            mode = 'RGBA' if 'A' in oriented.getbands() or 'transparency' in oriented.info else 'RGB'
+            with io.BytesIO() as buffer:
+                oriented.convert(mode).save(buffer, format='PNG')
+                return buffer.getvalue()
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ReferenceImageError(f"Cannot decode reference {label}: {exc}") from exc
+
+
+def load_reference_images(paths: Sequence[Path], max_count: Optional[int] = None,
+                          max_bytes: Optional[int] = None) -> list[bytes]:
+    """Read every reference in order; never omit, resize, or substitute one."""
+    if max_count is not None and len(paths) > max_count:
+        raise ReferenceImageError(f"This model accepts {max_count} references, but {len(paths)} were provided")
+    images = []
+    for path in paths:
+        try:
+            data = Path(path).read_bytes()
+        except OSError as exc:
+            raise ReferenceImageError(f"Cannot read reference {path}: {exc}") from exc
+        png = reference_png(data, str(path))
+        if max_bytes is not None and len(png) >= max_bytes:
+            raise ReferenceImageError(f"Reference {path} exceeds the provider's {max_bytes} byte limit")
+        images.append(png)
+    return images

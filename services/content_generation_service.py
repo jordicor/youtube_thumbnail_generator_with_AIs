@@ -3,40 +3,26 @@ Content Generation Service
 ===========================
 Service for generating YouTube video titles and descriptions using Gran Sabio LLM.
 
-Supports all providers available in Gran Sabio LLM:
+Supported providers from the Gran Sabio LLM catalog:
 - Anthropic (Claude models)
 - OpenAI (GPT models)
 - Google (Gemini models)
 - xAI (Grok models)
+- OpenRouter (explicit catalog models)
+- Ollama, llama.cpp, and registered OpenAI-compatible local endpoints
 """
 
-import orjson
 import logging
-import re
 from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
 
-from config import GRANSABIO_LLM_URL
+from gransabio_prompt_generator import (
+    GranSabioError, TEXT_PROVIDER_NAMES, get_available_models, get_gransabio_client,
+    resolve_text_model, text_generation_options, validated_json, verify_local_execution,
+)
 
 logger = logging.getLogger(__name__)
-
-# Gran Sabio LLM client singleton
-_gransabio_client = None
-
-# Thinking budget tokens per level (for Claude)
-THINKING_BUDGET_TOKENS = {
-    "low": 4000,
-    "medium": 8000,
-    "high": 16000,
-}
-
-# Reasoning effort per level (for OpenAI)
-REASONING_EFFORT = {
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-}
 
 
 # =============================================================================
@@ -251,6 +237,7 @@ class TitleGenerationRequest:
     # Thinking mode settings
     thinking_enabled: bool = False
     thinking_level: str = "medium"  # low, medium, high
+    model_info: Optional[dict] = None
 
 
 @dataclass
@@ -261,8 +248,6 @@ class TitleGenerationResult:
     model: str
     style: str
     language: str
-    success: bool
-    error: Optional[str] = None
 
 
 # =============================================================================
@@ -291,6 +276,7 @@ class DescriptionGenerationRequest:
     # Thinking mode settings
     thinking_enabled: bool = False
     thinking_level: str = "medium"  # low, medium, high
+    model_info: Optional[dict] = None
 
 
 @dataclass
@@ -302,192 +288,71 @@ class DescriptionGenerationResult:
     style: str
     language: str
     length: str
-    success: bool
-    error: Optional[str] = None
 
 
 # =============================================================================
 # SHARED FUNCTIONS
 # =============================================================================
 
-def get_gransabio_client():
-    """Get or create Gran Sabio LLM client singleton.
-
-    Re-checks availability on every call (no permanent failure caching)
-    so the service recovers automatically when Gran Sabio comes back online.
-    """
-    global _gransabio_client
-
-    # If we already have a client, verify it is still reachable
-    if _gransabio_client is not None:
-        try:
-            if _gransabio_client.is_available():
-                return _gransabio_client
-        except Exception:
-            pass
-        # Client is stale; discard and re-create below
-        _gransabio_client = None
-
-    try:
-        from client import GranSabioClient
-        client = GranSabioClient(base_url=GRANSABIO_LLM_URL)
-
-        if client.is_available():
-            _gransabio_client = client
-            logger.info(f"Gran Sabio LLM client connected for content generation")
-            return client
-        else:
-            logger.error(f"Gran Sabio LLM server not available at {GRANSABIO_LLM_URL}")
-            return None
-
-    except ImportError as e:
-        logger.error(f"Gran Sabio LLM client not available: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Could not connect to Gran Sabio LLM: {e}")
-        return None
-
-
 def call_gransabio(
     prompt: str,
+    json_schema: dict,
     provider: str = "anthropic",
     model: str = None,
-    json_schema: dict = None,
     thinking_enabled: bool = False,
-    thinking_level: str = "medium"
-) -> Optional[str | dict]:
+    thinking_level: str = "medium",
+    model_info: Optional[dict] = None,
+) -> str | dict:
     """
     Call Gran Sabio LLM API with the given prompt.
 
     Args:
         prompt: The prompt to send
-        provider: AI provider (anthropic, openai, google, xai)
+        json_schema: JSON schema for structured output
+        provider: Cloud or local text provider from the Gran Sabio catalog
         model: Specific model to use (None = use default for provider)
-        json_schema: Optional JSON schema for structured output (100% format guarantee)
         thinking_enabled: Enable extended thinking/reasoning mode
         thinking_level: Thinking level (low, medium, high)
 
     Returns:
-        Response content (str if no schema, dict if schema provided)
+        The answer's content (text or already parsed JSON)
+
+    Raises:
+        GranSabioError: the request failed or came back empty
     """
     client = get_gransabio_client()
-    if not client:
-        logger.error("Gran Sabio LLM not available")
-        return None
 
-    # Default models per provider
-    default_models = {
-        "anthropic": "claude-sonnet-4-5",
-        "openai": "gpt-5.2",
-        "google": "gemini-3-flash-preview",
-        "xai": "grok-4-1-fast-non-reasoning",
+    generator_model = resolve_text_model(provider, model)
+
+    thinking_info = ""
+    if thinking_enabled:
+        thinking_info = f" with thinking ({thinking_level})"
+
+    logger.info(f"Calling Gran Sabio LLM ({provider}/{generator_model}) with JSON schema{thinking_info}")
+
+    # Build generation kwargs
+    gen_kwargs = {
+        "prompt": prompt,
+        "qa_layers": [],
+        "temperature": 0.7,
+        "max_iterations": 1,
+        "verbose": False,
+        "json_output": True,
+        "json_schema": json_schema,
+        "json_retry_without_iteration": True,
+        "content_type": "json",  # Avoid conflict with default "article"
+        **text_generation_options(provider, model, thinking_enabled, thinking_level, model_info),
     }
 
-    # Use specified model or default for provider
-    generator_model = model or default_models.get(provider, "claude-sonnet-4-5")
-
     try:
-        thinking_info = ""
-        if thinking_enabled:
-            thinking_info = f" with thinking ({thinking_level})"
-
-        logger.info(f"Calling Gran Sabio LLM ({provider}/{generator_model})"
-                    f"{' with JSON schema' if json_schema else ''}{thinking_info}")
-
-        # Build generation kwargs
-        gen_kwargs = {
-            "prompt": prompt,
-            "generator_model": generator_model,
-            "qa_layers": [],
-            "temperature": 0.7,
-            "max_iterations": 1,
-            "verbose": False,
-        }
-
-        # Add thinking mode if enabled
-        if thinking_enabled:
-            model_lower = generator_model.lower()
-
-            if "claude" in model_lower:
-                # Claude uses thinking_budget_tokens
-                budget = THINKING_BUDGET_TOKENS.get(thinking_level, 8000)
-                gen_kwargs["thinking_budget_tokens"] = budget
-                logger.info(f"Using Claude thinking mode with {budget} tokens")
-
-            elif any(x in model_lower for x in ["o1", "o3", "gpt-5"]):
-                # OpenAI reasoning models use reasoning_effort
-                effort = REASONING_EFFORT.get(thinking_level, "medium")
-                gen_kwargs["reasoning_effort"] = effort
-                logger.info(f"Using OpenAI reasoning mode with effort: {effort}")
-
-        # Add JSON schema if provided (enables structured output)
-        if json_schema:
-            gen_kwargs["json_output"] = True
-            gen_kwargs["json_schema"] = json_schema
-            gen_kwargs["json_retry_without_iteration"] = True
-            gen_kwargs["content_type"] = "json"  # Avoid conflict with default "article"
-        else:
-            gen_kwargs["json_output"] = False
-
         result = client.generate(**gen_kwargs)
-
-        if result and result.get("content"):
-            return result["content"]
-        else:
-            logger.error("Gran Sabio LLM returned empty content")
-            return None
-
     except Exception as e:
-        logger.error(f"Gran Sabio LLM error: {e}")
-        return None
+        raise GranSabioError(f"Gran Sabio LLM ({provider}/{generator_model}) failed: {e}") from e
 
-
-def parse_lines_response(response: str) -> list[str]:
-    """Parse multi-line response into list of items."""
-    lines = response.strip().split('\n')
-    items = []
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        # Remove common prefixes (numbered lists, bullets, etc.)
-        line = re.sub(r'^[\d]+[\.\)]\s*', '', line)
-        line = re.sub(r'^[-*•]\s*', '', line)
-        line = line.strip('"\'')
-
-        if line:
-            items.append(line)
-
-    return items
-
-
-def parse_description_response(response: str, num_descriptions: int) -> list[str]:
-    """Parse description response, handling separators for multiple descriptions."""
-    if num_descriptions == 1:
-        # Single description - return as-is (cleaned)
-        return [response.strip()]
-
-    # Multiple descriptions - look for separators
-    # Try to split by common separators
-    separators = [
-        r'\n---+\n',  # ---
-        r'\n===+\n',  # ===
-        r'\n\*\*\*+\n',  # ***
-        r'\n#{2,}\s*Description\s*\d+',  # ## Description 1
-        r'\n#{2,}\s*Option\s*\d+',  # ## Option 1
-    ]
-
-    descriptions = [response]
-    for sep in separators:
-        if len(descriptions) >= num_descriptions:
-            break
-        parts = re.split(sep, response, flags=re.IGNORECASE)
-        if len(parts) > 1:
-            descriptions = [p.strip() for p in parts if p.strip()]
-
-    return descriptions[:num_descriptions]
+    if not result or not result.get("content"):
+        raise GranSabioError(f"Gran Sabio LLM ({provider}/{generator_model}) returned no content")
+    verify_local_execution(result, provider)
+    return result["content"]
 
 
 # =============================================================================
@@ -555,7 +420,11 @@ Generate the titles now:"""
 
 
 def generate_titles(request: TitleGenerationRequest) -> TitleGenerationResult:
-    """Generate video titles using the specified provider and settings."""
+    """Generate video titles using the specified provider and settings.
+
+    Raises:
+        GranSabioError: Gran Sabio failed or its answer has no usable titles
+    """
     prompt = build_title_prompt(
         video_title=request.video_title,
         transcription_summary=request.transcription_summary,
@@ -566,58 +435,19 @@ def generate_titles(request: TitleGenerationRequest) -> TitleGenerationResult:
         num_titles=request.num_titles,
     )
 
-    titles = None
-    error = None
-
-    # Always use Gran Sabio LLM with JSON schema (no fallback)
     response = call_gransabio(
         prompt,
+        TITLE_JSON_SCHEMA,
         provider=request.provider,
         model=request.model,
-        json_schema=TITLE_JSON_SCHEMA,
         thinking_enabled=request.thinking_enabled,
-        thinking_level=request.thinking_level
+        thinking_level=request.thinking_level,
+        model_info=request.model_info,
     )
-
-    if response:
-        # Parse JSON response (may be dict or string depending on Gran Sabio response)
-        try:
-            if isinstance(response, dict):
-                data = response
-            elif isinstance(response, str):
-                data = orjson.loads(response)
-            else:
-                raise ValueError(f"Unexpected response type: {type(response)}")
-
-            # Extract titles from structured response
-            titles_data = data.get("titles", [])
-            titles = [item["title"] for item in titles_data if "title" in item]
-
-            if titles:
-                logger.info(f"Generated {len(titles)} titles successfully via Gran Sabio LLM (JSON schema)")
-            else:
-                error = "Gran Sabio LLM returned empty titles array"
-                logger.error(error)
-
-        except (orjson.JSONDecodeError, KeyError, TypeError) as e:
-            error = f"Failed to parse JSON response: {e}"
-            logger.error(error)
-    else:
-        error = "Gran Sabio LLM failed to generate titles"
-        logger.error(error)
-
-    if titles is None or len(titles) == 0:
-        if error is None:
-            error = "Failed to generate titles"
-        return TitleGenerationResult(
-            titles=[],
-            provider=request.provider,
-            model=request.model,
-            style=request.style.value,
-            language=request.language,
-            success=False,
-            error=error,
-        )
+    titles = [item["title"] for item in validated_json(response, TITLE_JSON_SCHEMA, "title list")["titles"]]
+    if not titles:
+        raise GranSabioError("Gran Sabio returned an empty title list")
+    logger.info(f"Generated {len(titles)} titles via Gran Sabio LLM")
 
     return TitleGenerationResult(
         titles=titles,
@@ -625,7 +455,6 @@ def generate_titles(request: TitleGenerationRequest) -> TitleGenerationResult:
         model=request.model,
         style=request.style.value,
         language=request.language,
-        success=True,
     )
 
 
@@ -765,7 +594,11 @@ Generate the description(s) now:"""
 
 
 def generate_descriptions(request: DescriptionGenerationRequest) -> DescriptionGenerationResult:
-    """Generate video descriptions using the specified provider and settings."""
+    """Generate video descriptions using the specified provider and settings.
+
+    Raises:
+        GranSabioError: Gran Sabio failed or its answer has no usable descriptions
+    """
     prompt = build_description_prompt(
         video_title=request.video_title,
         transcription_summary=request.transcription_summary,
@@ -782,59 +615,20 @@ def generate_descriptions(request: DescriptionGenerationRequest) -> DescriptionG
         timestamped_transcript=request.timestamped_transcript,
     )
 
-    descriptions = None
-    error = None
-
-    # Always use Gran Sabio LLM with JSON schema (no fallback)
     response = call_gransabio(
         prompt,
+        DESCRIPTION_JSON_SCHEMA,
         provider=request.provider,
         model=request.model,
-        json_schema=DESCRIPTION_JSON_SCHEMA,
         thinking_enabled=request.thinking_enabled,
-        thinking_level=request.thinking_level
+        thinking_level=request.thinking_level,
+        model_info=request.model_info,
     )
-
-    if response:
-        # Parse JSON response (may be dict or string depending on Gran Sabio response)
-        try:
-            if isinstance(response, dict):
-                data = response
-            elif isinstance(response, str):
-                data = orjson.loads(response)
-            else:
-                raise ValueError(f"Unexpected response type: {type(response)}")
-
-            # Extract descriptions from structured response
-            descriptions_data = data.get("descriptions", [])
-            descriptions = [item["description"] for item in descriptions_data if "description" in item]
-
-            if descriptions:
-                logger.info(f"Generated {len(descriptions)} description(s) successfully via Gran Sabio LLM (JSON schema)")
-            else:
-                error = "Gran Sabio LLM returned empty descriptions array"
-                logger.error(error)
-
-        except (orjson.JSONDecodeError, KeyError, TypeError) as e:
-            error = f"Failed to parse JSON response: {e}"
-            logger.error(error)
-    else:
-        error = "Gran Sabio LLM failed to generate descriptions"
-        logger.error(error)
-
-    if descriptions is None or len(descriptions) == 0:
-        if error is None:
-            error = "Failed to generate descriptions"
-        return DescriptionGenerationResult(
-            descriptions=[],
-            provider=request.provider,
-            model=request.model,
-            style=request.style.value,
-            language=request.language,
-            length=request.length,
-            success=False,
-            error=error,
-        )
+    data = validated_json(response, DESCRIPTION_JSON_SCHEMA, "description list")
+    descriptions = [item["description"] for item in data["descriptions"]]
+    if not descriptions:
+        raise GranSabioError("Gran Sabio returned an empty description list")
+    logger.info(f"Generated {len(descriptions)} description(s) via Gran Sabio LLM")
 
     return DescriptionGenerationResult(
         descriptions=descriptions,
@@ -843,7 +637,6 @@ def generate_descriptions(request: DescriptionGenerationRequest) -> DescriptionG
         style=request.style.value,
         language=request.language,
         length=request.length,
-        success=True,
     )
 
 
@@ -851,53 +644,23 @@ def generate_descriptions(request: DescriptionGenerationRequest) -> DescriptionG
 # UTILITY FUNCTIONS
 # =============================================================================
 
-def get_available_providers() -> dict:
+async def get_available_providers() -> dict:
     """
     Get list of available providers and their models from Gran Sabio LLM.
 
     Fetches models dynamically from the Gran Sabio LLM API.
     Returns dict mapping provider names to model lists.
     """
-    import requests
-    from config import GRANSABIO_LLM_URL
-
-    try:
-        response = requests.get(f"{GRANSABIO_LLM_URL}/models", timeout=5)
-        response.raise_for_status()
-        data = response.json()
-
-        # Provider display names
-        provider_names = {
-            "anthropic": "Anthropic",
-            "openai": "OpenAI",
-            "google": "Google (Gemini)",
-            "xai": "xAI (Grok)",
+    catalog = await get_available_models()
+    return {
+        provider: {
+            "name": TEXT_PROVIDER_NAMES[provider],
+            "models": [{"id": model["key"], "name": model["name"],
+                        "description": model["description"]} for model in models],
         }
+        for provider, models in catalog.items()
+    }
 
-        # Filter to only include main providers (exclude openrouter, ollama)
-        main_providers = ["anthropic", "openai", "google", "xai"]
-        result = {}
-
-        for provider in main_providers:
-            if provider in data:
-                result[provider] = {
-                    "name": provider_names.get(provider, provider.capitalize()),
-                    "models": [
-                        {
-                            "id": model.get("key", model.get("model_id", "")),
-                            "name": model.get("name", ""),
-                            "description": model.get("description", "")[:80] if model.get("description") else ""
-                        }
-                        for model in data[provider]
-                    ]
-                }
-
-        logger.info(f"Loaded {sum(len(p['models']) for p in result.values())} models from Gran Sabio LLM for content generation")
-        return result
-
-    except Exception as e:
-        logger.error(f"Could not fetch models from Gran Sabio LLM: {e}")
-        return {}
 
 
 def get_available_title_styles() -> list[dict]:

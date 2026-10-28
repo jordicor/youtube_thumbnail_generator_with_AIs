@@ -5,18 +5,34 @@ Business logic for video analysis (scenes, faces, clustering).
 """
 
 import asyncio
-from pathlib import Path
-from typing import Optional, List, Dict, Any, Set, Callable
+from pathlib import Path, PurePosixPath
+from typing import Optional, List, Dict, Callable, Set
 import aiosqlite
+import numpy as np
 import orjson
 import shutil
 import re
 import logging
 
-from config import MAX_REFERENCE_FRAMES, OUTPUT_DIR
+from config import OUTPUT_DIR
 from i18n import t
-from utils import VideoOutput
+from services.face_index import (
+    MIN_IDENTITY_SIMILARITY,
+    FaceIndex,
+    centroid_from_blob,
+    centroid_list,
+    centroid_to_blob,
+    claimed_faces,
+    face_reference_view,
+    load_face_index,
+    match_faces,
+    person_centroid,
+    stored_centroid,
+)
+from services.face_selection import select_face_references
+from utils import VideoOutput, resolve_output_path, resolve_row_paths, to_output_relative
 from scene_detection import process_video_scenes
+from services.visual_context import setting_frame
 from face_extraction import process_faces
 from transcription import transcribe_video
 
@@ -81,7 +97,9 @@ class AnalysisService:
         force_transcription: bool = False,
         clustering_eps: float = 0.5,
         clustering_min_samples: int = 3,
-        cancellation_check: Optional[Callable[[], bool]] = None
+        cancellation_check: Optional[Callable[[], bool]] = None,
+        refresh_references: bool = False,
+        expected_reference_revision: Optional[int] = None,
     ):
         """
         Run full analysis pipeline for a video.
@@ -93,6 +111,11 @@ class AnalysisService:
         4. Audio transcription (ElevenLabs)
         """
         try:
+            if refresh_references:
+                if any((force_scenes, force_faces, force_clustering, force_transcription)):
+                    raise ValueError("Reference refresh cannot be combined with forced analysis stages.")
+                await self.refresh_visual_references(video_id, cancellation_check, expected_reference_revision)
+                return
             # Get video info
             video = await self.get_video(video_id)
             if not video:
@@ -115,8 +138,9 @@ class AnalysisService:
                 scene_result, extracted_frames = await loop.run_in_executor(
                     None, process_video_scenes, video_path, output
                 )
-                if not scene_result or not extracted_frames:
-                    await self.update_video_status(video_id, 'error', 'scene_detection_error: No scenes or frames extracted')
+                # Frame extraction raises when it cannot write a frame or reads none
+                if not scene_result:
+                    await self.update_video_status(video_id, 'error', 'scene_detection_error: No scenes detected')
                     return
             except Exception as e:
                 await self.update_video_status(video_id, 'error', f'scene_detection_error: {str(e)}')
@@ -143,6 +167,21 @@ class AnalysisService:
             # Check for cancellation after face extraction
             if cancellation_check and cancellation_check():
                 raise AnalysisCancelledError(f"Video {video_id} cancelled after face extraction")
+
+            if face_result and face_result.all_faces:
+                from services.portrait_quality import enrich_portraits
+                try:
+                    await asyncio.to_thread(enrich_portraits, output.output_dir, video_path, cancellation_check)
+                except InterruptedError as error:
+                    raise AnalysisCancelledError(str(error)) from error
+
+            # Body landmarks reuse indexed faces and extracted frames.
+            if face_result and face_result.all_faces:
+                from services.body_references import ensure_body_index
+                try:
+                    await asyncio.to_thread(ensure_body_index, output.output_dir, cancellation_check)
+                except InterruptedError as error:
+                    raise AnalysisCancelledError(str(error)) from error
 
             # Step 3: Face clustering (if faces found)
             if face_result and face_result.all_faces:
@@ -197,6 +236,210 @@ class AnalysisService:
             await self.update_video_status(video_id, 'error', str(e))
             raise
 
+    async def refresh_visual_references(self, video_id, cancellation_check=None, expected_reference_revision=None):
+        """Refresh the automatic visual choices without reclustering or transcribing.
+
+        People keep their names, notes and frames, except that a person showing
+        two characters (the same face with clearly different hair, a wig or a
+        disguise) has the other character moved to a new person. Choices the
+        user made (automatic false) stay.
+        """
+        from services.body_references import ensure_body_index
+        from services.portrait_quality import enrich_portraits
+        from services.reference_service import ReferenceService
+
+        video = await self.get_video(video_id)
+        if video is None:
+            raise ValueError("Video not found.")
+        output = VideoOutput(Path(video["filepath"]), Path(OUTPUT_DIR))
+        scenes = orjson.loads(output.scenes_file.read_bytes())["scenes"]
+        frames = [output.frames_dir / f"scene_{s['index']:03d}_frame_{number:06d}.jpg"
+                  for s in scenes for number in s["frame_indices"]]
+        if not frames or any(not path.is_file() or not path.stat().st_size for path in frames):
+            raise ValueError("Reference refresh requires complete extracted scene frames.")
+        revision = video["reference_revision"]
+        if expected_reference_revision is not None and revision != expected_reference_revision:
+            raise ValueError("References changed after this refresh was queued; no choices were overwritten.")
+        await self.update_video_status(video_id, "analyzing_faces")
+        await asyncio.to_thread(process_faces, frames, output)
+        try:
+            await asyncio.to_thread(enrich_portraits, output.output_dir, video["filepath"], cancellation_check)
+            body_index = await asyncio.to_thread(ensure_body_index, output.output_dir, cancellation_check)
+        except InterruptedError as error:
+            raise AnalysisCancelledError(str(error)) from error
+        if cancellation_check and cancellation_check():
+            raise AnalysisCancelledError("Reference refresh cancelled.")
+        index = await asyncio.to_thread(load_face_index, output.faces_file)
+        refs = ReferenceService(self.db)
+        existing = await refs.list(video_id)
+        async with self.db.execute("""
+            SELECT c.id,c.view_mode,c.embedding_centroid,vf.frame_path FROM clusters c
+            JOIN cluster_frame_assignments a ON a.cluster_id=c.id
+            JOIN video_frames vf ON vf.id=a.frame_id WHERE c.video_id=? ORDER BY c.id,vf.id
+        """, [video_id]) as cursor:
+            rows = await cursor.fetchall()
+        groups = {}
+        for person_id, view_mode, blob, path in rows:
+            groups.setdefault(person_id, (view_mode, blob, []))[2].append(Path(path).name)
+        if not groups:
+            raise ValueError("Reference refresh requires existing people with indexed frames. Run normal analysis first.")
+        automatic_setting = all(ref.get("automatic") for ref in existing if ref["role"] == "environment")
+
+        plan = await asyncio.to_thread(
+            self._plan_reference_refresh, index, body_index, output.frames_dir, groups, existing,
+            automatic_setting)
+        if cancellation_check and cancellation_check():
+            raise AnalysisCancelledError("Reference refresh cancelled before saving.")
+        await self.db.execute("BEGIN IMMEDIATE")
+        try:
+            # A video with thumbnails stays completed, as generation leaves it
+            cursor = await self.db.execute("""
+                UPDATE videos SET reference_revision=reference_revision+1,error_message=NULL,
+                                  updated_at=CURRENT_TIMESTAMP,
+                                  status=CASE WHEN EXISTS (SELECT 1 FROM generation_jobs done
+                                      WHERE done.video_id=videos.id AND done.status='completed')
+                                    THEN 'completed' ELSE 'analyzed' END
+                WHERE id=? AND reference_revision=? AND status!='cancelled'
+            """, [video_id, revision])
+            if cursor.rowcount != 1:
+                raise ValueError("References changed or analysis was cancelled; no choices were overwritten.")
+            people = await self._apply_character_splits(video_id, output, plan["people"])
+            await self.db.execute("DELETE FROM visual_references WHERE video_id=? AND role!='environment'", [video_id])
+            await refs.insert(video_id, [dict(ref, person_id=people[ref["person_id"]]) for ref in plan["references"]])
+            if plan["setting"] is not None:
+                await self.db.execute("DELETE FROM visual_references WHERE video_id=? AND role='environment'", [video_id])
+                await refs.insert(video_id, [plan["setting"]])
+            for key, person in plan["people"].items():
+                primary = next((ref["source"] for ref in plan["references"]
+                                if ref["person_id"] == key and ref["primary"] and ref["source_type"] == "frame"), None)
+                relative = to_output_relative(output.frames_dir / primary) if primary else ""
+                await self.db.execute("""
+                    UPDATE clusters SET representative_frame=?, is_picture=?,
+                      representative_frame_id=(SELECT id FROM video_frames WHERE video_id=? AND frame_path=?)
+                    WHERE id=?
+                """, [relative, person["is_picture"], video_id, relative, people[key]])
+            await self.db.commit()
+        except BaseException:
+            await self.db.rollback()
+            raise
+        if any(person["new"] for person in plan["people"].values()):
+            clusters = await self.get_clusters(video_id, "person")
+            (output.output_dir / "clusters").mkdir(parents=True, exist_ok=True)
+            await self._update_clusters_json(output.output_dir, clusters)
+            await self._update_clustering_result_json(output.output_dir, clusters)
+
+    @staticmethod
+    def _plan_reference_refresh(index, body_index, frames_dir, groups, existing, automatic_setting):
+        """What a reference refresh writes: people (with characters split off), references and setting.
+
+        People are keyed by their id; a character split off a person gets the
+        key ("new", parent id, number) until it is inserted.
+        """
+        from services.body_references import person_body_candidates, select_body_references
+        from services.face_selection import character_groups, is_picture, look_vector, same_look_frames
+        from services.reference_service import VisualReference
+
+        people = {}
+        for person_id, (view_mode, blob, members) in groups.items():
+            centroid = stored_centroid(blob, index, members, person_id)
+            matches = match_faces(index, centroid, members)
+            own = {name: match for name, match in matches.items()
+                   if match.similarity is not None and match.similarity >= MIN_IDENTITY_SIMILARITY}
+            characters = (character_groups({name: look_vector(index.portraits[match.row] or {})
+                                            for name, match in own.items()})
+                          if view_mode == "person" else [list(own)])
+            if len(characters) > 1:
+                # The person keeps the character of its primary photo (named, chosen)
+                primary = next((ref["source"] for ref in existing if ref["person_id"] == person_id
+                                and ref["role"] == "face" and ref["primary"]), None)
+                kept = next((group for group in characters if primary in group), characters[0])
+                moved = [group for group in characters if group is not kept]
+                leaving = {name for group in moved for name in group}
+                remaining = [name for name in members if name not in leaving]
+                people[person_id] = {"new": False, "members": remaining,
+                                     "centroid": person_centroid(index, remaining, centroid)}
+                for number, group in enumerate(moved, 1):
+                    mean = index.embeddings[[own[name].row for name in group]].mean(axis=0)
+                    people[("new", person_id, number)] = {
+                        "new": True, "parent": person_id, "members": sorted(group),
+                        "centroid": person_centroid(index, sorted(group), mean / np.linalg.norm(mean))}
+            else:
+                people[person_id] = {"new": False, "members": members, "centroid": centroid}
+
+        references = []
+        for key, person in people.items():
+            matches = match_faces(index, person["centroid"], person["members"])
+            person["is_picture"] = is_picture([
+                (name, match.box) for name, match in matches.items()
+                if match.similarity is not None and match.similarity >= MIN_IDENTITY_SIMILARITY])
+            members = set(person["members"])
+            current = [ref for ref in existing if not person["new"] and ref["person_id"] == key
+                       and (ref["source_type"] != "frame" or ref["source"] in members)]
+            # A person whose photos the user chose or changed keeps them all
+            if any(ref["role"] == "face" and not ref.get("automatic") for ref in current):
+                faces = [ref for ref in current if ref["role"] == "face"]
+                if faces and not any(ref["primary"] for ref in faces):
+                    faces[0] = dict(faces[0], primary=True)
+            else:
+                faces = [VisualReference(role="face", person_id=-1, source_type="frame", source=name,
+                                         primary=position == 0, view=face_reference_view(matches[name].yaw),
+                                         expression=matches[name].expression, automatic=True).model_dump()
+                         for position, name in enumerate(select_face_references(frames_dir, matches, index))]
+            references += [dict(ref, person_id=key) for ref in faces]
+            manual_bodies = [ref for ref in current if ref["role"] == "body" and not ref.get("automatic")]
+            references += manual_bodies
+            primary = next((ref["source"] for ref in faces if ref["primary"] and ref["source_type"] == "frame"), None)
+            allowed = same_look_frames(matches, index, primary)
+            candidates = person_body_candidates(body_index, {name: match for name, match in matches.items()
+                                                             if name in allowed})["candidates"]
+            occupied = {"front" if ref["view"] == "three_quarter" else ref["view"] for ref in manual_bodies}
+            for candidate in select_body_references(frames_dir, candidates):
+                if ("front" if candidate["view"] == "three_quarter" else candidate["view"]) in occupied:
+                    continue
+                references.append(dict(VisualReference(
+                    role="body", person_id=-1, source_type="frame", source=candidate["filename"],
+                    crop=candidate["box"], coverage=candidate["coverage"], posture=candidate["posture"],
+                    view=candidate["view"], identity_confirmed=True, automatic=True).model_dump(), person_id=key))
+        setting = None
+        if automatic_setting:
+            setting = VisualReference(role="environment", source_type="frame",
+                                      source=setting_frame(frames_dir), automatic=True).model_dump()
+        return {"people": people, "references": references, "setting": setting}
+
+    async def _apply_character_splits(self, video_id, output, people) -> Dict:
+        """Insert the characters a refresh split off and move their frames; the database id of every key."""
+        ids = {key: key for key, person in people.items() if not person["new"]}
+        for key, person in people.items():
+            if not person["new"]:
+                continue
+            async with self.db.execute(
+                "SELECT COALESCE(MAX(cluster_index), -1) + 1 FROM clusters WHERE video_id=? AND view_mode='person'",
+                [video_id]
+            ) as cursor:
+                next_index = (await cursor.fetchone())[0]
+            cursor = await self.db.execute("""
+                INSERT INTO clusters (video_id, cluster_index, view_mode, num_frames, representative_frame,
+                                      embedding_centroid)
+                VALUES (?, ?, 'person', ?, '', ?)
+            """, [video_id, next_index, len(person["members"]), centroid_to_blob(person["centroid"])])
+            ids[key] = cursor.lastrowid
+            paths = [to_output_relative(output.frames_dir / name) for name in person["members"]]
+            placeholders = ",".join("?" * len(paths))
+            await self.db.execute(f"""
+                DELETE FROM cluster_frame_assignments WHERE cluster_id=? AND frame_id IN
+                  (SELECT id FROM video_frames WHERE video_id=? AND frame_path IN ({placeholders}))
+            """, [person["parent"], video_id, *paths])
+            await self.db.execute(f"""
+                INSERT INTO cluster_frame_assignments (cluster_id, frame_id)
+                SELECT ?, id FROM video_frames WHERE video_id=? AND frame_path IN ({placeholders})
+            """, [ids[key], video_id, *paths])
+        for key, person in people.items():
+            if person["new"] or any(other["new"] and other["parent"] == key for other in people.values()):
+                await self.db.execute("UPDATE clusters SET num_frames=?, embedding_centroid=? WHERE id=?", [
+                    len(person["members"]),
+                    None if person["centroid"] is None else centroid_to_blob(person["centroid"]), ids[key]])
+        return ids
+
     async def _run_clustering(
         self,
         video_id: int,
@@ -221,9 +464,24 @@ class AnalysisService:
 
         # Check for existing clustering result
         clustering_result_path = output.output_dir / "clustering_result.json"
+        result = None
         if clustering_result_path.exists() and not force:
-            with open(clustering_result_path, 'rb') as f:
-                result = orjson.loads(f.read())
+            result = orjson.loads(clustering_result_path.read_bytes())
+            stat = output.faces_file.stat()
+            if result.get("faces_fingerprint") != [stat.st_mtime_ns, stat.st_size]:
+                result = None
+        if result is not None:
+            # Paths in the cache are stored relative to OUTPUT_DIR
+            for cluster in result.get('clusters', []):
+                if 'centroid' not in cluster or 'is_picture' not in cluster:
+                    raise ValueError(
+                        f"{clustering_result_path} lacks the face embedding or picture flag of a cluster; "
+                        "reanalyze the video forcing the clustering"
+                    )
+                if cluster.get('representative_frame'):
+                    cluster['representative_frame'] = str(resolve_output_path(cluster['representative_frame']))
+                for frame in cluster['frames']:
+                    frame['frame_path'] = str(resolve_output_path(frame['frame_path']))
         else:
             result = run_clustering_pipeline(
                 video_output_dir=output.output_dir,
@@ -233,7 +491,18 @@ class AnalysisService:
             )
 
         if result.get('error'):
-            return
+            raise ValueError(result['error'])
+
+        # Face photos of each person and scene, picked before the write
+        # transaction because it opens images
+        index = await asyncio.to_thread(load_face_index, output.faces_file)
+        references = await asyncio.to_thread(
+            self._initial_references, index, output.frames_dir, result.get('clusters', [])
+        )
+        environment_frame = await asyncio.to_thread(setting_frame, output.frames_dir)
+
+        from services.body_references import load_body_index
+        body_index = await asyncio.to_thread(load_body_index, output.output_dir)
 
         # V2: Delete existing data and insert new data in a single transaction
         await self.db.execute("BEGIN IMMEDIATE")
@@ -247,7 +516,7 @@ class AnalysisService:
         clusters_data = result.get('clusters', [])
 
         # 1. First pass: Insert ALL unique frames into video_frames
-        frame_id_map = {}  # frame_path -> frame_id
+        frame_rows = {}  # frame_path -> row to insert
         for cluster in clusters_data:
             all_frames = cluster.get('frames', [])
             if not all_frames:
@@ -264,114 +533,233 @@ class AnalysisService:
                     quality = 0
                     expression = 'unknown'
 
-                if path and path not in frame_id_map:
-                    scene_idx = extract_scene_index_from_path(path)
-                    cursor = await self.db.execute("""
-                        INSERT INTO video_frames (video_id, frame_path, quality_score, expression, scene_index)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, [video_id, path, quality, expression, scene_idx])
-                    frame_id_map[path] = cursor.lastrowid
+                if path and path not in frame_rows:
+                    frame_rows[path] = (video_id, to_output_relative(path), quality, expression,
+                                        extract_scene_index_from_path(path))
+
+        # One statement for all rows (each execute is a round trip to the
+        # aiosqlite thread), then the ids by their unique (video_id, frame_path)
+        await self.db.executemany("""
+            INSERT INTO video_frames (video_id, frame_path, quality_score, expression, scene_index)
+            VALUES (?, ?, ?, ?, ?)
+        """, list(frame_rows.values()))
+        async with self.db.execute(
+            "SELECT frame_path, id FROM video_frames WHERE video_id = ?", [video_id]
+        ) as cursor:
+            frame_ids = dict(await cursor.fetchall())
+        frame_id_map = {path: frame_ids[row[1]] for path, row in frame_rows.items()}  # frame_path -> frame_id
 
         # 2. Create clusters for BOTH view_modes
         person_scene_index = 0  # Running index for person_scene clusters
 
         for cluster in clusters_data:
             cluster_idx = cluster.get('cluster_index', 0)
-            representative_path = cluster.get('representative_frame', '')
+            face_references = references[(cluster_idx, None)]
+            representative_path = str(output.frames_dir / face_references[0]["source"]) if face_references else ""
 
-            # Build frames list with quality info
-            all_frames = cluster.get('frames', [])
-            if not all_frames:
-                all_frames = [{'frame_path': p, 'quality_score': 0, 'expression': 'unknown'}
-                              for p in cluster.get('top_frames', [])]
-
-            frames_with_quality = []
-            seen_paths = set()
-            for frame in all_frames:
-                if isinstance(frame, dict):
-                    path = frame.get('frame_path', '')
-                    quality = frame.get('quality_score', 0)
-                else:
-                    path = frame
-                    quality = 0
-
-                if path and path not in seen_paths:
-                    seen_paths.add(path)
-                    scene_idx = extract_scene_index_from_path(path)
-                    frames_with_quality.append({
-                        'frame_path': path,
-                        'frame_id': frame_id_map.get(path),
-                        'quality_score': quality,
-                        'scene_index': scene_idx
-                    })
-
-            # Sort by quality descending
-            frames_with_quality.sort(key=lambda f: f['quality_score'], reverse=True)
-
+            frames_with_quality = [
+                {**frame, 'frame_id': frame_id_map.get(frame['frame_path'])}
+                for frame in self._cluster_frames(cluster)
+            ]
             if not frames_with_quality:
                 continue
 
-            # Get representative frame ID
-            rep_frame_id = frame_id_map.get(representative_path) or frames_with_quality[0]['frame_id']
+            # Listing and editor show the primary face photo
+            rep_frame_id = frame_id_map.get(representative_path)
+
+            # The person's face: the mean of the faces DBSCAN grouped (shared
+            # with their person_scene clusters). Their frames can show others too.
+            centroid = cluster['centroid']
+            centroid_blob = None if centroid is None else centroid_to_blob(
+                np.asarray(centroid, dtype=np.float32) / np.linalg.norm(centroid)
+            )
 
             # === Create 'person' cluster ===
             cursor = await self.db.execute("""
                 INSERT INTO clusters (video_id, cluster_index, view_mode, representative_frame_id,
-                                      num_frames, representative_frame)
-                VALUES (?, ?, 'person', ?, ?, ?)
-            """, [video_id, cluster_idx, rep_frame_id, len(frames_with_quality), representative_path])
+                                      num_frames, representative_frame, embedding_centroid, is_picture)
+                VALUES (?, ?, 'person', ?, ?, ?, ?, ?)
+            """, [video_id, cluster_idx, rep_frame_id, len(frames_with_quality),
+                  to_output_relative(representative_path) if representative_path else "", centroid_blob,
+                  cluster['is_picture']])
             person_cluster_id = cursor.lastrowid
 
             # Assign all frames to person cluster
-            for idx, frame in enumerate(frames_with_quality):
-                is_ref = idx < MAX_REFERENCE_FRAMES
-                ref_order = idx + 1 if is_ref else None
-                await self.db.execute("""
-                    INSERT INTO cluster_frame_assignments (cluster_id, frame_id, is_reference, reference_order)
-                    VALUES (?, ?, ?, ?)
-                """, [person_cluster_id, frame['frame_id'], 1 if is_ref else 0, ref_order])
+            await self._insert_assignments(person_cluster_id, frames_with_quality, references[(cluster_idx, None)])
 
             # === Create 'person_scene' clusters ===
-            # Group frames by scene_index
-            frames_by_scene = {}
-            for frame in frames_with_quality:
-                scene_idx = frame.get('scene_index')
-                if scene_idx is None:
-                    scene_idx = -1
-                if scene_idx not in frames_by_scene:
-                    frames_by_scene[scene_idx] = []
-                frames_by_scene[scene_idx].append(frame)
-
+            frames_by_scene = self._frames_by_scene(frames_with_quality)
             for scene_idx in sorted(frames_by_scene.keys()):
                 scene_frames = frames_by_scene[scene_idx]
-                if not scene_frames:
-                    continue
-
-                # Sort by quality
-                scene_frames.sort(key=lambda f: f['quality_score'], reverse=True)
-                scene_rep_id = scene_frames[0]['frame_id']
-                scene_rep_path = scene_frames[0]['frame_path']
+                scene_references = references[(cluster_idx, scene_idx)]
+                scene_rep_path = str(output.frames_dir / scene_references[0]["source"]) if scene_references else ""
+                scene_rep_id = frame_id_map.get(scene_rep_path)
 
                 # Create person_scene cluster
                 cursor = await self.db.execute("""
                     INSERT INTO clusters (video_id, cluster_index, view_mode, scene_index,
-                                          representative_frame_id, num_frames, representative_frame)
-                    VALUES (?, ?, 'person_scene', ?, ?, ?, ?)
+                                          representative_frame_id, num_frames, representative_frame,
+                                          embedding_centroid, is_picture)
+                    VALUES (?, ?, 'person_scene', ?, ?, ?, ?, ?, ?)
                 """, [video_id, person_scene_index, scene_idx if scene_idx != -1 else None,
-                      scene_rep_id, len(scene_frames), scene_rep_path])
+                      scene_rep_id, len(scene_frames), to_output_relative(scene_rep_path) if scene_rep_path else "",
+                      centroid_blob, cluster['is_picture']])
                 scene_cluster_id = cursor.lastrowid
                 person_scene_index += 1
 
                 # Assign frames to person_scene cluster
-                for idx, frame in enumerate(scene_frames):
-                    is_ref = idx < MAX_REFERENCE_FRAMES
-                    ref_order = idx + 1 if is_ref else None
-                    await self.db.execute("""
-                        INSERT INTO cluster_frame_assignments (cluster_id, frame_id, is_reference, reference_order)
-                        VALUES (?, ?, ?, ?)
-                    """, [scene_cluster_id, frame['frame_id'], 1 if is_ref else 0, ref_order])
+                await self._insert_assignments(scene_cluster_id, scene_frames, references[(cluster_idx, scene_idx)])
 
+        from services.reference_service import ReferenceService
+        await ReferenceService(self.db).initialize_context(video_id, index, body_index, environment_frame)
+        await self.db.execute("UPDATE videos SET reference_revision=reference_revision+1 WHERE id=?", [video_id])
         await self.db.commit()
+
+    @staticmethod
+    def _cluster_frames(cluster: dict) -> List[dict]:
+        """A clustering result's frames of one person, once each, best first.
+
+        Each one: frame_path, quality_score, scene_index.
+        """
+        all_frames = cluster.get('frames', []) or [
+            {'frame_path': p, 'quality_score': 0} for p in cluster.get('top_frames', [])
+        ]
+        frames, seen_paths = [], set()
+        for frame in all_frames:
+            path = frame.get('frame_path', '') if isinstance(frame, dict) else frame
+            if path and path not in seen_paths:
+                seen_paths.add(path)
+                frames.append({
+                    'frame_path': path,
+                    'quality_score': frame.get('quality_score', 0) if isinstance(frame, dict) else 0,
+                    'scene_index': extract_scene_index_from_path(path),
+                })
+        frames.sort(key=lambda f: f['quality_score'], reverse=True)
+        return frames
+
+    @staticmethod
+    def _frames_by_scene(frames: List[dict]) -> Dict[int, List[dict]]:
+        """Frames grouped by scene index (-1: unknown), keeping their order."""
+        by_scene: Dict[int, List[dict]] = {}
+        for frame in frames:
+            scene_idx = frame['scene_index'] if frame['scene_index'] is not None else -1
+            by_scene.setdefault(scene_idx, []).append(frame)
+        return by_scene
+
+    @classmethod
+    def _initial_references(
+        cls,
+        index: FaceIndex,
+        frames_dir: Path,
+        clusters: List[dict],
+    ) -> Dict[tuple, List[dict]]:
+        """Up to three face photos per person and scene, with observed metadata."""
+        references = {}
+        for cluster in clusters:
+            frames = cls._cluster_frames(cluster)
+            centroid = None if cluster['centroid'] is None else np.asarray(cluster['centroid'], dtype=np.float32)
+            paths = {Path(frame['frame_path']).name: frame['frame_path'] for frame in frames}
+            matches = match_faces(index, centroid, list(paths))
+
+            def pick(group: List[dict]) -> List[dict]:
+                names = [Path(frame["frame_path"]).name for frame in group]
+                selected = select_face_references(frames_dir, {name: matches[name] for name in names if name in matches}, index)
+                return [{"source": name, "primary": position == 0, "automatic": True,
+                         "view": face_reference_view(matches[name].yaw), "expression": matches[name].expression}
+                        for position, name in enumerate(selected)]
+
+            cluster_idx = cluster.get('cluster_index', 0)
+            references[(cluster_idx, None)] = pick(frames)
+            for scene_idx, scene_frames in cls._frames_by_scene(frames).items():
+                references[(cluster_idx, scene_idx)] = pick(scene_frames)
+        return references
+
+    async def _insert_assignments(self, cluster_id: int, frames: List[dict], references: List[dict]) -> None:
+        """Assign membership and the initial ordered face references to a new cluster."""
+        await self.db.executemany(
+            "INSERT INTO cluster_frame_assignments (cluster_id, frame_id) VALUES (?, ?)",
+            [(cluster_id, frame["frame_id"]) for frame in frames],
+        )
+        async with self.db.execute("SELECT video_id FROM clusters WHERE id=?", [cluster_id]) as cursor:
+            video_id = (await cursor.fetchone())[0]
+        from services.reference_service import ReferenceService, VisualReference
+        await ReferenceService(self.db).insert(video_id, [
+            VisualReference(role="face", person_id=cluster_id, source_type="frame", **ref).model_dump()
+            for ref in references
+        ])
+
+    # =========================================================================
+    # PERSON FACE EMBEDDING
+    # =========================================================================
+
+    async def centroid_blob(self, cluster_id: int) -> Optional[bytes]:
+        """Stored face embedding of a person (NULL when none of their frames shows a face)."""
+        async with self.db.execute(
+            "SELECT embedding_centroid FROM clusters WHERE id = ?", [cluster_id]
+        ) as cursor:
+            return (await cursor.fetchone())[0]
+
+    async def _members_by_person(self, query: str, params: list) -> Dict[int, List[str]]:
+        """Frame filenames of each cluster a query (cluster id, frame path) returns."""
+        members: Dict[int, List[str]] = {}
+        async with self.db.execute(query, params) as cursor:
+            for cluster_id, frame_path in await cursor.fetchall():
+                members.setdefault(cluster_id, []).append(PurePosixPath(frame_path).name)
+        return members
+
+    async def view_claimed_faces(
+        self,
+        index: FaceIndex,
+        video_id: int,
+        view_mode: str,
+        exclude_id: Optional[int] = None
+    ) -> Set[int]:
+        """Faces (index rows) the people of a view have in their frames, but exclude_id's."""
+        members = await self._members_by_person("""
+            SELECT c.id, vf.frame_path
+            FROM clusters c
+            JOIN cluster_frame_assignments cfa ON cfa.cluster_id = c.id
+            JOIN video_frames vf ON vf.id = cfa.frame_id
+            WHERE c.video_id = ? AND c.view_mode = ? AND c.id IS NOT ?
+        """, [video_id, view_mode, exclude_id])
+        return claimed_faces(index, [
+            (stored_centroid(await self.centroid_blob(cluster_id), index, names, cluster_id), names)
+            for cluster_id, names in members.items()
+        ])
+
+    async def fit_person_centroid(
+        self,
+        cluster_id: int,
+        output_dir: Path,
+        seed: Optional[np.ndarray] = None
+    ) -> None:
+        """Fit a person's stored face embedding to their current frames.
+
+        The fit starts from seed, by default the person's embedding before the
+        edit. A person without one (new, or without faces until now) starts from
+        the faces no other person of the view claims. Not committed.
+        """
+        async with self.db.execute(
+            "SELECT video_id, view_mode, embedding_centroid FROM clusters WHERE id = ?", [cluster_id]
+        ) as cursor:
+            video_id, view_mode, blob = await cursor.fetchone()
+        members = (await self._members_by_person("""
+            SELECT cfa.cluster_id, vf.frame_path
+            FROM cluster_frame_assignments cfa
+            JOIN video_frames vf ON vf.id = cfa.frame_id
+            WHERE cfa.cluster_id = ?
+        """, [cluster_id])).get(cluster_id, [])
+
+        # Parsing a large faces.json takes a moment the first time
+        index = await asyncio.to_thread(load_face_index, output_dir / 'faces.json')
+        if seed is None and blob is not None:
+            seed = centroid_from_blob(blob)
+        claimed = set() if seed is not None else await self.view_claimed_faces(index, video_id, view_mode, cluster_id)
+        centroid = person_centroid(index, members, seed, claimed)
+        await self.db.execute(
+            "UPDATE clusters SET embedding_centroid = ? WHERE id = ?",
+            [None if centroid is None else centroid_to_blob(centroid), cluster_id]
+        )
 
     async def get_analysis_status(self, video_id: int) -> Optional[dict]:
         """Get current analysis status for a video."""
@@ -423,10 +811,38 @@ class AnalysisService:
 
         Returns:
             List of cluster dictionaries with frame counts from assignments.
+            person_scene clusters also carry the person cluster that currently
+            shares most of their frames (parent_cluster_index, parent_label),
+            or None when no person cluster holds any of them.
+            face_photo_expressions counts the selected face references by expression.
+            People whose face never moves (is_picture: a painting, a poster) come last.
         """
-        # V2: Query clusters with frame counts from cluster_frame_assignments
-        # Note: Falls back to representative_frame if representative_frame_id is not set
-        query = """
+        # Frame counts come from cluster_frame_assignments, looked up once per
+        # cluster: joined to the assignments, the parent subquery below would run
+        # once per frame. Falls back to representative_frame if
+        # representative_frame_id is not set.
+        # The two views are independent, so the parent person of a person_scene
+        # cluster is derived from the current 'person' view; the 'person' view
+        # has no parent and skips it.
+        if view_mode == 'person_scene':
+            parent_columns = "p.cluster_index as parent_cluster_index, p.label as parent_label"
+            parent_join = """
+            LEFT JOIN clusters p ON p.id = (
+                SELECT pc.id
+                FROM cluster_frame_assignments sa
+                JOIN cluster_frame_assignments pa ON pa.frame_id = sa.frame_id
+                JOIN clusters pc ON pc.id = pa.cluster_id
+                WHERE sa.cluster_id = c.id
+                  AND pc.video_id = c.video_id
+                  AND pc.view_mode = 'person'
+                GROUP BY pc.id
+                ORDER BY COUNT(*) DESC, pc.cluster_index
+                LIMIT 1
+            )"""
+        else:
+            parent_columns = "NULL as parent_cluster_index, NULL as parent_label"
+            parent_join = ""
+        query = f"""
             SELECT
                 c.id,
                 c.cluster_index,
@@ -436,139 +852,41 @@ class AnalysisService:
                 c.scene_index,
                 c.representative_frame_id,
                 COALESCE(vf.frame_path, c.representative_frame) as representative_frame,
-                COUNT(cfa.id) as num_frames,
-                SUM(CASE WHEN cfa.is_reference = 1 THEN 1 ELSE 0 END) as reference_count
+                (SELECT COUNT(*) FROM cluster_frame_assignments
+                 WHERE cluster_id = c.id) as num_frames,
+                (SELECT COUNT(*) FROM visual_references
+                 WHERE person_id = c.id AND role = 'face') as reference_count,
+                c.reference_format,
+                c.is_picture,
+                {parent_columns}
             FROM clusters c
-            LEFT JOIN cluster_frame_assignments cfa ON cfa.cluster_id = c.id
-            LEFT JOIN video_frames vf ON vf.id = c.representative_frame_id
+            LEFT JOIN video_frames vf ON vf.id = c.representative_frame_id{parent_join}
             WHERE c.video_id = ? AND c.view_mode = ?
-            GROUP BY c.id
-            ORDER BY c.cluster_index
+            ORDER BY c.is_picture, c.cluster_index
         """
 
         async with self.db.execute(query, [video_id, view_mode]) as cursor:
             rows = await cursor.fetchall()
             columns = [description[0] for description in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
+            clusters = [resolve_row_paths(dict(zip(columns, row)), 'representative_frame') for row in rows]
 
-    async def get_cluster_frames(
-        self,
-        video_id: int,
-        cluster_index: int,
-        limit: int = 20,
-        view_mode: str = 'person'
-    ) -> List[dict]:
-        """Get frames for a specific cluster.
-
-        V2 Architecture: Uses cluster_frame_assignments JOIN video_frames.
+        expressions_query = """
+            SELECT r.person_id, COALESCE(json_extract(r.data, '$.expression'), vf.expression), COUNT(*)
+            FROM visual_references r
+            JOIN clusters c ON c.id=r.person_id
+            LEFT JOIN video_frames vf ON vf.video_id=r.video_id AND json_extract(r.data, '$.source_type')='frame'
+                AND (vf.frame_path=json_extract(r.data, '$.source') OR
+                     vf.frame_path LIKE '%/frames/' || json_extract(r.data, '$.source'))
+            WHERE c.video_id=? AND c.view_mode=? AND r.role='face'
+            GROUP BY r.person_id, COALESCE(json_extract(r.data, '$.expression'), vf.expression)
         """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return []
-
-        query = """
-            SELECT vf.id, vf.frame_path, vf.quality_score, vf.expression, vf.scene_index
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            WHERE cfa.cluster_id = ?
-            ORDER BY vf.quality_score DESC
-            LIMIT ?
-        """
-        async with self.db.execute(query, [cluster['id'], limit]) as cursor:
-            rows = await cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
-
-    async def get_cluster_representative(
-        self,
-        video_id: int,
-        cluster_index: int,
-        view_mode: str = 'person'
-    ) -> Optional[str]:
-        """Get representative frame path for a cluster."""
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if cluster and cluster.get('representative_frame'):
-            return cluster['representative_frame']
-        return None
-
-    async def get_cluster_representative_by_id(
-        self,
-        cluster_id: int
-    ) -> Optional[str]:
-        """Get representative frame path for a cluster by its ID."""
-        query = """
-            SELECT representative_frame
-            FROM clusters
-            WHERE id = ?
-        """
-
-        async with self.db.execute(query, [cluster_id]) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                return row[0]
-            return None
-
-    async def get_cluster_by_index(
-        self,
-        video_id: int,
-        cluster_index: int,
-        view_mode: str = 'person'
-    ) -> Optional[dict]:
-        """Get a single cluster by video_id, cluster_index and view_mode.
-
-        V2 Architecture: Uses view_mode to distinguish between views.
-        """
-        return await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-
-    async def update_cluster_info(
-        self,
-        video_id: int,
-        cluster_index: int,
-        label: Optional[str] = None,
-        description: Optional[str] = None,
-        view_mode: str = 'person'
-    ) -> bool:
-        """
-        Update cluster label and/or description.
-
-        Args:
-            video_id: Video ID
-            cluster_index: Cluster index
-            label: New label (None = don't change)
-            description: New description (None = don't change)
-            view_mode: 'person' or 'person_scene'
-
-        Returns:
-            True if updated, False if cluster not found
-        """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return False
-
-        # Build update query dynamically based on what's provided
-        updates = []
-        params = []
-
-        if label is not None:
-            label_val = label.strip()[:128] if label.strip() else None
-            updates.append("label = ?")
-            params.append(label_val)
-
-        if description is not None:
-            desc_val = description.strip()[:2000] if description.strip() else None
-            updates.append("description = ?")
-            params.append(desc_val)
-
-        if not updates:
-            return True  # Nothing to update
-
-        params.append(cluster['id'])
-
-        query = f"UPDATE clusters SET {', '.join(updates)} WHERE id = ?"
-        await self.db.execute(query, params)
-        await self.db.commit()
-
-        return True
+        expressions = {cluster['id']: {} for cluster in clusters}
+        async with self.db.execute(expressions_query, [video_id, view_mode]) as cursor:
+            async for cluster_id, expression, count in cursor:
+                expressions[cluster_id][expression] = count
+        for cluster in clusters:
+            cluster['face_photo_expressions'] = expressions[cluster['id']]
+        return clusters
 
     async def delete_cluster(
         self,
@@ -598,9 +916,9 @@ class AnalysisService:
 
         output_dir = self._get_video_output_dir(video)
 
-        # Delete cluster folder (clusters/cluster_X/) if exists
+        # Cluster folders (clusters/cluster_X/) mirror the 'person' view only
         cluster_folder = output_dir / "clusters" / f"cluster_{cluster_index}"
-        if cluster_folder.exists():
+        if view_mode == 'person' and cluster_folder.exists():
             shutil.rmtree(cluster_folder)
 
         # Delete cluster (assignments cascade automatically)
@@ -617,7 +935,8 @@ class AnalysisService:
         await self.db.commit()
 
         # Sync physical cluster folders and update JSON files
-        await self._sync_cluster_folders(video_id, output_dir, old_index_by_id)
+        if view_mode == 'person':
+            await self._sync_cluster_folders(video_id, output_dir, old_index_by_id)
 
         return True
 
@@ -689,12 +1008,23 @@ class AnalysisService:
         if not source_ids:
             return {'success': False, 'error': t('api.errors.source_clusters_not_found')}
 
+        # The merged person is the largest one's face (the others join them)
+        merged_ids = [target_id] + source_ids
+        async with self.db.execute(f"""
+            SELECT c.embedding_centroid
+            FROM clusters c
+            WHERE c.id IN ({','.join('?' * len(merged_ids))})
+            ORDER BY (SELECT COUNT(*) FROM cluster_frame_assignments WHERE cluster_id = c.id) DESC, c.id
+            LIMIT 1
+        """, merged_ids) as cursor:
+            largest_blob = (await cursor.fetchone())[0]
+
         # Move assignments to target (ignore duplicates)
         placeholders = ','.join('?' * len(source_ids))
         await self.db.execute(f"""
             INSERT OR IGNORE INTO cluster_frame_assignments
-                (cluster_id, frame_id, is_reference, reference_order)
-            SELECT ?, frame_id, 0, NULL
+                (cluster_id, frame_id)
+            SELECT ?, frame_id
             FROM cluster_frame_assignments
             WHERE cluster_id IN ({placeholders})
         """, [target_id] + source_ids)
@@ -712,23 +1042,50 @@ class AnalysisService:
             if row:
                 best_rep_id, best_rep_path = row
                 await self.db.execute("""
-                    UPDATE clusters SET representative_frame_id = ? WHERE id = ?
-                """, [best_rep_id, target_id])
+                    UPDATE clusters SET representative_frame_id = ?, representative_frame = ? WHERE id = ?
+                """, [best_rep_id, best_rep_path, target_id])
+
+        # Preserve manual crops/uploads on merge; keep one primary and deduplicate sources.
+        from services.reference_service import ReferenceService
+        reference_service = ReferenceService(self.db)
+        all_refs = await reference_service.list(video_id)
+        merged_refs = [r for r in all_refs if r["person_id"] in merged_ids]
+        merged_refs.sort(key=lambda r: (r["person_id"] != target_id, not r["primary"]))
+        kept, seen = [], set()
+        primary_found = False
+        for ref in merged_refs:
+            key = (ref["role"], ref["source_type"], ref["source"])
+            if key in seen:
+                continue
+            seen.add(key)
+            ref["person_id"] = target_id
+            ref["primary"] = ref["role"] == "face" and not primary_found
+            primary_found = primary_found or ref["primary"]
+            kept.append(ref)
+        await self.db.execute(
+            f"DELETE FROM visual_references WHERE person_id IN ({','.join('?' * len(merged_ids))})", merged_ids
+        )
+        await reference_service.insert(video_id, kept)
+        await self.db.execute("UPDATE videos SET reference_revision=reference_revision+1 WHERE id=?", [video_id])
 
         # Delete source clusters (assignments cascade)
         await self.db.execute(f"""
             DELETE FROM clusters
             WHERE id IN ({placeholders})
         """, source_ids)
+        await self.fit_person_centroid(
+            target_id, output_dir, None if largest_blob is None else centroid_from_blob(largest_blob)
+        )
 
-        # Merge physical cluster folders
-        target_folder = clusters_dir / f"cluster_{target_index}"
-        target_folder.mkdir(parents=True, exist_ok=True)
+        # Merge physical cluster folders, which mirror the 'person' view only
+        if view_mode == 'person':
+            target_folder = clusters_dir / f"cluster_{target_index}"
+            target_folder.mkdir(parents=True, exist_ok=True)
 
-        for source_idx in source_indices:
-            source_folder = clusters_dir / f"cluster_{source_idx}"
-            if source_folder.exists():
-                shutil.rmtree(source_folder)
+            for source_idx in source_indices:
+                source_folder = clusters_dir / f"cluster_{source_idx}"
+                if source_folder.exists():
+                    shutil.rmtree(source_folder)
 
         # Capture old indices BEFORE reindex so _sync_cluster_folders can map folders correctly
         old_index_by_id = await self._get_cluster_index_map(video_id, view_mode)
@@ -736,20 +1093,18 @@ class AnalysisService:
         # Reindex clusters
         await self._reindex_clusters_v2(video_id, view_mode)
 
-        # Reset references in target to top quality
-        # Get new target index after reindex
+        # Keep the merged references and get the target's new index.
         async with self.db.execute("""
             SELECT cluster_index FROM clusters WHERE id = ?
         """, [target_id]) as cursor:
             row = await cursor.fetchone()
             new_target_index = row[0] if row else 0
 
-        await self.reset_reference_frames(video_id, new_target_index, view_mode)
-
         await self.db.commit()
 
         # Sync physical cluster folders and update JSON files
-        await self._sync_cluster_folders(video_id, output_dir, old_index_by_id)
+        if view_mode == 'person':
+            await self._sync_cluster_folders(video_id, output_dir, old_index_by_id)
 
         return {
             'success': True,
@@ -768,94 +1123,6 @@ class AnalysisService:
         video_name = Path(video['filepath']).stem
         safe_name = sanitize_filename(video_name)
         return Path(OUTPUT_DIR) / safe_name
-
-    def _validate_frame_path(self, frame_path: str, video_output_dir: Path) -> bool:
-        """
-        Validate that a frame path belongs to the video's output directory.
-        Prevents path traversal attacks.
-
-        Args:
-            frame_path: The frame path to validate
-            video_output_dir: The video's output directory (from _get_video_output_dir)
-
-        Returns:
-            True if the path is valid and within the video's directory
-        """
-        try:
-            # Resolve to absolute path
-            resolved_path = Path(frame_path).resolve()
-            video_dir_resolved = video_output_dir.resolve()
-
-            # Check if path is within video's output directory
-            return resolved_path.is_relative_to(video_dir_resolved)
-        except (ValueError, OSError):
-            return False
-
-    async def _get_cluster_frame_paths(self, cluster_id: int) -> Set[str]:
-        """Get all frame paths belonging to a cluster.
-
-        V2 Architecture: Uses cluster_frame_assignments JOIN video_frames.
-        """
-        async with self.db.execute("""
-            SELECT vf.frame_path
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            WHERE cfa.cluster_id = ?
-        """, [cluster_id]) as cursor:
-            rows = await cursor.fetchall()
-            return {row[0] for row in rows}
-
-    async def _get_other_clusters_frame_paths(self, video_id: int, exclude_cluster_id: int) -> Set[str]:
-        """Get frame paths from all clusters EXCEPT the specified one.
-
-        V2 Architecture: Uses cluster_frame_assignments JOIN video_frames.
-        """
-        async with self.db.execute("""
-            SELECT DISTINCT vf.frame_path
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            JOIN clusters c ON cfa.cluster_id = c.id
-            WHERE c.video_id = ? AND c.id != ?
-        """, [video_id, exclude_cluster_id]) as cursor:
-            rows = await cursor.fetchall()
-            return {row[0] for row in rows}
-
-    async def _remove_faces_from_json(self, output_dir: Path, frame_paths_to_remove: Set[str]):
-        """Remove faces belonging to deleted frames from faces.json."""
-        faces_file = output_dir / "faces.json"
-        if not faces_file.exists():
-            return
-
-        try:
-            with open(faces_file, 'rb') as f:
-                data = orjson.loads(f.read())
-
-            if 'all_faces' not in data:
-                return
-
-            original_count = len(data['all_faces'])
-
-            # Normalize paths for comparison (handle Windows path separators)
-            normalized_to_remove = {str(Path(p)) for p in frame_paths_to_remove}
-
-            # Filter out faces from deleted frames
-            data['all_faces'] = [
-                face for face in data['all_faces']
-                if str(Path(face.get('frame_path', ''))) not in normalized_to_remove
-            ]
-
-            # Update counters
-            new_count = len(data['all_faces'])
-            data['total_frames_analyzed'] = new_count
-            data['frames_with_faces'] = new_count
-
-            # Save updated file
-            with open(faces_file, 'wb') as f:
-                f.write(orjson.dumps(data, option=orjson.OPT_INDENT_2))
-
-        except Exception:
-            # If faces.json is corrupted or has unexpected format, skip
-            pass
 
     async def _sync_cluster_folders(
         self,
@@ -943,7 +1210,9 @@ class AnalysisService:
                 {
                     'index': c['cluster_index'],
                     'num_frames': c['num_frames'],
-                    'representative': str(output_dir / "clusters" / f"cluster_{c['cluster_index']}" / "representative.jpg"),
+                    'representative': to_output_relative(
+                        output_dir / "clusters" / f"cluster_{c['cluster_index']}" / "representative.jpg"
+                    ),
                     'label': c.get('label')
                 }
                 for c in clusters
@@ -1005,13 +1274,18 @@ class AnalysisService:
                 expr_rows = await cursor.fetchall()
                 expression_distribution = {row[0]: row[1] for row in expr_rows if row[0]}
 
+            blob = await self.centroid_blob(cluster_id)
             result['clusters'].append({
                 'cluster_index': cluster['cluster_index'],
                 'num_frames': cluster.get('num_frames', 0),
-                'representative_frame': cluster.get('representative_frame', ''),
+                'representative_frame': (
+                    to_output_relative(cluster['representative_frame'])
+                    if cluster.get('representative_frame') else ''
+                ),
                 'representative_quality': 0,
                 'expression_distribution': expression_distribution,
-                'top_frames': top_frames
+                'top_frames': top_frames,
+                'centroid': None if blob is None else centroid_list(centroid_from_blob(blob)),
             })
 
         with open(result_path, 'wb') as f:
@@ -1020,61 +1294,6 @@ class AnalysisService:
     # =========================================================================
     # V2 ARCHITECTURE HELPER METHODS
     # =========================================================================
-
-    async def _get_frame_by_id(self, frame_id: int) -> Optional[dict]:
-        """Get a video_frame by its ID."""
-        async with self.db.execute("""
-            SELECT id, video_id, frame_path, quality_score, expression, scene_index
-            FROM video_frames WHERE id = ?
-        """, [frame_id]) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                columns = [desc[0] for desc in cursor.description]
-                return dict(zip(columns, row))
-            return None
-
-    async def _get_frame_id_by_path(self, video_id: int, frame_path: str) -> Optional[int]:
-        """Get frame ID by its path within a video."""
-        async with self.db.execute("""
-            SELECT id FROM video_frames
-            WHERE video_id = ? AND frame_path = ?
-        """, [video_id, frame_path]) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
-    async def _assign_frame_to_cluster(
-        self,
-        cluster_id: int,
-        frame_id: int,
-        is_reference: bool = False,
-        reference_order: Optional[int] = None
-    ) -> bool:
-        """Assign a frame to a cluster. Returns True if created, False if already exists."""
-        try:
-            await self.db.execute("""
-                INSERT INTO cluster_frame_assignments
-                    (cluster_id, frame_id, is_reference, reference_order)
-                VALUES (?, ?, ?, ?)
-            """, [cluster_id, frame_id, 1 if is_reference else 0, reference_order])
-            return True
-        except Exception:  # UNIQUE constraint violation
-            return False
-
-    async def _reorder_references_v2(self, cluster_id: int) -> None:
-        """Reorder reference_order to be consecutive (1, 2, 3, ...)."""
-        async with self.db.execute("""
-            SELECT id FROM cluster_frame_assignments
-            WHERE cluster_id = ? AND is_reference = 1
-            ORDER BY reference_order NULLS LAST, added_at
-        """, [cluster_id]) as cursor:
-            rows = await cursor.fetchall()
-
-        for new_order, (assignment_id,) in enumerate(rows, start=1):
-            await self.db.execute("""
-                UPDATE cluster_frame_assignments
-                SET reference_order = ?
-                WHERE id = ?
-            """, [new_order, assignment_id])
 
     async def _reindex_clusters_v2(self, video_id: int, view_mode: str) -> None:
         """Reindex cluster_index to be consecutive within a view_mode."""
@@ -1109,251 +1328,8 @@ class AnalysisService:
             row = await cursor.fetchone()
             if row:
                 columns = [desc[0] for desc in cursor.description]
-                return dict(zip(columns, row))
+                return resolve_row_paths(dict(zip(columns, row)), 'representative_frame')
             return None
-
-    # =========================================================================
-    # FRAME MANAGEMENT METHODS
-    # =========================================================================
-
-    async def get_all_cluster_frames_from_disk(
-        self,
-        video_id: int,
-        cluster_index: int
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Read ALL frames for a cluster directly from disk.
-        Does not depend on DB, just lists files in clusters/cluster_X/frames/
-
-        Returns:
-            {
-                'frames': [{'filename': str, 'path': str, 'size_bytes': int}, ...],
-                'total': int
-            }
-        """
-        video = await self.get_video(video_id)
-        if not video:
-            return None
-
-        output_dir = self._get_video_output_dir(video)
-        cluster_frames_dir = output_dir / "clusters" / f"cluster_{cluster_index}" / "frames"
-
-        if not cluster_frames_dir.exists():
-            return {'frames': [], 'total': 0}
-
-        frames = []
-        for img_path in sorted(cluster_frames_dir.glob("*.jpg")):
-            frames.append({
-                'filename': img_path.name,
-                'path': str(img_path),
-                'size_bytes': img_path.stat().st_size
-            })
-
-        return {
-            'frames': frames,
-            'total': len(frames)
-        }
-
-    async def get_cluster_frame_image_path(
-        self,
-        video_id: int,
-        cluster_index: int,
-        filename: str
-    ) -> Optional[Path]:
-        """
-        Get the full path to a specific frame image on disk.
-        Used by the API endpoint to serve images.
-
-        Searches in order:
-        1. Main frames/ directory (virtual references - new system)
-        2. Legacy cluster_X/frames/ directory (backwards compatibility)
-
-        Returns:
-            Path to image file, or None if not found
-        """
-        video = await self.get_video(video_id)
-        if not video:
-            return None
-
-        output_dir = self._get_video_output_dir(video)
-
-        # First try the main frames/ directory (virtual references system)
-        main_frame_path = output_dir / "frames" / filename
-        if main_frame_path.exists():
-            return main_frame_path
-
-        # Fallback to legacy cluster-specific frames directory
-        legacy_frame_path = output_dir / "clusters" / f"cluster_{cluster_index}" / "frames" / filename
-        if legacy_frame_path.exists():
-            return legacy_frame_path
-
-        return None
-
-    async def delete_cluster_frames_from_disk(
-        self,
-        video_id: int,
-        cluster_index: int,
-        filenames: List[str]
-    ) -> Dict[str, Any]:
-        """
-        Delete frame files directly from disk (clusters/cluster_X/frames/).
-        Does NOT modify DB - this is for the file explorer view.
-
-        Returns:
-            {'deleted': int, 'errors': [...]}
-        """
-        video = await self.get_video(video_id)
-        if not video:
-            return None
-
-        output_dir = self._get_video_output_dir(video)
-        cluster_frames_dir = output_dir / "clusters" / f"cluster_{cluster_index}" / "frames"
-
-        deleted = 0
-        errors = []
-
-        for filename in filenames:
-            # Security: prevent path traversal
-            if ".." in filename or "/" in filename or "\\" in filename:
-                errors.append(f"Invalid filename: {filename}")
-                continue
-
-            file_path = cluster_frames_dir / filename
-            try:
-                if file_path.exists():
-                    file_path.unlink()
-                    deleted += 1
-                else:
-                    errors.append(f"File not found: {filename}")
-            except Exception as e:
-                errors.append(f"Error deleting {filename}: {e}")
-
-        return {
-            'deleted': deleted,
-            'errors': errors,
-            'remaining': len(list(cluster_frames_dir.glob("*.jpg"))) if cluster_frames_dir.exists() else 0
-        }
-
-    async def get_all_cluster_frames(
-        self,
-        video_id: int,
-        cluster_index: int,
-        view_mode: str = 'person'
-    ) -> Dict[str, Any]:
-        """
-        Get all frames for a cluster, split into references and library.
-
-        V2 Architecture: Each view_mode is independent. No parent-child aggregation.
-
-        Returns:
-            {
-                'reference_frames': [...],  # Frames marked as AI reference
-                'library_frames': [...],    # All other frames
-                'total_frames': int,
-                'reference_count': int,
-                'is_custom_selection': bool  # True if user customized references
-            }
-        """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return None
-
-        cluster_id = cluster['id']
-
-        # Get reference frames (ordered by reference_order)
-        async with self.db.execute("""
-            SELECT vf.id, vf.frame_path, vf.quality_score, vf.expression, vf.scene_index,
-                   cfa.is_reference, cfa.reference_order
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            WHERE cfa.cluster_id = ? AND cfa.is_reference = 1
-            ORDER BY cfa.reference_order ASC
-        """, [cluster_id]) as cursor:
-            rows = await cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            reference_frames = [dict(zip(columns, row)) for row in rows]
-
-        # Get library frames (non-reference, ordered by quality)
-        async with self.db.execute("""
-            SELECT vf.id, vf.frame_path, vf.quality_score, vf.expression, vf.scene_index,
-                   cfa.is_reference, cfa.reference_order
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            WHERE cfa.cluster_id = ? AND cfa.is_reference = 0
-            ORDER BY vf.quality_score DESC
-        """, [cluster_id]) as cursor:
-            rows = await cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            library_frames = [dict(zip(columns, row)) for row in rows]
-
-        # Check if it's a custom selection
-        is_custom = False
-        if reference_frames:
-            all_frames_by_quality = sorted(
-                reference_frames + library_frames,
-                key=lambda f: f['quality_score'] or 0,
-                reverse=True
-            )
-            top_n_ids = {f['id'] for f in all_frames_by_quality[:len(reference_frames)]}
-            current_ref_ids = {f['id'] for f in reference_frames}
-            is_custom = top_n_ids != current_ref_ids
-
-        return {
-            'reference_frames': reference_frames,
-            'library_frames': library_frames,
-            'total_frames': len(reference_frames) + len(library_frames),
-            'reference_count': len(reference_frames),
-            'is_custom_selection': is_custom
-        }
-
-    async def update_reference_frames(
-        self,
-        video_id: int,
-        cluster_index: int,
-        frame_ids: List[int],
-        view_mode: str = 'person'
-    ) -> bool:
-        """
-        Update which frames are marked as references for AI generation.
-
-        V2 Architecture: Updates cluster_frame_assignments table.
-
-        Args:
-            video_id: Video ID
-            cluster_index: Cluster index
-            frame_ids: List of video_frame IDs to set as references (in order)
-            view_mode: 'person' or 'person_scene'
-
-        Returns:
-            True if successful
-        """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return False
-
-        cluster_id = cluster['id']
-
-        # Validate limit
-        if len(frame_ids) > MAX_REFERENCE_FRAMES:
-            frame_ids = frame_ids[:MAX_REFERENCE_FRAMES]
-
-        # Clear all current references for this cluster
-        await self.db.execute("""
-            UPDATE cluster_frame_assignments
-            SET is_reference = 0, reference_order = NULL
-            WHERE cluster_id = ?
-        """, [cluster_id])
-
-        # Set new references with order
-        for order, frame_id in enumerate(frame_ids, start=1):
-            await self.db.execute("""
-                UPDATE cluster_frame_assignments
-                SET is_reference = 1, reference_order = ?
-                WHERE cluster_id = ? AND frame_id = ?
-            """, [order, cluster_id, frame_id])
-
-        await self.db.commit()
-        return True
 
     async def reset_reference_frames(
         self,
@@ -1362,7 +1338,7 @@ class AnalysisService:
         view_mode: str = 'person'
     ) -> bool:
         """
-        Reset references to top N frames by quality.
+        Reset face references to up to three useful views/expressions of the person.
 
         V2 Architecture: Uses cluster_frame_assignments.
 
@@ -1373,666 +1349,24 @@ class AnalysisService:
         if not cluster:
             return False
 
-        cluster_id = cluster['id']
-
-        # Clear all references
-        await self.db.execute("""
-            UPDATE cluster_frame_assignments
-            SET is_reference = 0, reference_order = NULL
-            WHERE cluster_id = ?
-        """, [cluster_id])
-
-        # Get top frames by quality
-        async with self.db.execute(f"""
-            SELECT cfa.id, cfa.frame_id
-            FROM cluster_frame_assignments cfa
-            JOIN video_frames vf ON vf.id = cfa.frame_id
-            WHERE cfa.cluster_id = ?
-            ORDER BY vf.quality_score DESC
-            LIMIT {MAX_REFERENCE_FRAMES}
-        """, [cluster_id]) as cursor:
-            top_assignments = await cursor.fetchall()
-
-        # Mark as references
-        for order, (assignment_id, _) in enumerate(top_assignments, start=1):
-            await self.db.execute("""
-                UPDATE cluster_frame_assignments
-                SET is_reference = 1, reference_order = ?
-                WHERE id = ?
-            """, [order, assignment_id])
-
+        from services.person_service import PersonService
+        from services.reference_service import ReferenceService
+        people = PersonService(self.db)
+        person = await people.get_person(video_id, cluster["id"])
+        picked = await people.automatic_references(video_id, view_mode, cluster["id"], person["members"])
+        await self.db.execute("DELETE FROM visual_references WHERE person_id=? AND role='face'", [cluster["id"]])
+        await ReferenceService(self.db).insert(video_id, picked)
+        await self.db.execute("UPDATE videos SET reference_revision=reference_revision+1 WHERE id=?", [video_id])
         await self.db.commit()
         return True
-
-    async def add_frames_to_references(
-        self,
-        video_id: int,
-        cluster_index: int,
-        frame_ids: List[int],
-        view_mode: str = 'person'
-    ) -> Dict[str, Any]:
-        """
-        Add frames to references (up to MAX_REFERENCE_FRAMES).
-
-        V2 Architecture: Uses cluster_frame_assignments.
-
-        Args:
-            frame_ids: List of video_frame IDs to add as references
-
-        Returns:
-            {'added': int, 'skipped': int, 'total': int}
-        """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return {'added': 0, 'skipped': 0, 'error': t('api.errors.cluster_not_found')}
-
-        cluster_id = cluster['id']
-
-        # Get current reference count
-        async with self.db.execute("""
-            SELECT COUNT(*) FROM cluster_frame_assignments
-            WHERE cluster_id = ? AND is_reference = 1
-        """, [cluster_id]) as cursor:
-            current_count = (await cursor.fetchone())[0]
-
-        # Get current max reference_order
-        async with self.db.execute("""
-            SELECT COALESCE(MAX(reference_order), 0) FROM cluster_frame_assignments
-            WHERE cluster_id = ? AND is_reference = 1
-        """, [cluster_id]) as cursor:
-            max_order = (await cursor.fetchone())[0]
-
-        added = 0
-        skipped = 0
-
-        for frame_id in frame_ids:
-            if current_count + added >= MAX_REFERENCE_FRAMES:
-                skipped += len(frame_ids) - (added + skipped)
-                break
-
-            # Check if already a reference
-            async with self.db.execute("""
-                SELECT is_reference FROM cluster_frame_assignments
-                WHERE cluster_id = ? AND frame_id = ?
-            """, [cluster_id, frame_id]) as cursor:
-                row = await cursor.fetchone()
-
-            if not row:
-                skipped += 1  # Frame not assigned to this cluster
-                continue
-
-            if row[0] == 1:
-                skipped += 1  # Already a reference
-                continue
-
-            # Add as reference
-            max_order += 1
-            await self.db.execute("""
-                UPDATE cluster_frame_assignments
-                SET is_reference = 1, reference_order = ?
-                WHERE cluster_id = ? AND frame_id = ?
-            """, [max_order, cluster_id, frame_id])
-            added += 1
-
-        await self.db.commit()
-        return {'added': added, 'skipped': skipped, 'total': current_count + added}
-
-    async def remove_frame_from_references(
-        self,
-        video_id: int,
-        cluster_index: int,
-        frame_id: int,
-        view_mode: str = 'person'
-    ) -> bool:
-        """
-        Remove a single frame from references.
-
-        V2 Architecture: Uses cluster_frame_assignments.
-        """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return False
-
-        cluster_id = cluster['id']
-
-        # Remove from references
-        await self.db.execute("""
-            UPDATE cluster_frame_assignments
-            SET is_reference = 0, reference_order = NULL
-            WHERE cluster_id = ? AND frame_id = ?
-        """, [cluster_id, frame_id])
-
-        # Reorder remaining references
-        await self._reorder_references_v2(cluster_id)
-
-        await self.db.commit()
-        return True
-
-    async def delete_cluster_frames(
-        self,
-        video_id: int,
-        cluster_index: int,
-        frame_ids: List[int],
-        view_mode: str = 'person',
-        delete_permanently: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Remove frames from a cluster.
-
-        V2 Architecture: Distinguishes between removing assignment vs deleting permanently.
-
-        Args:
-            frame_ids: List of video_frame IDs
-            view_mode: 'person' or 'person_scene'
-            delete_permanently: If False (default), only removes the assignment.
-                               If True, deletes from video_frames and disk.
-
-        Returns:
-            {'deleted': int, 'errors': [...], 'remaining_frames': int}
-        """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return {'success': False, 'error': t('api.errors.cluster_not_found')}
-
-        cluster_id = cluster['id']
-        video = await self.get_video(video_id)
-        output_dir = self._get_video_output_dir(video)
-
-        deleted = 0
-        errors = []
-
-        for frame_id in frame_ids:
-            if delete_permanently:
-                # Get frame info for file deletion
-                frame = await self._get_frame_by_id(frame_id)
-                if frame:
-                    # Delete from video_frames (cascades to all assignments)
-                    await self.db.execute("DELETE FROM video_frames WHERE id = ?", [frame_id])
-
-                    # Delete physical file
-                    try:
-                        frame_path = Path(frame['frame_path'])
-                        if frame_path.exists():
-                            frame_path.unlink()
-                    except Exception as e:
-                        errors.append(f"Failed to delete file {frame['frame_path']}: {e}")
-
-                    deleted += 1
-                else:
-                    errors.append(f"Frame {frame_id} not found")
-            else:
-                # Just remove from this cluster
-                await self.db.execute("""
-                    DELETE FROM cluster_frame_assignments
-                    WHERE cluster_id = ? AND frame_id = ?
-                """, [cluster_id, frame_id])
-                deleted += 1
-
-        # Get remaining count
-        async with self.db.execute("""
-            SELECT COUNT(*) FROM cluster_frame_assignments WHERE cluster_id = ?
-        """, [cluster_id]) as cursor:
-            new_count = (await cursor.fetchone())[0]
-
-        await self.db.commit()
-
-        return {
-            'success': True,
-            'deleted': deleted,
-            'errors': errors,
-            'remaining_frames': new_count
-        }
-
-    async def get_reference_frames_for_generation(
-        self,
-        cluster_id: int,
-        limit: int = 10
-    ) -> List[dict]:
-        """
-        Get reference frames for AI generation.
-        Used by GenerationService.
-
-        V2 Architecture: Uses cluster_frame_assignments JOIN video_frames.
-
-        Returns frames marked as references, ordered by reference_order.
-        If no references are marked, falls back to top by quality_score.
-        """
-        # Try to get explicitly marked references first
-        async with self.db.execute("""
-            SELECT vf.frame_path, vf.quality_score, vf.expression
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            WHERE cfa.cluster_id = ? AND cfa.is_reference = 1
-            ORDER BY cfa.reference_order ASC
-            LIMIT ?
-        """, [cluster_id, limit]) as cursor:
-            rows = await cursor.fetchall()
-            if rows:
-                columns = [desc[0] for desc in cursor.description]
-                return [dict(zip(columns, row)) for row in rows]
-
-        # Fallback: top by quality
-        async with self.db.execute("""
-            SELECT vf.frame_path, vf.quality_score, vf.expression
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            WHERE cfa.cluster_id = ?
-            ORDER BY vf.quality_score DESC
-            LIMIT ?
-        """, [cluster_id, limit]) as cursor:
-            rows = await cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
-
-    # =========================================================================
-    # ALL VIDEO FRAMES (for manual cluster creation)
-    # =========================================================================
-
-    async def get_all_video_frames(
-        self,
-        video_id: int,
-        include_assigned: bool = True,
-        view_mode: str = 'person'
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Get all frames from the video's frames/ directory.
-        Used for manual cluster creation.
-
-        V2 Architecture: Uses video_frames and cluster_frame_assignments.
-
-        Args:
-            video_id: Video ID
-            include_assigned: If True, include frames already in clusters
-            view_mode: 'person' or 'person_scene' for assignment lookup
-
-        Returns:
-            {
-                'frames': [{'filename': str, 'path': str, 'quality_score': float,
-                           'expression': str, 'cluster_id': int or None}, ...],
-                'total': int,
-                'assigned_count': int
-            }
-        """
-        video = await self.get_video(video_id)
-        if not video:
-            return None
-
-        output_dir = self._get_video_output_dir(video)
-        frames_dir = output_dir / "frames"
-
-        if not frames_dir.exists():
-            return {'frames': [], 'total': 0, 'assigned_count': 0}
-
-        # Get frames from video_frames table
-        async with self.db.execute("""
-            SELECT id, frame_path, quality_score, expression
-            FROM video_frames
-            WHERE video_id = ?
-        """, [video_id]) as cursor:
-            rows = await cursor.fetchall()
-            db_frames = {row[1]: {'id': row[0], 'quality_score': row[2] or 0, 'expression': row[3] or 'unknown'}
-                        for row in rows}
-
-        # Get assigned frames (frames already in any cluster for the given view_mode)
-        assigned_frames = {}
-        async with self.db.execute("""
-            SELECT vf.frame_path, c.id as cluster_id, c.cluster_index
-            FROM video_frames vf
-            JOIN cluster_frame_assignments cfa ON cfa.frame_id = vf.id
-            JOIN clusters c ON cfa.cluster_id = c.id
-            WHERE c.video_id = ? AND c.view_mode = ?
-        """, [video_id, view_mode]) as cursor:
-            rows = await cursor.fetchall()
-            for row in rows:
-                assigned_frames[row[0]] = {'cluster_id': row[1], 'cluster_index': row[2]}
-
-        # List all frames from disk
-        frames = []
-        for img_path in sorted(frames_dir.glob("*.jpg")):
-            full_path = str(img_path)
-
-            # Get frame data from DB or use defaults
-            frame_info = db_frames.get(full_path, {'quality_score': 0, 'expression': 'unknown'})
-
-            # Get assignment info
-            assignment = assigned_frames.get(full_path)
-
-            # Skip assigned frames if requested
-            if not include_assigned and assignment:
-                continue
-
-            frames.append({
-                'filename': img_path.name,
-                'path': full_path,
-                'quality_score': frame_info.get('quality_score', 0),
-                'expression': frame_info.get('expression', 'unknown'),
-                'cluster_id': assignment['cluster_id'] if assignment else None,
-                'cluster_index': assignment['cluster_index'] if assignment else None
-            })
-
-        # Sort by quality descending
-        frames.sort(key=lambda f: f['quality_score'], reverse=True)
-
-        return {
-            'frames': frames,
-            'total': len(frames),
-            'assigned_count': len([f for f in frames if f['cluster_id'] is not None])
-        }
-
-    async def create_manual_cluster(
-        self,
-        video_id: int,
-        frame_paths: List[str],
-        label: Optional[str] = None,
-        reference_frame_paths: Optional[List[str]] = None,
-        description: Optional[str] = None,
-        view_mode: str = 'person'
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Create a new cluster manually from selected frames.
-
-        V2 Architecture: Cluster is created in the specified view_mode.
-        Uses video_frames and cluster_frame_assignments tables.
-
-        Args:
-            video_id: Video ID
-            frame_paths: List of frame paths to include in cluster
-            label: Optional name for the cluster
-            reference_frame_paths: Optional list of frame paths to use as references
-            description: Optional notes/comments about the cluster
-            view_mode: 'person' or 'person_scene'
-
-        Returns:
-            Created cluster info or None if failed
-        """
-        if not frame_paths:
-            return {'success': False, 'error': t('api.errors.no_frames_provided')}
-
-        video = await self.get_video(video_id)
-        if not video:
-            return {'success': False, 'error': t('api.errors.video_not_found')}
-
-        output_dir = self._get_video_output_dir(video)
-        clusters_dir = output_dir / "clusters"
-        clusters_dir.mkdir(parents=True, exist_ok=True)
-
-        # Get next cluster index for this view_mode
-        async with self.db.execute("""
-            SELECT COALESCE(MAX(cluster_index), -1) + 1
-            FROM clusters
-            WHERE video_id = ? AND view_mode = ?
-        """, [video_id, view_mode]) as cursor:
-            next_index = (await cursor.fetchone())[0]
-
-        # Get frame IDs from paths, ensure frames exist in video_frames
-        frame_ids = []
-        for path in frame_paths:
-            # Security: validate path belongs to this video's directory
-            if not self._validate_frame_path(path, output_dir):
-                continue  # Skip invalid paths
-
-            frame_id = await self._get_frame_id_by_path(video_id, path)
-            if frame_id:
-                frame_ids.append(frame_id)
-            else:
-                # Frame doesn't exist in video_frames, insert it
-                scene_idx = extract_scene_index_from_path(path)
-                cursor = await self.db.execute("""
-                    INSERT INTO video_frames (video_id, frame_path, quality_score, expression, scene_index)
-                    VALUES (?, ?, 50, 'unknown', ?)
-                """, [video_id, path, scene_idx])
-                frame_ids.append(cursor.lastrowid)
-
-        if not frame_ids:
-            return {'success': False, 'error': t('api.errors.no_valid_frames')}
-
-        # Get frames with quality for sorting
-        frames_data = []
-        for fid in frame_ids:
-            frame = await self._get_frame_by_id(fid)
-            if frame:
-                frames_data.append(frame)
-
-        # Sort by quality
-        frames_data.sort(key=lambda f: f.get('quality_score') or 0, reverse=True)
-
-        # Determine representative frame (first one = highest quality)
-        representative_frame_id = frames_data[0]['id'] if frames_data else frame_ids[0]
-
-        # Truncate label and description
-        label_val = label.strip()[:128] if label and label.strip() else None
-        desc_val = description.strip()[:2000] if description and description.strip() else None
-
-        # Create cluster
-        num_frames = len(frame_ids)  # Use frame_ids count (always accurate, even if metadata fetch fails)
-        representative_frame_path = frames_data[0]['frame_path'] if frames_data else frame_paths[0]
-
-        cursor = await self.db.execute("""
-            INSERT INTO clusters
-                (video_id, cluster_index, label, description, view_mode, representative_frame_id, num_frames, representative_frame)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, [video_id, next_index, label_val, desc_val, view_mode, representative_frame_id, num_frames, representative_frame_path])
-
-        cluster_id = cursor.lastrowid
-
-        # Determine which frames are references
-        reference_ids = set()
-        if reference_frame_paths:
-            for path in reference_frame_paths[:MAX_REFERENCE_FRAMES]:
-                # Security: validate path belongs to this video's directory
-                if not self._validate_frame_path(path, output_dir):
-                    continue
-                fid = await self._get_frame_id_by_path(video_id, path)
-                if fid:
-                    reference_ids.add(fid)
-        else:
-            # Default: top N by quality
-            reference_ids = {f['id'] for f in frames_data[:MAX_REFERENCE_FRAMES]}
-
-        # Create assignments
-        ref_order = 1
-        for frame in frames_data:
-            fid = frame['id']
-            is_ref = fid in reference_ids
-            order = ref_order if is_ref else None
-            if is_ref:
-                ref_order += 1
-
-            await self._assign_frame_to_cluster(cluster_id, fid, is_ref, order)
-
-        await self.db.commit()
-
-        # Update JSON files
-        clusters = await self.get_clusters(video_id, view_mode)
-        await self._update_clusters_json(output_dir, clusters)
-        await self._update_clustering_result_json(output_dir, clusters)
-
-        return {
-            'success': True,
-            'cluster_id': cluster_id,
-            'cluster_index': next_index,
-            'num_frames': len(frame_ids),
-            'num_references': len(reference_ids),
-            'label': label
-        }
-
-    async def add_frames_to_cluster(
-        self,
-        video_id: int,
-        cluster_index: int,
-        frame_paths: List[str],
-        view_mode: str = 'person'
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Add frames to an existing cluster.
-
-        V2 Architecture: Creates assignments without copying files.
-
-        Args:
-            video_id: Video ID
-            cluster_index: Cluster index to add frames to
-            frame_paths: List of frame paths to add
-            view_mode: 'person' or 'person_scene'
-
-        Returns:
-            {'added': int, 'skipped': int, 'errors': [...]}
-        """
-        cluster = await self._get_cluster_by_index_v2(video_id, cluster_index, view_mode)
-        if not cluster:
-            return {'success': False, 'error': t('api.errors.cluster_not_found')}
-
-        video = await self.get_video(video_id)
-        output_dir = self._get_video_output_dir(video)
-        cluster_id = cluster['id']
-
-        added = 0
-        skipped = 0
-        errors = []
-
-        for fp in frame_paths:
-            # Security: validate path belongs to this video's directory
-            if not self._validate_frame_path(fp, output_dir):
-                errors.append({'path': fp, 'error': 'Invalid path'})
-                continue
-
-            # Get or create frame in video_frames
-            frame_id = await self._get_frame_id_by_path(video_id, fp)
-            if not frame_id:
-                # Insert into video_frames
-                scene_idx = extract_scene_index_from_path(fp)
-                cursor = await self.db.execute("""
-                    INSERT INTO video_frames (video_id, frame_path, quality_score, expression, scene_index)
-                    VALUES (?, ?, 50, 'unknown', ?)
-                """, [video_id, fp, scene_idx])
-                frame_id = cursor.lastrowid
-
-            # Try to create assignment
-            success = await self._assign_frame_to_cluster(cluster_id, frame_id)
-            if success:
-                added += 1
-            else:
-                skipped += 1  # Already in cluster
-
-        await self.db.commit()
-
-        # Get updated frame count
-        async with self.db.execute("""
-            SELECT COUNT(*) FROM cluster_frame_assignments WHERE cluster_id = ?
-        """, [cluster_id]) as cursor:
-            new_count = (await cursor.fetchone())[0]
-
-        # Update JSON files
-        clusters = await self.get_clusters(video_id, view_mode)
-        await self._update_clusters_json(output_dir, clusters)
-        await self._update_clustering_result_json(output_dir, clusters)
-
-        return {
-            'success': True,
-            'added': added,
-            'skipped': skipped,
-            'errors': errors,
-            'total_frames': new_count
-        }
 
     async def cleanup_partial_analysis(self, video_id: int) -> dict:
-        """
-        Clean up partial resources after analysis cancellation.
+        """Keep completed artifacts on cancellation.
 
-        This method removes incomplete files and database records that were
-        created during an interrupted analysis. It checks the video status
-        to determine which step was interrupted and cleans accordingly.
-
-        Cleanup strategy:
-        - If interrupted during 'clustering': remove clustering_result.json,
-          clusters/ folder, and cluster DB records
-        - If interrupted during 'transcribing': remove partial transcription files
-
-        NOTE: frames/, scenes.json, and faces.json are NOT deleted as they are
-        reusable source-of-truth data.
-
-        Args:
-            video_id: The video ID whose partial analysis should be cleaned
-
-        Returns:
-            dict with cleanup details: {
-                'cleaned_files': list of file paths that were deleted,
-                'cleaned_db_records': number of DB records deleted,
-                'status_was': the status the video was in when cancelled
-            }
+        A cancelled status does not identify who created a file or whether it
+        is incomplete. Stage writers own their temporary files and transactions;
+        cancellation must never erase prior transcripts, people, or references.
         """
         video = await self.get_video(video_id)
-        if not video:
-            return {"cleaned_files": [], "cleaned_db_records": 0, "status_was": None}
-
-        status = video.get("status", "")
-        video_path = Path(video["filepath"])
-        output = VideoOutput(video_path, Path(OUTPUT_DIR))
-
-        cleaned_files = []
-        cleaned_db = 0
-
-        logger.info(f"Cleaning up partial analysis for video {video_id} (status was: {status})")
-
-        # Clean clustering artifacts if interrupted during or after clustering
-        if status in ("clustering", "cancelled"):
-            # Remove clustering_result.json
-            clustering_file = output.output_dir / "clustering_result.json"
-            if clustering_file.exists():
-                try:
-                    clustering_file.unlink()
-                    cleaned_files.append(str(clustering_file))
-                    logger.debug(f"Deleted {clustering_file}")
-                except Exception as e:
-                    logger.warning(f"Could not delete {clustering_file}: {e}")
-
-            # Remove clusters/ directory
-            clusters_dir = output.output_dir / "clusters"
-            if clusters_dir.exists():
-                try:
-                    shutil.rmtree(clusters_dir, ignore_errors=True)
-                    cleaned_files.append(str(clusters_dir))
-                    logger.debug(f"Deleted {clusters_dir}")
-                except Exception as e:
-                    logger.warning(f"Could not delete {clusters_dir}: {e}")
-
-            # Clean DB records for clusters (cluster_frames CASCADE deletes automatically)
-            try:
-                cursor = await self.db.execute(
-                    "DELETE FROM clusters WHERE video_id = ?",
-                    [video_id]
-                )
-                cleaned_db += cursor.rowcount
-                await self.db.commit()
-                if cursor.rowcount > 0:
-                    logger.debug(f"Deleted {cursor.rowcount} cluster records from DB")
-            except Exception as e:
-                logger.warning(f"Could not delete cluster DB records: {e}")
-
-        # Clean transcription artifacts if interrupted during transcription
-        if status in ("transcribing", "cancelled"):
-            transcription_files = [
-                "transcription.txt",
-                "transcription.json",
-                "transcription_segments.json"
-            ]
-            for transcription_file in transcription_files:
-                filepath = output.output_dir / transcription_file
-                if filepath.exists():
-                    try:
-                        filepath.unlink()
-                        cleaned_files.append(str(filepath))
-                        logger.debug(f"Deleted {filepath}")
-                    except Exception as e:
-                        logger.warning(f"Could not delete {filepath}: {e}")
-
-        if cleaned_files or cleaned_db:
-            logger.info(
-                f"Cleanup complete for video {video_id}: "
-                f"{len(cleaned_files)} files, {cleaned_db} DB records"
-            )
-
-        return {
-            "cleaned_files": cleaned_files,
-            "cleaned_db_records": cleaned_db,
-            "status_was": status
-        }
+        return {"cleaned_files": [], "cleaned_db_records": 0,
+                "status_was": video.get("status") if video else None}

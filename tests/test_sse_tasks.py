@@ -70,7 +70,7 @@ async def sse_client(mock_task_service):
     with patch('api.routes.events.get_db', mock_get_db):
         with patch('api.routes.events.TaskService', return_value=mock_task_service):
             transport = ASGITransport(app=bounded_stream)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with AsyncClient(transport=transport, base_url="http://localhost") as client:
                 yield client, mock_task_service
 
 

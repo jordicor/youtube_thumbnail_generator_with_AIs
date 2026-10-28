@@ -1,0 +1,186 @@
+{% from 'components/macros.html' import icon %}
+
+{# A text AI reached through Gran Sabio; static/js/settings.js fills its models #}
+{% macro text_engine(engine) -%}
+<div class="settings-fields" data-engine="{{ engine }}">
+    <label class="field">
+        <span class="field-label">{{ t('ai_config.provider') }}</span>
+        <select class="select" data-field="provider">
+            {% for provider in ['anthropic', 'openai', 'google', 'xai', 'openrouter', 'ollama', 'llamacpp', 'openai_compatible'] %}
+            <option value="{{ provider }}">{{ t('ai_providers.' ~ provider) }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label class="field">
+        <span class="field-label">{{ t('ai_config.model') }}</span>
+        <select class="select" data-field="model"></select>
+    </label>
+    <p class="form-hint hidden" data-field="provider_info">{{ t('settings.local_text_info') }}</p>
+    <div class="settings-thinking">
+        <label class="toggle-row">
+            <input type="checkbox" data-field="thinking_enabled">
+            <span class="toggle-label">{{ t('ai_config.thinking_mode') }}</span>
+        </label>
+        <label class="settings-thinking-level">
+            <span class="visually-hidden">{{ t('ai_config.thinking_level') }}</span>
+            <select class="select select-sm" data-field="thinking_level">
+                {% for level in ['low', 'medium', 'high'] %}
+                <option value="{{ level }}">{{ t('ai_config.thinking_level') }}: {{ t('ai_config.thinking_' ~ level) }}</option>
+                {% endfor %}
+            </select>
+        </label>
+    </div>
+</div>
+{%- endmacro %}
+
+<!-- Settings: the AI engines and what the Generate form of every video starts with -->
+<div class="modal-overlay" id="settingsDialog">
+    <div class="modal-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="settings-head">
+            <span class="settings-head-icon">{{ icon('settings') }}</span>
+            <div>
+                <h3 class="modal-title" id="settingsTitle">{{ t('settings.title') }}</h3>
+                <p class="settings-intro">{{ t('settings.intro') }}</p>
+            </div>
+            <button type="button" class="icon-btn" data-settings-cancel title="{{ t('common.close') }}" aria-label="{{ t('common.close') }}">{{ icon('x') }}</button>
+        </div>
+
+        <div class="settings-body">
+            <section class="settings-section" data-settings-section="thumbnails">
+                <h4 class="settings-section-title">{{ icon('image') }}<span>{{ t('settings.thumbnails_title') }}</span></h4>
+
+                <div class="settings-group">
+                    <h5>{{ t('settings.ideas_title') }}</h5>
+                    <p class="form-hint">{{ t('settings.ideas_info') }}</p>
+                    {{ text_engine('thumbnail_ideas') }}
+                </div>
+
+                <div class="settings-group">
+                    <h5>{{ t('settings.drawing_title') }}</h5>
+                    <p class="form-hint">{{ t('settings.drawing_info') }}</p>
+                    <div class="settings-fields">
+                        <label class="field">
+                            <span class="field-label">{{ t('ai_config.provider') }}</span>
+                            <select class="select" id="settingsImageProvider">
+                                {% for provider in ['gemini', 'openai', 'poe', 'replicate', 'comfyui'] %}
+                                <option value="{{ provider }}">{{ t('ai_providers.' ~ provider) }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span class="field-label" id="settingsImageModelLabel">{{ t('ai_config.model') }}</span>
+                            <select class="select" id="settingsImageModel"></select>
+                        </label>
+                    </div>
+                    <p class="form-hint" id="settingsRefsInfo"></p>
+                    <div id="settingsComfyUI" class="hidden">
+                        <p class="form-hint">{{ t('comfyui.info') }}</p>
+                        <div class="settings-fields">
+                            <label class="field">
+                                <span class="field-label">{{ t('comfyui.url') }}</span>
+                                <input class="input" id="settingsComfyURL" type="url" placeholder="http://127.0.0.1:8188">
+                            </label>
+                            <label class="field">
+                                <span class="field-label">{{ t('comfyui.timeout') }}</span>
+                                <input class="input" id="settingsComfyTimeout" type="number" min="5" max="21600">
+                            </label>
+                        </div>
+                        <div id="settingsComfyParameters" class="settings-fields"></div>
+                        <button type="button" class="btn btn-secondary" id="settingsComfyCheck">{{ t('comfyui.check') }}</button>
+                        <button type="button" class="btn btn-secondary" id="settingsComfyImport">{{ t('comfyui.import') }}</button>
+                        <input type="file" id="settingsComfyFile" accept=".json,application/json" hidden>
+                        <p class="form-hint" id="settingsComfyStatus" role="status" aria-live="polite"></p>
+                    </div>
+                </div>
+
+                <div class="settings-group">
+                    <h5>{{ t('settings.defaults_title') }}</h5>
+                    <p class="form-hint">{{ t('settings.defaults_info') }}</p>
+                    <div class="settings-defaults">
+                        <div class="settings-defaults-column">
+                            <div class="field">
+                                <span class="field-label" id="settingsNumImagesLabel">{{ t('generate_form.step_count') }}</span>
+                                <div class="stepper">
+                                    <button type="button" data-step="-1" aria-label="{{ t('generate_form.fewer') }}">−</button>
+                                    <input type="number" class="stepper-input" id="settingsNumImages" min="1" max="50" aria-labelledby="settingsNumImagesLabel">
+                                    <button type="button" data-step="1" aria-label="{{ t('generate_form.more') }}">+</button>
+                                </div>
+                            </div>
+                            <span class="settings-defaults-where">{{ t('settings.in_look') }}</span>
+                            <label class="field">
+                                <span class="field-label">{{ t('generate_form.expression_short') }}</span>
+                                <select class="select" id="settingsExpression">
+                                    <option value="">{{ t('generate_form.expression_auto') }}</option>
+                                    <option value="smiling">{{ t('generate_form.expression_smiling') }}</option>
+                                    <option value="mouth_closed">{{ t('generate_form.expression_mouth_closed') }}</option>
+                                    <option value="neutral">{{ t('generate_form.expression_neutral') }}</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="settings-defaults-column">
+                            <span class="settings-defaults-where">{{ t('settings.in_advanced') }}</span>
+                            <label class="toggle-row" id="settingsFaceSwapRow">
+                                <input type="checkbox" id="settingsFaceSwap">
+                                <span>
+                                    <span class="toggle-label">{{ t('generate_form.face_swap_label') }}</span>
+                                    <span class="form-hint">{{ t('generate_form.face_swap_hint') }}</span>
+                                    <span class="form-hint unavailable-reason hidden" id="settingsFaceSwapMissing">{{ icon('alert', 'icon-sm') }}<span></span></span>
+                                </span>
+                            </label>
+                            <label class="toggle-row hidden" id="settingsFaceRestorationRow">
+                                <input type="checkbox" id="settingsFaceRestoration">
+                                <span>
+                                    <span class="toggle-label">{{ t('generate_form.face_restoration_label') }}</span>
+                                    <span class="form-hint">{{ t('generate_form.face_restoration_hint') }}</span>
+                                    <span class="form-hint unavailable-reason hidden" id="settingsFaceRestorationMissing"><span></span></span>
+                                </span>
+                            </label>
+                            <label class="toggle-row">
+                                <input type="checkbox" id="settingsAvoidRepeat">
+                                <span class="toggle-label">{{ t('generate_form.avoid_repeat') }}</span>
+                            </label>
+                            <div class="field">
+                                <span class="field-label" id="settingsFacePhotosLabel">{{ t('generate_form.face_photos_label') }}</span>
+                                <div class="step-inline">
+                                    <div class="stepper">
+                                        <button type="button" data-step="-1" aria-label="{{ t('generate_form.fewer') }}">−</button>
+                                        <input type="number" class="stepper-input" id="settingsFacePhotos" min="1" aria-labelledby="settingsFacePhotosLabel">
+                                        <button type="button" data-step="1" aria-label="{{ t('generate_form.more') }}">+</button>
+                                    </div>
+                                    <span class="form-hint" id="settingsFacePhotosHint"></span>
+                                </div>
+                            </div>
+                            <label class="toggle-row">
+                                <input type="checkbox" id="settingsFallback">
+                                <span class="toggle-label">{{ t('generate_form.fallback_label') }}</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="settings-section" data-settings-section="texts">
+                <h4 class="settings-section-title">{{ icon('text') }}<span>{{ t('settings.texts_title') }}</span></h4>
+                <div class="settings-group">
+                    <h5>{{ t('settings.writer_title') }}</h5>
+                    <p class="form-hint">{{ t('settings.writer_info') }}</p>
+                    {{ text_engine('texts') }}
+                </div>
+            </section>
+
+            <section class="settings-section" data-settings-section="gpu">
+                <h4 class="settings-section-title">{{ icon('settings') }}<span>{{ t('gpu.title') }}</span></h4>
+                <p class="form-hint">{{ t('gpu.info') }}</p>
+                <button type="button" class="btn btn-secondary" id="settingsGPURefresh">{{ t('gpu.refresh') }}</button>
+                <p class="form-hint" id="settingsGPUStatus" role="status" aria-live="polite"></p>
+                <div id="settingsGPUResources"></div>
+            </section>
+        </div>
+
+        <div class="settings-foot">
+            <p class="settings-error hidden" id="settingsError" role="alert"></p>
+            <button type="button" class="btn btn-secondary" data-settings-cancel>{{ t('common.cancel') }}</button>
+            <button type="button" class="btn btn-primary" id="settingsSave" disabled>{{ t('common.save') }}</button>
+        </div>
+    </div>
+</div>

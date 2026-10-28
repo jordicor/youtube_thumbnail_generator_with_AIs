@@ -1,0 +1,5 @@
+{# Shared template macros. Import with: {% from 'components/macros.html' import icon %} #}
+
+{% macro icon(name, class_name='') -%}
+<svg class="icon{% if class_name %} {{ class_name }}{% endif %}" aria-hidden="true"><use href="#i-{{ name }}"></use></svg>
+{%- endmacro %}

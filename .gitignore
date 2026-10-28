@@ -18,6 +18,9 @@ frames/
 clusters/
 thumbnails/
 transcriptions/
+models/
+gfpgan/
+database/backups/
 *.db
 *.db-shm
 *.db-wal
@@ -38,7 +41,10 @@ AUDIT_REPORT.md
 TECHNICAL_REVIEW.md
 TASK_QUEUE_*.md
 tools/sync_github/
-scripts/
+scripts/*
+!scripts/download_portrait_model.py
+!scripts/download_body_model.py
+!scripts/download_face_swap_models.py
 docs/
 *.bat
 *.cmd

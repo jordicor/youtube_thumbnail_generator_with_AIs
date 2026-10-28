@@ -16,7 +16,7 @@ from typing import Any
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from arq import cron
+from arq import func
 from arq.connections import RedisSettings
 
 from job_queue.settings import get_arq_redis_settings, WorkerSettings as WS
@@ -84,7 +84,7 @@ class WorkerSettings:
     # Task functions to register
     functions = [
         analyze_video,
-        run_generation,
+        func(run_generation, timeout=WS.JOB_TIMEOUT_GENERATION),
     ]
 
     # Redis connection settings

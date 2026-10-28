@@ -69,63 +69,250 @@ function formatDate(dateString) {
     });
 }
 
+// How each video status is presented: label key, colour tone and what the video
+// is ready for ('pending': needs analysis, 'processing': being analyzed,
+// 'ready': analyzed, can generate thumbnails)
+const VIDEO_STATUS_VIEW = {
+    pending:          { label: 'video_status.pending',    tone: 'neutral', kind: 'pending' },
+    cancelled:        { label: 'video_status.cancelled',  tone: 'neutral', kind: 'pending' },
+    error:            { label: 'video_status.error',      tone: 'danger',  kind: 'pending' },
+    analyzing:        { label: 'video_status.analyzing',  tone: 'info',    kind: 'processing' },
+    analyzing_scenes: { label: 'video_status.analyzing',  tone: 'info',    kind: 'processing' },
+    analyzing_faces:  { label: 'video_status.analyzing',  tone: 'info',    kind: 'processing' },
+    clustering:       { label: 'video_status.analyzing',  tone: 'info',    kind: 'processing' },
+    transcribing:     { label: 'video_status.analyzing',  tone: 'info',    kind: 'processing' },
+    analyzed:         { label: 'video_status.analyzed',   tone: 'success', kind: 'ready' },
+    generating:       { label: 'video_status.generating', tone: 'info',    kind: 'ready' },
+    completed:        { label: 'video_status.completed',  tone: 'primary', kind: 'ready' }
+};
+
 /**
- * Get localized status label
+ * Get how a video status is presented.
+ * @param {string} status - Video status
+ * @returns {{label: string, tone: string, kind: string}} Presentation
  */
-function getStatusLabel(status) {
-    // Valid statuses that have translations
-    const validStatuses = ['pending', 'analyzing', 'analyzed', 'generating', 'completed', 'cancelled', 'error'];
-    if (validStatuses.includes(status)) {
-        return t(`status.${status}`);
+function getVideoStatusView(status) {
+    const view = VIDEO_STATUS_VIEW[status];
+    if (!view) {
+        throw new Error(`Unknown video status: ${status}`);
     }
-    return status;
+    return view;
 }
 
-// M35: Track active toasts for vertical stacking
-let _activeToasts = [];
+// Extensions of the video files the library scans (config.py VIDEO_EXTENSIONS)
+const VIDEO_EXTENSION_PATTERN = /\.(?:mp4|mkv|avi|mov|webm|m4v|wmv|flv|mpg|mpeg)$/i;
 
 /**
- * Show a toast notification
+ * Format a video filename for display: without its extension and with the
+ * percent-escapes left in downloaded names decoded (e.g. "%28" -> "(").
+ * A lone "%", or escapes that are not valid UTF-8 (e.g. "50%CA"), are kept as is.
  */
-function showToast(message, type = 'info') {
-    // Create toast element
+function formatVideoName(filename) {
+    return filename
+        .replace(VIDEO_EXTENSION_PATTERN, '')
+        .replace(/(?:%[0-9A-Fa-f]{2})+/g, (escapes) => {
+            try {
+                return decodeURIComponent(escapes);
+            } catch {
+                return escapes;
+            }
+        });
+}
+
+/**
+ * Get the display name of a cluster as plain text (not HTML-escaped).
+ * person_scene clusters are named after the person cluster that holds them.
+ */
+function getClusterDisplayName(cluster) {
+    if (cluster.label) {
+        return cluster.label;
+    }
+
+    if (cluster.view_mode === 'person_scene' && cluster.parent_cluster_index !== null) {
+        const person = cluster.parent_label
+            || t('clusters.person_label', {index: cluster.parent_cluster_index + 1});
+        if (cluster.scene_index === null) {
+            return t('video_detail.clusters.person_no_scene', {person});
+        }
+        return t('video_detail.clusters.person_scene', {person, scene: cluster.scene_index});
+    }
+
+    return t('clusters.person_label', {index: cluster.cluster_index + 1});
+}
+
+/**
+ * URL of the face crop of a person (cluster). It changes with the person's
+ * representative frame, so browsers can cache it.
+ * @param {number} videoId - Video ID
+ * @param {Object} cluster - Cluster from the clusters API
+ * @returns {string} Image URL
+ */
+function personFaceUrl(videoId, cluster) {
+    return `/api/people/${videoId}/${cluster.id}/face?v=${cluster.representative_frame_id}`;
+}
+
+/**
+ * Get the markup of an icon from the SVG sprite (templates/components/icons.html).
+ * @param {string} name - Icon name without the "i-" prefix
+ * @param {string} [className] - Extra classes (e.g. 'icon-sm')
+ * @returns {string} SVG markup
+ */
+function icon(name, className = '') {
+    return `<svg class="icon${className ? ' ' + className : ''}" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+}
+
+/**
+ * Show a toast notification.
+ * @param {string} message - Text to show
+ * @param {string} [type='info'] - 'info', 'success', 'warning' or 'error'
+ * @param {{label: string, onClick: Function}} [action] - Optional button, e.g. "Undo"
+ */
+function showToast(message, type = 'info', action = null) {
+    let stack = document.getElementById('toastStack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'toastStack';
+        stack.className = 'toast-stack';
+        document.body.appendChild(stack);
+    }
+
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    toast.textContent = message;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
 
-    // M35: Calculate vertical offset based on active toasts
-    const bottomOffset = 20 + (_activeToasts.length * 60);
+    const text = document.createElement('span');
+    text.textContent = message;
+    toast.appendChild(text);
 
-    // Add styles
-    toast.style.cssText = `
-        position: fixed;
-        bottom: ${bottomOffset}px;
-        right: 20px;
-        padding: 15px 25px;
-        background-color: ${type === 'error' ? '#ff4444' : type === 'success' ? '#44ff44' : '#333'};
-        color: ${type === 'success' ? '#000' : '#fff'};
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        z-index: 10000;
-        animation: slideIn 0.3s ease;
-    `;
+    let dismissed = false;
+    const dismiss = () => {
+        if (dismissed) return;
+        dismissed = true;
+        toast.classList.add('leaving');
+        setTimeout(() => toast.remove(), 200);
+    };
 
-    document.body.appendChild(toast);
-    _activeToasts.push(toast);
+    if (action) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'toast-action';
+        button.textContent = action.label;
+        button.addEventListener('click', () => {
+            dismiss();
+            action.onClick();
+        });
+        toast.appendChild(button);
+    }
 
-    // Remove after 3 seconds
-    setTimeout(() => {
-        toast.style.animation = 'slideOut 0.3s ease';
-        setTimeout(() => {
-            const idx = _activeToasts.indexOf(toast);
-            if (idx !== -1) _activeToasts.splice(idx, 1);
-            toast.remove();
-            // Reposition remaining toasts
-            _activeToasts.forEach((t, i) => {
-                t.style.bottom = `${20 + (i * 60)}px`;
-            });
-        }, 300);
-    }, 3000);
+    stack.appendChild(toast);
+    // Toasts with an action stay longer so there is time to use it
+    setTimeout(dismiss, action ? 6000 : 3500);
+}
+
+// Currently open popover menu: {anchor, cleanup}
+let _openMenu = null;
+
+/**
+ * Open a popover menu below an anchor element. Calling it again with the same
+ * anchor closes the menu (toggle).
+ * @param {HTMLElement} anchor - Element that opens the menu (usually a "more" button)
+ * @param {Array<{label: string, icon?: string, danger?: boolean, onSelect: Function}>} items
+ */
+function showMenu(anchor, items) {
+    const wasOpenHere = _openMenu?.anchor === anchor;
+    closeMenu();
+    if (wasOpenHere) return;
+
+    const menu = document.createElement('div');
+    menu.className = 'menu-popover';
+    menu.setAttribute('role', 'menu');
+
+    for (const item of items) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `menu-item${item.danger ? ' danger' : ''}`;
+        button.setAttribute('role', 'menuitem');
+        button.innerHTML = `${item.icon ? icon(item.icon) : ''}<span></span>`;
+        button.querySelector('span').textContent = item.label;
+        button.addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeMenu();
+            item.onSelect();
+        });
+        menu.appendChild(button);
+    }
+
+    document.body.appendChild(menu);
+
+    // Right-aligned below the anchor, or above it when there is no room
+    const anchorRect = anchor.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const below = anchorRect.bottom + 6;
+    const top = below + menuRect.height > window.innerHeight ? anchorRect.top - 6 - menuRect.height : below;
+    menu.style.top = `${Math.max(8, top)}px`;
+    menu.style.left = `${Math.max(8, anchorRect.right - menuRect.width)}px`;
+
+    const onPointer = (e) => {
+        if (!menu.contains(e.target) && !anchor.contains(e.target)) closeMenu();
+    };
+    const onKey = (e) => {
+        if (e.key === 'Escape') {
+            closeMenu();
+            anchor.focus();
+        }
+    };
+    document.addEventListener('click', onPointer, true);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('resize', closeMenu);
+    anchor.setAttribute('aria-expanded', 'true');
+
+    _openMenu = {
+        anchor,
+        cleanup: () => {
+            document.removeEventListener('click', onPointer, true);
+            document.removeEventListener('keydown', onKey);
+            window.removeEventListener('scroll', closeMenu, true);
+            window.removeEventListener('resize', closeMenu);
+            anchor.setAttribute('aria-expanded', 'false');
+            menu.remove();
+        }
+    };
+
+    menu.querySelector('.menu-item')?.focus();
+}
+
+/**
+ * Close the open popover menu, if any.
+ */
+function closeMenu() {
+    if (!_openMenu) return;
+    const { cleanup } = _openMenu;
+    _openMenu = null;
+    cleanup();
+}
+
+/**
+ * Show a video's display name in the page breadcrumbs ([data-breadcrumb-video]).
+ * @param {string} filename - Video filename
+ */
+function setVideoBreadcrumb(filename) {
+    const name = formatVideoName(filename);
+    document.querySelectorAll('[data-breadcrumb-video]').forEach(el => {
+        el.textContent = name;
+        el.title = name;
+    });
+}
+
+/**
+ * Load a video and show its name in the page breadcrumbs.
+ * @param {number} videoId - Video ID
+ */
+async function loadVideoBreadcrumb(videoId) {
+    const response = await fetch(`/api/videos/${videoId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const video = await response.json();
+    setVideoBreadcrumb(video.filename);
 }
 
 // Close the active modal through the same cleanup path as user cancellation.
@@ -244,7 +431,8 @@ function showModal(options) {
             if (e.key === 'Escape') {
                 e.preventDefault();
                 cleanup(false);
-            } else if (e.key === 'Enter') {
+            } else if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+                // In a textarea Enter starts a new line
                 e.preventDefault();
                 cleanup(true);
             }
@@ -257,15 +445,6 @@ function showModal(options) {
         document.addEventListener('keydown', handleKeydown);
         confirmBtn.focus();
     });
-}
-
-/**
- * Confirm dialog (legacy wrapper using modal)
- */
-function confirmAction(message) {
-    // For synchronous code compatibility, we still use native confirm
-    // Use showModal() for async/await code
-    return confirm(message);
 }
 
 /**
@@ -426,42 +605,33 @@ function isSSESupported() {
     return typeof EventSource !== 'undefined';
 }
 
-// Add animation keyframes
-const style = document.createElement('style');
-style.textContent = `
-    @keyframes slideIn {
-        from {
-            transform: translateX(100%);
-            opacity: 0;
-        }
-        to {
-            transform: translateX(0);
-            opacity: 1;
-        }
-    }
-
-    @keyframes slideOut {
-        from {
-            transform: translateX(0);
-            opacity: 1;
-        }
-        to {
-            transform: translateX(100%);
-            opacity: 0;
-        }
-    }
-`;
-document.head.appendChild(style);
+// Steppers: the − and + buttons around a number input, kept within its min and max
+document.addEventListener('click', (e) => {
+    const button = e.target.closest('.stepper button[data-step]');
+    if (!button) return;
+    const input = button.closest('.stepper').querySelector('input');
+    const value = (parseInt(input.value, 10) || 0) + parseInt(button.dataset.step, 10);
+    input.value = Math.min(Math.max(value, parseInt(input.min, 10)), parseInt(input.max, 10));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+});
 
 // Export for use in other scripts
 window.ThumbnailApp = {
     apiRequest,
     formatDuration,
     formatDate,
-    getStatusLabel,
+    formatVideoName,
+    getClusterDisplayName,
+    personFaceUrl,
+    getVideoStatusView,
+    icon,
     showToast,
     showModal,
-    confirmAction,
+    showMenu,
+    closeMenu,
+    setVideoBreadcrumb,
+    loadVideoBreadcrumb,
     debounce,
     pollStatus,
     createSSEConnection,

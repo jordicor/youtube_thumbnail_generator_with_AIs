@@ -24,7 +24,7 @@ from config import (
     FRAME_SCALING_BY_VIDEO_DURATION,
     FRAME_SCALING_BY_SCENE_DURATION,
 )
-from utils import setup_logger, VideoOutput
+from utils import setup_logger, VideoOutput, write_image
 
 logger = setup_logger(__name__)
 
@@ -312,6 +312,9 @@ def extract_scene_frames(video_path: Path, result: SceneDetectionResult, output:
 
     Returns:
         List of paths to extracted frames
+
+    Raises:
+        RuntimeError: If the video cannot be opened or none of its frames can be read
     """
 
     logger.info(f"Extracting {result.total_frames_to_extract} frames from {result.total_scenes} scenes...")
@@ -321,8 +324,7 @@ def extract_scene_frames(video_path: Path, result: SceneDetectionResult, output:
     cap = cv2.VideoCapture(str(video_path))
     try:
         if not cap.isOpened():
-            logger.error("Could not open video file")
-            return []
+            raise RuntimeError(f"Could not open video file: {video_path}")
 
         # Collect all frame indices to extract
         all_frames = []
@@ -343,19 +345,18 @@ def extract_scene_frames(video_path: Path, result: SceneDetectionResult, output:
                 frame_filename = f"scene_{scene_idx:03d}_frame_{frame_idx:06d}.jpg"
                 frame_path = output.frames_dir / frame_filename
 
-                cv2.imwrite(str(frame_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                write_image(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 extracted_frames.append(frame_path)
             else:
                 logger.warning(f"Could not read frame {frame_idx}")
-
-        logger.success(f"Extracted {len(extracted_frames)} frames")
-        return extracted_frames
-
-    except Exception as e:
-        logger.error(f"Frame extraction failed: {e}")
-        return []
     finally:
         cap.release()
+
+    if not extracted_frames:
+        raise RuntimeError(f"None of the frames to extract could be read from {video_path}")
+
+    logger.success(f"Extracted {len(extracted_frames)} frames")
+    return extracted_frames
 
 
 # =============================================================================
@@ -380,7 +381,10 @@ def process_video_scenes(video_path: Path, output: VideoOutput) -> tuple[Optiona
     if not result:
         return None, []
 
-    # Extract frames
+    expected = [output.frames_dir / f"scene_{scene.index:03d}_frame_{number:06d}.jpg"
+                for scene in result.scenes for number in scene.frame_indices]
+    if expected and all(path.is_file() and path.stat().st_size for path in expected):
+        return result, expected
     frames = extract_scene_frames(video_path, result, output)
 
     return result, frames

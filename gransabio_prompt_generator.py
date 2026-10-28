@@ -12,17 +12,29 @@ import time
 import base64
 import logging
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Literal
 from dataclasses import dataclass
+
+from ai_json_cleanroom import validate_ai_json
 
 from config import (
     GRANSABIO_LLM_URL,
     GRANSABIO_CLIENT_PATH,
+    GRANSABIO_LOCAL_ENDPOINT_IDS,
     GRANSABIO_USERNAME,
     GRANSABIO_IMAGE_DETAIL,
 )
 
 logger = logging.getLogger(__name__)
+
+TextProvider = Literal["anthropic", "openai", "google", "xai", "openrouter", "ollama", "llamacpp", "openai_compatible"]
+LOCAL_TEXT_PROVIDERS = frozenset({"ollama", "llamacpp", "openai_compatible"})
+CATALOG_TEXT_PROVIDERS = LOCAL_TEXT_PROVIDERS | {"openrouter"}
+TEXT_PROVIDER_NAMES = {
+    "anthropic": "Anthropic", "openai": "OpenAI", "google": "Google (Gemini)", "xai": "xAI (Grok)", "openrouter": "OpenRouter",
+    "ollama": "Ollama (local)", "llamacpp": "llama.cpp (local)",
+    "openai_compatible": "OpenAI-compatible (local)",
+}
 
 # Add Gran Sabio LLM client to path if configured
 # The client is a standalone HTTP client that only requires 'requests' and 'aiohttp'
@@ -30,7 +42,9 @@ logger = logging.getLogger(__name__)
 if GRANSABIO_CLIENT_PATH:
     client_path = Path(GRANSABIO_CLIENT_PATH)
     if client_path.exists():
-        sys.path.insert(0, str(client_path.parent))  # Add parent so 'from client import' works
+        # Add parent so 'from client import' works. Appended: that folder holds other
+        # packages (e.g. its own "services") that must not shadow this project's.
+        sys.path.append(str(client_path.parent))
     else:
         logger.warning(f"Gran Sabio client path not found: {GRANSABIO_CLIENT_PATH}")
 
@@ -41,13 +55,17 @@ if GRANSABIO_CLIENT_PATH:
 @dataclass
 class PromptGenerationConfig:
     """Configuration for prompt generation via Gran Sabio LLM."""
-    provider: str = "anthropic"  # anthropic, openai, google, xai
+    provider: TextProvider = "anthropic"
     model: Optional[str] = None  # None = use default for provider
     thinking_enabled: bool = False
-    thinking_level: str = "high"  # low, medium, high (Gran Sabio handles token conversion)
+    thinking_level: str = "high"  # low, medium, high (sent as reasoning_effort)
     custom_instructions: Optional[str] = None
     include_history: bool = False
     history_prompts: Optional[List[str]] = None
+    # Expression every person must show (a FACIAL_EXPRESSIONS key); None lets each concept choose
+    facial_expression: Optional[str] = None
+    # Reuse the catalog entry checked before transcription for the whole batch.
+    model_info: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +75,7 @@ class PromptGenerationConfig:
             "thinking_level": self.thinking_level,
             "custom_instructions": self.custom_instructions,
             "include_history": self.include_history,
+            "facial_expression": self.facial_expression,
         }
 
 
@@ -71,48 +90,169 @@ DEFAULT_MODELS = {
 # Maximum history characters to include
 MAX_HISTORY_CHARS = 32000
 
+# Output tokens asked for the app's JSON answers. The largest (a thumbnail
+# skeleton, a concept, a set of titles) is about 3,000 characters, ~1,000
+# tokens; reasoning models spend their default reasoning from the same budget,
+# so it leaves room for that too. Without max_tokens Gran Sabio reserves 95% of
+# the model's max output, and a model with a small window (grok-4.7 is inferred
+# at 131,072) is left too little for the prompt and its photos.
+ANSWER_MAX_TOKENS = 16000
+# Extra output tokens when thinking is asked for, per level: OpenAI, xAI and
+# effort-based Claude and Gemini models reason inside max_tokens. Gran Sabio
+# adds the thinking budget on top by itself for budget-based Claude and Gemini.
+THINKING_EXTRA_TOKENS = {"low": 4000, "medium": 8000, "high": 16000}
+
+
+def answer_budget(thinking_enabled: bool, thinking_level: str) -> dict:
+    """Gran Sabio arguments for the size and thinking of a JSON answer.
+
+    Thinking is asked as reasoning_effort, which Gran Sabio turns into each
+    provider's own setting (a thinking budget, a level or an effort). Generator
+    tools are off: these answers need none, and some models reject tools
+    together with reasoning (gpt-6.1-terra over chat completions).
+    """
+    budget = {"max_tokens": ANSWER_MAX_TOKENS, "generation_tools_mode": "never"}
+    if thinking_enabled:
+        budget["max_tokens"] += THINKING_EXTRA_TOKENS[thinking_level]
+        budget["reasoning_effort"] = thinking_level
+    return budget
+
 
 # =============================================================================
 # GRANSABIO CLIENT
 # =============================================================================
 
+class GranSabioError(RuntimeError):
+    """Gran Sabio LLM gave no usable answer; the message says why."""
+
+
+def resolve_text_model(provider: str, model: Optional[str]) -> str:
+    """Resolve direct-provider defaults; local and OpenRouter models are explicit."""
+    if provider not in TEXT_PROVIDER_NAMES:
+        raise ValueError(f"Unknown text provider: {provider}")
+    if model and model.strip():
+        return model.strip()
+    if provider in LOCAL_TEXT_PROVIDERS:
+        raise ValueError("Choose an explicit local text model from Gran Sabio's catalog")
+    if provider == "openrouter":
+        raise ValueError("Choose an explicit OpenRouter model from Gran Sabio's catalog")
+    return DEFAULT_MODELS[provider]
+
+
+def _catalog_model(catalog: dict, provider: str, model: Optional[str], *, vision: bool = False) -> dict:
+    key = resolve_text_model(provider, model)
+    entry = next((item for item in catalog.get(provider, [])
+                  if item.get("key", item.get("model_id")) == key), None)
+    if entry is None:
+        raise GranSabioError(f"Model {provider}/{key} is not in Gran Sabio's catalog")
+    capabilities = entry.get("capabilities") or []
+    if provider in CATALOG_TEXT_PROVIDERS and "text" not in capabilities:
+        raise GranSabioError(f"Model {provider}/{key} does not support text generation")
+    if vision and "vision" not in capabilities:
+        from i18n import t
+        raise GranSabioError(t('api.errors.ideas_model_no_vision', model=entry.get("name") or key))
+    return entry
+
+
+async def require_text_model(provider: str, model: Optional[str]) -> Optional[dict]:
+    """Validate explicit catalog selection before transcription and reuse its metadata."""
+    if provider in CATALOG_TEXT_PROVIDERS:
+        return _catalog_model(await _model_catalog(), provider, model)
+    return None
+
+
+def text_generation_options(provider: str, model: Optional[str], thinking_enabled: bool,
+                            thinking_level: str, model_info: Optional[dict] = None,
+                            *, vision: bool = False) -> dict:
+    """Keep explicit catalog selections for generation, JSON repair, and preflight."""
+    selected = resolve_text_model(provider, model)
+    options = {"generator_model": selected, **answer_budget(thinking_enabled, thinking_level)}
+    if provider not in CATALOG_TEXT_PROVIDERS:
+        return options
+
+    if model_info is None:
+        try:
+            catalog = get_gransabio_client().get_models()
+        except Exception as error:
+            raise GranSabioError(f"Could not load Gran Sabio's model catalog: {error}") from error
+    else:
+        catalog = {provider: [model_info]}
+    entry = _catalog_model(catalog, provider, selected, vision=vision)
+    output_tokens = entry.get("output_tokens")
+    if not isinstance(output_tokens, int) or isinstance(output_tokens, bool) or output_tokens <= 0:
+        raise GranSabioError(f"Model {provider}/{selected} has no valid output token limit")
+    reasoning = "reasoning" in (entry.get("capabilities") or [])
+    if thinking_enabled and not reasoning:
+        raise GranSabioError(f"Model {provider}/{selected} does not support thinking")
+    # Qualifying the model keeps duplicate names on the explicitly chosen provider.
+    selected = f"{provider}::{selected}"
+    options["generator_model"] = selected
+    options["max_tokens"] = min(options["max_tokens"], output_tokens)
+    if reasoning:
+        options["reasoning_effort"] = thinking_level if thinking_enabled else "none"
+    endpoint_id = GRANSABIO_LOCAL_ENDPOINT_IDS.get(provider)
+    endpoint = {"endpoint_id": endpoint_id} if endpoint_id else {}
+    route = {
+        "model": selected,
+        **endpoint,
+        "params": {"max_tokens": options["max_tokens"],
+                   "reasoning_effort": options.get("reasoning_effort")},
+    }
+    options.update({
+        "feedback_memory_enabled": False,
+        "gran_sabio_fallback": False,
+        "long_text_mode": "off",
+        "llm_routing": {"calls": {
+            "generation.main": route,
+            "generation.json_retry": route,
+            "preflight.validate": {
+                "model": selected,
+                **endpoint,
+                "params": {"max_tokens": min(2048, output_tokens),
+                           "reasoning_effort": "none" if reasoning else None},
+            },
+        }},
+    })
+    if provider in LOCAL_TEXT_PROVIDERS:
+        options["execution_policy"] = {"scope": "local_only"}
+    return options
+
+
+def verify_local_execution(result: dict, provider: str) -> None:
+    """An older or misconfigured server must not silently ignore local-only mode."""
+    if provider in LOCAL_TEXT_PROVIDERS:
+        attestation = result.get("local_only_attestation") or {}
+        if attestation.get("local_only_verified") is not True:
+            raise GranSabioError("Gran Sabio did not verify local-only execution")
+
+
 _gransabio_client = None
-_gransabio_available = None
 
 
 def get_gransabio_client():
-    """Get or create Gran Sabio LLM client singleton."""
-    global _gransabio_client, _gransabio_available
+    """The Gran Sabio LLM client, connected on first use.
 
-    if _gransabio_available is False:
-        return None
+    Raises GranSabioError when the client cannot be imported or the server does
+    not answer. Nothing is remembered on failure: the next call tries again.
+    """
+    global _gransabio_client
 
     if _gransabio_client is not None:
         return _gransabio_client
 
     try:
         from client import GranSabioClient
-        client = GranSabioClient(base_url=GRANSABIO_LLM_URL)
-
-        # Test connection
-        if client.is_available():
-            _gransabio_client = client
-            _gransabio_available = True
-            logger.info(f"Gran Sabio LLM client connected successfully to {GRANSABIO_LLM_URL}")
-            return client
-        else:
-            _gransabio_available = False
-            logger.warning(f"Gran Sabio LLM server not available at {GRANSABIO_LLM_URL}")
-            return None
-
     except ImportError as e:
-        _gransabio_available = False
-        logger.warning(f"Gran Sabio LLM client not available: {e}")
-        return None
-    except Exception as e:
-        _gransabio_available = False
-        logger.warning(f"Could not connect to Gran Sabio LLM at {GRANSABIO_LLM_URL}: {e}")
-        return None
+        raise GranSabioError(
+            f"Gran Sabio LLM client cannot be imported (GRANSABIO_CLIENT_PATH={GRANSABIO_CLIENT_PATH!r}): {e}"
+        ) from e
+
+    client = GranSabioClient(base_url=GRANSABIO_LLM_URL)
+    if not client.is_available():
+        raise GranSabioError(f"Gran Sabio LLM server is not available at {GRANSABIO_LLM_URL}")
+    _gransabio_client = client
+    logger.info(f"Gran Sabio LLM client connected successfully to {GRANSABIO_LLM_URL}")
+    return client
 
 
 def detect_image_type(image_base64: str) -> Tuple[str, str]:
@@ -174,12 +314,12 @@ def upload_image_to_gransabio(
         username: User namespace for the attachment
 
     Returns:
-        upload_id string or None on failure
+        upload_id string
+
+    Raises:
+        GranSabioError: the upload failed or gave no upload_id
     """
     client = get_gransabio_client()
-    if not client:
-        logger.warning("Gran Sabio client not available for image upload")
-        return None
 
     # Use configured username if not specified
     upload_username = username or GRANSABIO_USERNAME
@@ -202,19 +342,43 @@ def upload_image_to_gransabio(
             filename=actual_filename,
             content_type=content_type
         )
-        upload_id = result.get("upload_id")
-        if upload_id:
-            logger.info(f"Image uploaded to Gran Sabio ({content_type}): {upload_id[:16]}...")
-            return upload_id
-        else:
-            logger.warning("Gran Sabio returned empty upload_id")
-            return None
     except Exception as e:
-        logger.error(f"Failed to upload image to Gran Sabio: {e}")
-        return None
+        raise GranSabioError(f"Uploading reference image {actual_filename} to Gran Sabio failed: {e}") from e
+    upload_id = result.get("upload_id")
+    if not upload_id:
+        raise GranSabioError(f"Gran Sabio returned no upload_id for reference image {actual_filename}")
+    logger.info(f"Image uploaded to Gran Sabio ({content_type}): {upload_id[:16]}...")
+    return upload_id
 
 
-def check_gransabio_status() -> dict:
+# Status and model list requests are answered on the API's event loop: they
+# must not block it, and a server that does not answer must not keep the page
+# waiting for long.
+QUICK_REQUEST_TIMEOUT = 5  # seconds
+
+
+def quick_gransabio_client():
+    """Async Gran Sabio client for status and model list requests (use with `async with`)."""
+    import aiohttp
+    from client import AsyncGranSabioClient
+
+    return AsyncGranSabioClient(
+        base_url=GRANSABIO_LLM_URL,
+        timeout=aiohttp.ClientTimeout(total=QUICK_REQUEST_TIMEOUT),
+    )
+
+
+def _unavailable_status(status: str, message: str) -> dict:
+    return {
+        "available": False,
+        "status": status,
+        "providers": [],
+        "url": GRANSABIO_LLM_URL,
+        "message": message,
+    }
+
+
+async def check_gransabio_status() -> dict:
     """
     Check Gran Sabio LLM server status.
 
@@ -222,93 +386,41 @@ def check_gransabio_status() -> dict:
         dict with status info: available, active_sessions, models, etc.
     """
     try:
-        from client import GranSabioClient
-        client = GranSabioClient(base_url=GRANSABIO_LLM_URL)
-
-        if client.is_available():
-            info = client.get_info()
-            models = client.get_models()
-
-            # Extract available providers from models
-            providers = list(models.keys()) if models else []
-
-            return {
-                "available": True,
-                "status": info.get("status", "healthy"),
-                "active_sessions": info.get("active_sessions", 0),
-                "providers": providers,
-                "url": GRANSABIO_LLM_URL,
-                "message": f"Gran Sabio LLM connected ({GRANSABIO_LLM_URL})"
-            }
-        else:
-            return {
-                "available": False,
-                "status": "offline",
-                "providers": [],
-                "url": GRANSABIO_LLM_URL,
-                "message": f"Gran Sabio LLM not responding ({GRANSABIO_LLM_URL})"
-            }
-
+        from client import GranSabioClientError
+        client = quick_gransabio_client()
     except ImportError:
-        return {
-            "available": False,
-            "status": "not_installed",
-            "providers": [],
-            "url": GRANSABIO_LLM_URL,
-            "message": "Gran Sabio LLM client not installed"
-        }
+        return _unavailable_status("not_installed", "Gran Sabio LLM client not installed")
+
+    try:
+        async with client:
+            try:
+                health = await client.health_check()
+            except GranSabioClientError:
+                health = {}
+            if health.get("status") != "healthy":
+                return _unavailable_status("offline", f"Gran Sabio LLM not responding ({GRANSABIO_LLM_URL})")
+            models = await client.get_models()
     except Exception as e:
-        return {
-            "available": False,
-            "status": "error",
-            "providers": [],
-            "url": GRANSABIO_LLM_URL,
-            "message": f"Connection error: {str(e)}"
-        }
+        return _unavailable_status("error", f"Connection error: {str(e)}")
+
+    return {
+        "available": True,
+        "status": health["status"],
+        "active_sessions": health.get("active_sessions", 0),
+        "providers": list(models.keys()) if models else [],
+        "url": GRANSABIO_LLM_URL,
+        "message": f"Gran Sabio LLM connected ({GRANSABIO_LLM_URL})"
+    }
 
 
 # =============================================================================
 # PROMPT GENERATION
 # =============================================================================
 
-def build_analysis_prompt(
-    transcription: str,
-    video_title: str,
-    num_concepts: int,
-    num_variations: int,
-    cluster_description: Optional[str] = None,
-    custom_instructions: Optional[str] = None,
-    history_prompts: Optional[List[str]] = None,
-    include_history: bool = False,
-    thumbnail_style: str = "",
-    selected_titles: Optional[List[str]] = None,
-    has_reference_image: bool = False
-) -> str:
-    """
-    Build the analysis prompt for thumbnail concept generation.
-
-    Args:
-        transcription: Video transcription text
-        video_title: Original video title
-        num_concepts: Number of concepts to generate
-        num_variations: Number of variations per concept
-        cluster_description: Optional context about reference images
-        custom_instructions: Optional user instructions
-        history_prompts: Previous prompts to avoid repetition
-        include_history: Whether to include history in prompt
-        thumbnail_style: Style guidance string
-        selected_titles: Optional list of user-selected titles to guide image generation
-        has_reference_image: Whether a reference image is being provided for visual inspiration
-
-    Returns:
-        Complete prompt string for LLM
-    """
-    total_images = num_concepts * num_variations
-
-    # Build context section
-    context_section = ""
-    if cluster_description and cluster_description.strip():
-        context_section = f"""
+def _build_context_section(cluster_description):
+    if not cluster_description or not cluster_description.strip():
+        return ""
+    return f"""
 CONTEXT FOR REFERENCE IMAGES:
 The user has provided this note about the person/scene in the reference images:
 
@@ -316,278 +428,69 @@ The user has provided this note about the person/scene in the reference images:
 {cluster_description.strip()}
 ### END USER CONTEXT ###
 
-Use this information when crafting your thumbnail concepts and image prompts.
+Use this information when interpreting the reference images.
 """
 
-    # Build custom instructions section (placed last to indicate highest priority)
-    custom_section = ""
-    if custom_instructions and custom_instructions.strip():
-        custom_section = f"""
+
+def _build_custom_section(custom_instructions):
+    if not custom_instructions or not custom_instructions.strip():
+        return ""
+    return f"""
 ═══════════════════════════════════════════════════════════════════════════════
 FINAL USER INSTRUCTIONS (HIGHEST PRIORITY):
 ═══════════════════════════════════════════════════════════════════════════════
-The user has provided the following instructions. These take PRECEDENCE over
-any other guidance above, including style suggestions, reference image analysis,
-and previous concepts to avoid.
-
-CRITICAL: If there are contradictions between these instructions and anything
-else in this prompt, ALWAYS follow the user's instructions.
-
-While respecting these instructions, you should still:
-- Generate the requested number of concepts and variations
-- Maintain creative variety within the user's constraints
-- If the user is very specific about certain aspects, use that as a creative
-  anchor while varying other elements to provide options
-
-USER INSTRUCTIONS:
 {custom_instructions.strip()}
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-    # Build history section (to avoid repetition)
-    history_section = ""
-    if include_history and history_prompts:
-        # Combine history prompts
-        history_text = "\n---\n".join(history_prompts)
 
-        # Truncate if too long (keep most recent)
-        if len(history_text) > MAX_HISTORY_CHARS:
-            history_text = history_text[-MAX_HISTORY_CHARS:]
-            # Find first complete entry after truncation
-            first_separator = history_text.find("\n---\n")
-            if first_separator > 0:
-                history_text = history_text[first_separator + 5:]
-
-        history_section = f"""
+def _build_history_section(history_prompts, include_history):
+    if not (include_history and history_prompts):
+        return ""
+    history_text = "\n---\n".join(history_prompts)
+    if len(history_text) > MAX_HISTORY_CHARS:
+        history_text = history_text[-MAX_HISTORY_CHARS:]
+        first_separator = history_text.find("\n---\n")
+        if first_separator > 0:
+            history_text = history_text[first_separator + 5:]
+    return f"""
 ═══════════════════════════════════════════════════════════════════════════════
-PREVIOUS CONCEPTS (DO NOT REPEAT THESE):
+PREVIOUS THUMBNAILS FROM OTHER GENERATIONS (DO NOT REPEAT THEIR CONCEPTS):
 ═══════════════════════════════════════════════════════════════════════════════
-The following concepts have already been generated. Create NEW and DIFFERENT concepts.
-Avoid similar ideas, moods, compositions, and text overlays.
-
 {history_text}
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-    # Build selected titles section (to guide image generation based on user-selected titles)
-    selected_titles_section = ""
-    if selected_titles and len(selected_titles) > 0:
-        titles_list = "\n".join(f"- {title}" for title in selected_titles)
-        selected_titles_section = f"""
-═══════════════════════════════════════════════════════════════════════════════
-SELECTED TITLES (GUIDE YOUR IMAGES TO MATCH THESE):
-═══════════════════════════════════════════════════════════════════════════════
-The user has selected these potential video titles. Your thumbnail concepts and
-image prompts MUST be designed to visually complement and support these titles.
 
-{titles_list}
-
-IMPORTANT: Create thumbnails that would make viewers want to click when they see
-these titles next to them. The visual and the title should work together as a unit.
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-    # Build subject analysis section (when references are provided)
-    subject_analysis_section = ""
-    if has_reference_image:
-        subject_analysis_section = """
-═══════════════════════════════════════════════════════════════════════════════
-CRITICAL: ANALYZE REFERENCE IMAGES AND IDENTIFY ALL SUBJECTS
-═══════════════════════════════════════════════════════════════════════════════
-The SAME reference images you see will ALSO be sent to the image generation AI.
-You MUST analyze them and create a clear identification system.
-
-CREATE A "subjects" ARRAY identifying ALL distinct people in references:
-{
-  "id": "person_01",                    // Sequential: person_01, person_02...
-  "visual_identifier": "...",           // DISTINGUISHING features only
-  "inferred_role": "...",               // Role deduced from transcription
-  "is_costume_variant": true/false,     // Same person in different costume?
-  "variant_of": null or "person_XX"     // If variant, which person's ID
+# Facial expressions the user can ask for, as the concept prompt words them
+FACIAL_EXPRESSIONS = {
+    "smiling": "smiling",
+    "mouth_closed": "with the mouth closed (lips together)",
+    "neutral": "with a neutral, relaxed expression",
 }
 
-VISUAL IDENTIFIER: Describe ONLY distinguishing features (clothing, accessories,
-hairstyle differences). DO NOT describe facial features - references show those.
-Examples: "young woman, long hair, casual outfit" or "same as person_01 but in bathrobe"
 
-INFER ROLES from transcription context. Names in examples are illustrative only;
-deduce actual roles from YOUR analysis of the specific transcription and images.
-
-COSTUME VARIANTS: Same person in different outfit = is_costume_variant: true,
-variant_of: "person_XX". They must have IDENTICAL face in generated images.
-
-USE THESE IDs in your image_prompt descriptions:
-✅ "person_01 reacts with shock while person_02 points at calendar"
-❌ "A young woman reacts..." (too generic)
+def _build_expression_section(facial_expression):
+    if not facial_expression:
+        return ""
+    if facial_expression not in FACIAL_EXPRESSIONS:
+        raise ValueError(f"Unknown facial expression: {facial_expression}")
+    return f"""
+═══════════════════════════════════════════════════════════════════════════════
+FACIAL EXPRESSION (CHOSEN BY THE USER):
+═══════════════════════════════════════════════════════════════════════════════
+Every person in this thumbnail must be {FACIAL_EXPRESSIONS[facial_expression]}.
+Write subject_expression accordingly. Make the concepts of the batch differ in
+angle, scene, mood and pose, not in the expression.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-    # Language requirement section - text must match transcription language
-    language_section = """
-═══════════════════════════════════════════════════════════════════════════════
-LANGUAGE REQUIREMENT:
-═══════════════════════════════════════════════════════════════════════════════
-All user-facing text fields MUST be written in the SAME LANGUAGE as the transcription:
-- text_overlay
-- suggested_title
-- key_topics
 
-Detect the language from the transcription above and use that language consistently.
-Only use a different language if the user explicitly requests it in their instructions.
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-    prompt = f"""You are an expert YouTube thumbnail designer and video content analyst.
-
-Analyze the following video transcription and generate {num_concepts} thumbnail concepts, each with {num_variations} variations.
-
-VIDEO TITLE: {video_title}
-{context_section}
-TRANSCRIPTION (excerpt):
-{transcription}
-{history_section}{selected_titles_section}{subject_analysis_section}{language_section}{custom_section}
-═══════════════════════════════════════════════════════════════════════════════
-TASK: Generate {num_concepts} concepts x {num_variations} variations = {total_images} unique image prompts
-═══════════════════════════════════════════════════════════════════════════════
-
-CONCEPTS are different creative ideas for the thumbnail. Examples of concept approaches:
-- Emotion/Reaction, Problem/Solution, Intrigue/Curiosity, Achievement, Tutorial, Humor, etc.
-- Choose what fits best with the video content - these are just examples, use your creativity.
-
-VARIATIONS are different interpretations of the same concept, like A/B testing for engagement.
-Each variation should have a complete, independent image_prompt. Think of variations as:
-- Different ways to visually represent the same idea
-- Subtle or more noticeable differences depending on what makes sense
-- Examples: different expressions, poses, camera angles, compositions, lighting, visual elements
-
-For EACH concept, provide:
-- **subjects**: Array of identified subjects from reference images (REQUIRED if references provided)
-- **concept_name**: Short name for this concept (2-4 words)
-- **thumbnail_concept**: Brief description of the idea (1-2 sentences)
-- **suggested_title**: Catchy video title (max 60 chars)
-- **mood**: Emotional tone (excited, mysterious, professional, fun, etc.)
-- **colors**: 2-3 dominant colors as hex codes
-- **key_topics**: 3-5 main keywords from the video
-- **variations**: Array of {num_variations} variations, each with:
-  - **variation_index**: 1, 2, 3...
-  - **variation_focus**: What this variation emphasizes (e.g., "intense expression", "dynamic angle")
-  - **image_prompt**: COMPLETE prompt using subject IDs (e.g., "person_01 reacts..."). Include pose,
-    expression, background, lighting. Optimized for 16:9 (1280x720). Each prompt must work independently.
-  - **text_overlay**: Short text for the thumbnail (2-5 words, punchy)
-
-Respond in JSON format:
-[
-    {{
-        "subjects": [
-            {{
-                "id": "person_01",
-                "visual_identifier": "young woman, long hair, casual outfit",
-                "inferred_role": "main creator",
-                "is_costume_variant": false,
-                "variant_of": null
-            }}
-        ],
-        "concept_name": "...",
-        "thumbnail_concept": "...",
-        "suggested_title": "...",
-        "mood": "...",
-        "colors": ["#...", "#..."],
-        "key_topics": ["...", "..."],
-        "variations": [
-            {{
-                "variation_index": 1,
-                "variation_focus": "...",
-                "image_prompt": "person_01 does X with Y expression...",
-                "text_overlay": "..."
-            }}
-        ]
-    }}
-]
-
-NOTE: The subjects example above is illustrative. Adapt based on YOUR analysis of
-the actual reference images and transcription. Use your own identifiers and roles.
-
-Generate exactly {num_concepts} concepts, each with exactly {num_variations} variations.
-
-{thumbnail_style}
-"""
-    return prompt
-
-
-def build_analysis_prompt_images(
-    transcription: str,
-    video_title: str,
-    num_images: int,
-    cluster_description: Optional[str] = None,
-    custom_instructions: Optional[str] = None,
-    history_prompts: Optional[List[str]] = None,
-    include_history: bool = False,
-    thumbnail_style: str = "",
-    selected_titles: Optional[List[str]] = None,
-    has_reference_image: bool = False,
-    has_style_reference: bool = False
-) -> str:
-    """
-    Build the analysis prompt for flat image generation (no variations).
-
-    This is the new simplified format where each image is completely independent.
-    No concept/variation hierarchy - just N unique images.
-
-    Args:
-        has_style_reference: If True, the FIRST reference image is a style guide
-                            (not a person to clone) and should be analyzed for
-                            visual style characteristics.
-    """
-
-    # Build context section
-    context_section = ""
-    if cluster_description and cluster_description.strip():
-        context_section = f"""
-CONTEXT FOR REFERENCE IMAGES:
-The user has provided this note about the person/scene in the reference images:
-
-### START USER CONTEXT ###
-{cluster_description.strip()}
-### END USER CONTEXT ###
-
-Use this information when crafting your thumbnail images.
-"""
-
-    # Build custom instructions section
-    custom_section = ""
-    if custom_instructions and custom_instructions.strip():
-        custom_section = f"""
-═══════════════════════════════════════════════════════════════════════════════
-FINAL USER INSTRUCTIONS (HIGHEST PRIORITY):
-═══════════════════════════════════════════════════════════════════════════════
-USER INSTRUCTIONS:
-{custom_instructions.strip()}
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-    # Build history section (to avoid repetition)
-    history_section = ""
-    if include_history and history_prompts:
-        history_text = "\n---\n".join(history_prompts)
-        if len(history_text) > MAX_HISTORY_CHARS:
-            history_text = history_text[-MAX_HISTORY_CHARS:]
-            first_separator = history_text.find("\n---\n")
-            if first_separator > 0:
-                history_text = history_text[first_separator + 5:]
-
-        history_section = f"""
-═══════════════════════════════════════════════════════════════════════════════
-PREVIOUS IMAGES (DO NOT REPEAT THESE):
-═══════════════════════════════════════════════════════════════════════════════
-{history_text}
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-    # Build selected titles section
-    selected_titles_section = ""
-    if selected_titles and len(selected_titles) > 0:
-        titles_list = "\n".join(f"- {title}" for title in selected_titles)
-        selected_titles_section = f"""
+def _build_selected_titles_section(selected_titles):
+    if not selected_titles:
+        return ""
+    titles_list = "\n".join(f"- {t}" for t in selected_titles)
+    return f"""
 ═══════════════════════════════════════════════════════════════════════════════
 SELECTED TITLES (GUIDE YOUR IMAGES TO MATCH THESE):
 ═══════════════════════════════════════════════════════════════════════════════
@@ -595,583 +498,714 @@ SELECTED TITLES (GUIDE YOUR IMAGES TO MATCH THESE):
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-    # Build style reference analysis section (when external style image is provided)
-    style_reference_section = ""
-    if has_style_reference:
-        style_reference_section = """
+
+def _build_style_reference_section(has_style_reference):
+    if not has_style_reference:
+        return ""
+    # Use string concatenation to avoid escaping JSON braces in an f-string.
+    return """
 ═══════════════════════════════════════════════════════════════════════════════
 STYLE REFERENCE ANALYSIS (FIRST IMAGE IS A STYLE GUIDE)
 ═══════════════════════════════════════════════════════════════════════════════
-The FIRST reference image is NOT a person to clone - it's a VISUAL STYLE GUIDE.
+The FIRST reference image is NOT a person to clone - it is a VISUAL STYLE GUIDE.
 Analyze it thoroughly and extract these characteristics into a "style_analysis" object:
 
 {
-  "art_type": "...",           // E.g.: "photorealistic", "anime", "kawaii/chibi", "cartoon",
-                               // "3D render", "pixel art", "illustration", "oil painting", etc.
-  "art_type_details": "...",   // Specific sub-style details, e.g.: "super-deformed chibi with
-                               // oversized head and small body", "shonen anime style",
-                               // "Disney-style cartoon", "Pixar 3D render", etc.
-  "color_palette": ["#...", "#..."],  // 3-5 dominant colors from the style reference
-  "color_mood": "...",         // E.g.: "soft pastels, warm and cozy", "vibrant neon",
-                               // "muted earth tones", "high contrast black and white"
-  "visual_effects": [...],     // Array of effects: "sparkles", "glows", "action lines",
-                               // "onomatopoeia text", "halftone dots", "lens flare",
-                               // "bokeh", "film grain", "vignette", etc. Use null if none.
-  "rendering_style": "...",    // E.g.: "2D flat colors", "2D cel-shaded", "3D rendered with
-                               // soft lighting", "watercolor texture", "digital painting"
-  "composition_style": "...",  // E.g.: "centered subject", "dynamic diagonal", "rule of thirds",
-                               // "symmetric", "cluttered maximalist", "minimal clean"
-  "line_work": "...",          // E.g.: "thick black outlines", "no outlines", "soft edges",
-                               // "sketchy/rough lines", "clean vector lines". Use null if N/A.
-  "overall_aesthetic": "..."   // Brief summary: "Cute kawaii 3D render with soft pastels,
-                               // sparkle effects, and chibi proportions"
+  "art_type": "...",
+  "art_type_details": "...",
+  "color_palette": ["#...", "#..."],
+  "color_mood": "...",
+  "visual_effects": [...],
+  "rendering_style": "...",
+  "composition_style": "...",
+  "line_work": "...",
+  "overall_aesthetic": "..."
 }
-
-CRITICAL INSTRUCTIONS:
-1. The "style" field in EACH generated image MUST match the analyzed art_type
-2. DO NOT default to "photorealistic" - use the actual style from the reference
-3. The generated images should FEEL like they belong in the same visual world
-4. If the style is cartoon/anime/illustration, the thumbnails should be in that style
 
 The remaining reference images (2nd onwards) show REAL PEOPLE to clone.
 Apply the analyzed style TO these people when generating thumbnails.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
-    # Build subject analysis section - V3 format
+
+def _build_reference_mapping_section(reference_mapping):
+    if not reference_mapping:
+        return ""
+    lines = []
+    for entry in reference_mapping:
+        idx = entry.get("image_index")
+        person_id = entry.get("person_id")
+        is_style = entry.get("is_style_reference", False)
+        source = entry.get("source_frame", "")
+        if is_style:
+            lines.append(f"- Image {idx}: STYLE REFERENCE (analyze for style_analysis, NOT a person to clone)")
+        elif entry.get("reference_role") == "environment":
+            lines.append(f"- Image {idx}: ENVIRONMENT ONLY. {entry.get('environment_instruction', 'Preserve the setting.')} Derive people from their dedicated references.")
+        elif entry.get("reference_role") == "body":
+            lines.append(
+                f"- Image {idx}: BODY REFERENCE of {person_id}; visible coverage: {entry['body_coverage']}; "
+                f"view: {entry.get('view') or 'unspecified'}; estimated posture: {entry['body_posture']}. Describe only observed proportions. "
+                "Do not idealize, normalize, slim, or inflate the build. Use the PRIMARY face reference for facial details, hair, and character appearance. "
+                "Do not derive clothing, wigs, hairstyles, or accessories from a body-only reference."
+            )
+        elif person_id and entry.get("face_sheet_views"):
+            lines.append(
+                f"- Image {idx}: FACE SHEET of {person_id} — a grid of crops of that one face "
+                f"(left to right, top to bottom: {entry['face_sheet_views']})"
+            )
+        elif person_id:
+            detail = f" — from frame `{source}`" if source else ""
+            label = "PRIMARY face reference" if entry.get("is_primary") else "face reference"
+            observed = " / ".join(filter(None, (entry.get("view"), entry.get("expression"))))
+            detail += f" (observed: {observed})" if observed else ""
+            lines.append(f"- Image {idx}: {label} for {person_id}{detail}")
+            if entry.get("body_reference_status") == "unavailable":
+                lines.append(f"  No reliable body reference for {person_id}: do not invent a precise build from the head crop.")
+        else:
+            lines.append(f"- Image {idx}: (unlabelled reference)")
+
+    seen_persons = []
+    for entry in reference_mapping:
+        pid = entry.get("person_id")
+        if pid and pid not in seen_persons:
+            seen_persons.append(pid)
+    persons_summary = ", ".join(seen_persons) if seen_persons else "(none)"
+
+    return f"""
+═══════════════════════════════════════════════════════════════════════════════
+REFERENCE IMAGES — DETERMINISTIC ROLE MAPPING (TRUST THIS, DO NOT RE-INFER):
+═══════════════════════════════════════════════════════════════════════════════
+The reference editor assigns images to people using verified detections or explicit user confirmation. The mapping below is the GROUND TRUTH — do not try
+to re-identify who is who by visual similarity.
+
+{chr(10).join(lines)}
+
+DISTINCT PEOPLE IN THIS GENERATION: {persons_summary}
+
+Rules:
+- All images labelled with the SAME person_id show the SAME biological face.
+  They MUST share a single face_group with a consistent physical_description.
+- DIFFERENT person_ids = DIFFERENT people, must belong to different face_groups.
+- The style reference (if any) is for visual style only — never a person.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+
+def environment_references(reference_mapping):
+    """The setting photos of a reference mapping, in image order."""
+    return [entry for entry in reference_mapping or [] if entry.get("reference_role") == "environment"]
+
+
+def image_numbers(entries):
+    """'Image 4' or 'Images 4, 5' for the given reference mapping entries."""
+    numbers = [str(entry["image_index"]) for entry in entries]
+    return f"Image {numbers[0]}" if len(numbers) == 1 else "Images " + ", ".join(numbers)
+
+
+def split_sides(settings):
+    """The setting photos of a split screen: (left images, right images) as text."""
+    return tuple(image_numbers([entry for entry in settings if entry["environment_side"] == side])
+                 for side in ("left", "right"))
+
+
+def _build_skeleton_setting_section(reference_mapping):
+    settings = environment_references(reference_mapping)
+    if not settings:
+        return ""
+    per_image = (
+        ""
+        if settings[0]["environment_mode"] == "same"
+        else f' They are different places: describe each one apart, starting with its number ("Image {settings[0]["image_index"]}: ...").'
+    )
+    return f"""
+═══════════════════════════════════════════════════════════════════════════════
+SETTING (CHOSEN BY THE USER):
+═══════════════════════════════════════════════════════════════════════════════
+{image_numbers(settings)} show the real place where every thumbnail of this
+series happens. Describe it in "setting": the kind of place, walls and surfaces,
+furniture and objects, colors, materials and light, exactly as seen.{per_image}
+Describe only what is visible; do not embellish it or imagine another place.
+The thumbnail concepts are written from this description without the photos.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+
+def _build_concept_setting_section(reference_mapping):
+    settings = environment_references(reference_mapping)
+    if not settings:
+        return ""
+    mode = settings[0]["environment_mode"]
+    if mode == "same":
+        rule = f"{image_numbers(settings)} show ONE place: every concept happens in that place."
+    elif mode == "alternatives":
+        rule = (
+            f"{image_numbers(settings)} are ALTERNATIVE places: each concept happens in exactly ONE of them, "
+            'never a mix. Start background with the image it uses ("Image N: ..."); concepts may use different ones.'
+        )
+    else:
+        left, right = split_sides(settings)
+        rule = (
+            f"SPLIT SCREEN: the left panel happens in the place of {left} and the right panel in the place of "
+            f"{right}. Every concept keeps that split; say in scene who is in each panel."
+        )
+    return f"""
+═══════════════════════════════════════════════════════════════════════════════
+SETTING (CHOSEN BY THE USER — DO NOT INVENT ANOTHER PLACE):
+═══════════════════════════════════════════════════════════════════════════════
+The user attached photos of the real setting; the skeleton's "setting" describes
+them, and the image model gets those photos to keep that place as it is.
+{rule}
+- scene and background put the people in that setting. Do not move them to
+  another place and do not add another location, landscape, sky, room or backdrop.
+- background: say how the setting is shown in this concept: which part of it,
+  camera distance and angle, depth of field, lighting and color grading. Only
+  the framing and the lighting change between concepts, never the place.
+- visual_elements: only what the people hold or graphic overlays (arrows,
+  icons, shapes); no furniture or scenery that changes the place.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+
+_LANGUAGE_SECTION = """
+═══════════════════════════════════════════════════════════════════════════════
+LANGUAGE REQUIREMENT:
+═══════════════════════════════════════════════════════════════════════════════
+All user-facing text fields (text_in_image, suggested_title,
+concept_name, key_topics, mood) MUST be written in the SAME LANGUAGE as the
+transcription. Detect the language from the transcription above and use it
+consistently. Only use a different language if the user explicitly requests
+it in their instructions.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+
+# =============================================================================
+# SKELETON PROMPT (Stage 1 — identity + base, generated once per batch)
+# =============================================================================
+
+
+def build_skeleton_prompt(
+    transcription,
+    video_title,
+    cluster_description=None,
+    custom_instructions=None,
+    thumbnail_style="",
+    has_reference_image=False,
+    has_style_reference=False,
+    reference_mapping=None,
+    num_titles_in_pool=10,
+):
+    """Build a single LLM prompt that produces only the identity/style/base
+    block shared by all thumbnails in a series. Output is meant to be
+    cacheable and reused across many concept calls."""
+    context_section = _build_context_section(cluster_description)
+    custom_section = _build_custom_section(custom_instructions)
+    style_reference_section = _build_style_reference_section(has_style_reference)
+    reference_mapping_section = _build_reference_mapping_section(reference_mapping)
+    setting_section = _build_skeleton_setting_section(reference_mapping)
+    setting_field = '\n  "setting": "...",' if setting_section else ""
+    setting_rule = "\n- setting: REQUIRED, the description of the attached setting photos." if setting_section else ""
+
     subject_analysis_section = ""
     if has_reference_image:
-        # Adjust instructions based on whether first image is style reference
-        people_image_note = ""
-        if has_style_reference:
-            people_image_note = """
-NOTE: The FIRST reference image is a style guide (already analyzed above).
-The REMAINING reference images (2nd onwards) contain the REAL PEOPLE to clone.
-"""
-        # Use string concatenation instead of f-string to avoid escaping JSON braces
-        subject_analysis_section = """
-═══════════════════════════════════════════════════════════════════════════════
-REFERENCE IMAGE ANALYSIS - CREATE IDENTITY MAPPING (V3 FORMAT)
-═══════════════════════════════════════════════════════════════════════════════""" + people_image_note + """
-The reference images contain REAL PEOPLE. Create a mapping so the image AI
-knows which face to clone and how to identify each person.
+        people_image_note = (
+            "\nNOTE: The FIRST reference image is a style guide (already analyzed above).\n"
+            "The REMAINING reference images (2nd onwards) contain the REAL PEOPLE to clone.\n"
+            if has_style_reference else ""
+        )
+        subject_analysis_section = (
+            "\n═══════════════════════════════════════════════════════════════════════════════\n"
+            "IDENTITY MAPPING (FACE GROUPS + CHARACTERS)\n"
+            "═══════════════════════════════════════════════════════════════════════════════"
+            + people_image_note
+            + """
+Produce a face_groups dict (by biological identity) and a characters dict
+(by appearance/outfit). If the SAME PERSON appears in different outfits, the
+characters share ONE face_group.
 
-STEP 1: FACE GROUPS - Group by biological identity
-───────────────────────────────────────────────────
-Create face_groups with DETAILED PHYSICAL DESCRIPTIONS of facial features.
-If the SAME PERSON appears multiple times (different outfits), they share ONE group.
-
-"face_groups": {
+face_groups example:
+{
   "group_A": {
-    "physical_description": "Adult [gender]: [face shape], [hair], [eyes], [skin], [distinctive features], [body build]",
+    "physical_description": "Adult [gender]: [face shape], [hair], [eyes], [skin], [distinctive features], [build]",
     "characters_with_this_face": ["person_01", "person_02"]
   }
 }
 
-PHYSICAL DESCRIPTION FORMAT (be specific about facial features):
+Describe body proportions only from BODY REFERENCE images. If only face portraits
+are available, mark the build as unobserved instead of inventing it. A torso
+reference does not establish the shape of hidden legs. Preserve the person's
+observed proportions without idealization or normalization.
+
+PHYSICAL DESCRIPTION must be specific:
 "Adult woman: oval face, long dark straight hair with bangs reaching eyebrows, brown almond-shaped eyes, light skin tone, defined cheekbones, small nose, slim build"
-"Adult man: square jawline, short brown wavy hair, full brown beard, blue eyes, fair skin with light freckles, medium athletic build"
 
-STEP 2: CHARACTERS - Each outfit/look as dict entry
-────────────────────────────────────────────────────
-Create a "characters" DICT (not array) mapping person_XX to their appearance:
-
-"characters": {
+characters example:
+{
   "person_01": {
     "belongs_to_face": "group_A",
-    "outfit": "teal blanket wrap, holding bear mug, cozy sick appearance",
-    "identify_in_references": "Look for: woman with dark hair and bangs, wrapped in teal blanket"
-  },
-  "person_02": {
-    "belongs_to_face": "group_A",
-    "outfit": "white cardigan over black top, casual relaxed look",
-    "identify_in_references": "Look for: same woman as person_01, but wearing white cardigan"
+    "outfit": "<concrete outfit observed in the references>",
+    "identify_in_references": "Look for: <distinctive trait + outfit>"
   }
 }
 
-RULES for identify_in_references:
-✅ First character of a face_group: "Look for: [brief physical trait from group], [outfit]"
-✅ Same person different outfit: "Look for: same [person] as person_XX, but wearing [outfit]"
-✅ Different people: "Look for: [unique physical trait], [outfit]"
-
-STEP 3: STYLE SOURCE
-─────────────────────
-"style_source": "person_XX"  // Which character's outfit to use in final image
-
-STEP 4: ENVIRONMENT EFFECTS (optional, for special visuals)
-───────────────────────────────────────────────────────────
-For thumbnails with visual effects (glows, holographic elements, split screens):
-"environment_effects": "Holographic glow from floating charts, subtle blue particles, lens flare from sun"
-
-Leave as null if no special effects needed.
-
-USE character IDs in scene descriptions:
-✅ "person_02 reacts with shock while looking at calendar"
-❌ "A woman reacts..." (too generic, unclear which reference)
+style_source: which character\'s outfit becomes the default for thumbnails.
 ═══════════════════════════════════════════════════════════════════════════════
 """
+        )
 
-    # Language requirement section - text must match transcription language
-    language_section = """
-═══════════════════════════════════════════════════════════════════════════════
-LANGUAGE REQUIREMENT:
-═══════════════════════════════════════════════════════════════════════════════
-All user-facing text fields MUST be written in the SAME LANGUAGE as the transcription:
-- text_overlay
-- text_in_image
-- suggested_title
-- key_topics
-
-Detect the language from the transcription above and use that language consistently.
-Only use a different language if the user explicitly requests it in their instructions.
-═══════════════════════════════════════════════════════════════════════════════
-"""
-
-    prompt = f"""You are an expert YouTube thumbnail designer.
-
-Analyze the following video transcription and generate {num_images} unique thumbnail images.
+    return f"""You are setting up the IDENTITY + STYLE BASE for a YouTube thumbnail series.
 
 VIDEO TITLE: {video_title}
 {context_section}
 TRANSCRIPTION (excerpt):
 {transcription}
-{history_section}{selected_titles_section}{style_reference_section}{subject_analysis_section}{language_section}{custom_section}
+{style_reference_section}{reference_mapping_section}{subject_analysis_section}{setting_section}{_LANGUAGE_SECTION}{custom_section}
 ═══════════════════════════════════════════════════════════════════════════════
-TASK: Generate {num_images} unique thumbnail images
+TASK: Produce the IDENTITY BASE shared by every thumbnail in this series.
 ═══════════════════════════════════════════════════════════════════════════════
 
-Each IMAGE is a completely independent creative idea. Provide maximum variety:
-- Different scenes, poses, expressions, compositions, backgrounds
-- Different approaches: reaction, tutorial, mystery, achievement, humor, etc.
-- Each image should stand alone as a distinct concept
+Do NOT generate scene descriptions, poses, expressions, moods, or any per-thumbnail
+concept. Those will be generated separately, one by one. You only define constants.
 
-For EACH image, provide:
-- **image_index**: 1, 2, 3... (sequential number)
-- **style_analysis**: Object with art_type, art_type_details, color_palette, color_mood, visual_effects,
-  rendering_style, composition_style, line_work, overall_aesthetic (REQUIRED if style reference provided)
-- **face_groups**: Object with physical_description and characters_with_this_face (REQUIRED if references provided)
-- **characters**: Dict mapping person_XX to outfit/identify_in_references (REQUIRED if references provided)
-- **style_source**: Which character's outfit to use in final image
-- **concept_name**: Short name (2-4 words)
-- **thumbnail_concept**: Brief description (1-2 sentences)
-- **suggested_title**: Catchy video title (max 60 chars)
-- **mood**: Emotional tone (excited, mysterious, professional, fun, etc.)
-- **colors**: 2-4 hex codes for color palette
-- **key_topics**: 3-5 main keywords from the video
-- **scene**: Narrative description using character IDs (person_01, person_02...)
-- **subject_pose**: Posture/body language for each character
-- **subject_expression**: Facial expressions
-- **subject_action**: OPTIONAL - What characters are doing
-- **visual_elements**: OPTIONAL - Additional elements as array
-- **text_in_image**: OPTIONAL - Text to render IN the image (~3 words)
-- **background**: Background/environment description
-- **lighting**: Lighting setup
-- **environment_effects**: OPTIONAL - Visual effects (glows, holographic elements, particles)
-- **equipment**: Camera/lens (e.g., "DSLR 85mm f/1.8")
-- **framing**: Shot type (e.g., "medium close-up")
-- **composition**: Composition rules (e.g., "rule of thirds")
-- **style**: Visual style - MUST match style_analysis.art_type if style reference provided
-- **quality**: Quality descriptor - adapt to match the style (e.g., "clean kawaii 3D render" not "8K photorealistic")
-- **text_overlay**: Short text for UI overlay (2-5 words) - NOT rendered in image
+Required JSON (single object, no array, no markdown fence):
 
-Respond in JSON format:
-[
-    {{
-        "image_index": 1,
+{{
+  "face_groups": {{}},
+  "characters": {{}},
+  "style_source": "person_XX",
+  "style_analysis": null,
+  "camera_and_lighting_base": {{
+    "framing": "...",
+    "equipment": "...",
+    "lighting": "...",
+    "composition": "..."
+  }},
+  "colors_palette_base": ["#...", "#..."],{setting_field}
+  "suggested_titles_pool": ["..."]
+}}
 
-        "style_analysis": {{
-            "art_type": "kawaii/chibi",
-            "art_type_details": "super-deformed chibi with oversized head (1:2 ratio), small body, large expressive eyes",
-            "color_palette": ["#FFE4E1", "#FFB6C1", "#E6E6FA", "#87CEEB", "#F5F5DC"],
-            "color_mood": "soft pastels, warm and cozy, gentle lighting",
-            "visual_effects": ["sparkles", "soft glow", "subtle light particles"],
-            "rendering_style": "3D rendered with soft cel-shading and ambient occlusion",
-            "composition_style": "centered subject, clean minimal background",
-            "line_work": "no hard outlines, soft edges blending into background",
-            "overall_aesthetic": "Cute kawaii 3D chibi render with soft pastel colors, sparkle effects, and cozy atmosphere"
-        }},
+Rules for the JSON:
+- face_groups / characters: REQUIRED when reference people are provided; otherwise empty {{}}.
+- style_analysis: REQUIRED when a style reference image was provided; otherwise null.
+- camera_and_lighting_base: REQUIRED. Pick cinematic defaults that fit the video tone.
+- colors_palette_base: 4-5 hex codes that match the video mood.
+- suggested_titles_pool: {num_titles_in_pool} distinct, catchy title candidates.{setting_rule}
 
-        "face_groups": {{
-            "group_A": {{
-                "physical_description": "Adult woman: oval face, long dark hair with bangs, brown almond-shaped eyes, light skin, defined cheekbones, slim build",
-                "characters_with_this_face": ["person_01", "person_02"]
-            }}
-        }},
-
-        "characters": {{
-            "person_01": {{
-                "belongs_to_face": "group_A",
-                "outfit": "casual blue pajamas, hair down",
-                "identify_in_references": "Look for: woman with dark hair and bangs, in blue pajamas"
-            }},
-            "person_02": {{
-                "belongs_to_face": "group_A",
-                "outfit": "white bathrobe, hair in bun",
-                "identify_in_references": "Look for: same woman as person_01, but in white bathrobe"
-            }}
-        }},
-
-        "style_source": "person_02",
-        "concept_name": "...",
-        "thumbnail_concept": "...",
-        "suggested_title": "...",
-        "mood": "...",
-        "colors": ["#...", "#...", "#..."],
-        "key_topics": ["...", "...", "..."],
-        "scene": "person_02 does X while...",
-        "subject_pose": "leaning forward, hands on hips",
-        "subject_expression": "shocked, wide eyes",
-        "subject_action": null,
-        "visual_elements": null,
-        "text_in_image": null,
-        "background": "modern studio, colorful lights",
-        "lighting": "dramatic side lighting, warm tone",
-        "environment_effects": null,
-        "equipment": null,
-        "framing": "medium close-up",
-        "composition": "subject left third, space for text",
-        "style": "kawaii/chibi 3D render",
-        "quality": "clean kawaii 3D render with soft lighting and sparkle effects",
-        "text_overlay": "..."
-    }}
-]
-
-IMPORTANT: If only ONE person appears in references (no costume changes), still create:
-- face_groups with group_A containing physical_description and characters_with_this_face: ["person_01"]
-- characters with person_01 entry including outfit and identify_in_references
-- style_source: "person_01"
-
-IMPORTANT: If a style_analysis is provided (style reference image was given):
-- The "style" field MUST reflect the analyzed art_type (e.g., "kawaii/chibi 3D render")
-- The "quality" field MUST be adapted to the style (NOT "8K photorealistic" for cartoon styles)
-- Include visual_effects from style_analysis in environment_effects if appropriate
-
-Generate exactly {num_images} unique images with MAXIMUM VARIETY between them.
+Output ONLY the JSON. No markdown. No extra prose.
 
 {thumbnail_style}
 """
-    return prompt
+
+
+# =============================================================================
+# CONCEPT PROMPT (Stage 2 — one thumbnail concept at a time)
+# =============================================================================
+
+
+def build_concept_prompt(
+    transcription,
+    video_title,
+    image_index,
+    total_images,
+    skeleton,
+    prior_concepts,
+    custom_instructions=None,
+    history_prompts=None,
+    include_history=False,
+    selected_titles=None,
+    thumbnail_style="",
+    facial_expression=None,
+    reference_mapping=None,
+):
+    """Build a single LLM prompt that produces ONE thumbnail concept building
+    on a pre-existing identity skeleton, avoiding repetition of concepts
+    already generated in this batch. With setting photos in the reference
+    mapping, every concept happens in that setting."""
+    custom_section = _build_custom_section(custom_instructions)
+    history_section = _build_history_section(history_prompts, include_history)
+    selected_titles_section = _build_selected_titles_section(selected_titles)
+    expression_section = _build_expression_section(facial_expression)
+    setting_section = _build_concept_setting_section(reference_mapping)
+    # A chosen expression is the same in every concept, so it is not varied
+    varied = "angle, scene, mood or pose" if facial_expression else "angle, scene, mood, pose or expression"
+
+    skeleton_summary = orjson.dumps(skeleton, option=orjson.OPT_INDENT_2).decode("utf-8")
+
+    prior_summary = ""
+    if prior_concepts:
+        prior_lines = []
+        for c in prior_concepts:
+            scene_short = (c.get("scene") or "")[:100]
+            prior_lines.append(
+                f"- #{c.get('image_index')} {c.get('concept_name', '?')!r}: "
+                f"mood={c.get('mood', '?')}, scene='{scene_short}...', "
+                f"pose='{c.get('subject_pose', '?')}', expression='{c.get('subject_expression', '?')}'"
+            )
+        prior_summary = (
+            "\n═══════════════════════════════════════════════════════════════════════════════\n"
+            f"CONCEPTS ALREADY GENERATED IN THIS BATCH ({len(prior_concepts)}/{total_images}) — "
+            f"DO NOT REPEAT their {varied}:\n"
+            "═══════════════════════════════════════════════════════════════════════════════\n"
+            + "\n".join(prior_lines)
+            + "\n═══════════════════════════════════════════════════════════════════════════════\n"
+        )
+
+    return f"""You are generating thumbnail concept {image_index} of {total_images} for a YouTube video.
+
+VIDEO TITLE: {video_title}
+TRANSCRIPTION (excerpt):
+{transcription}
+
+═══════════════════════════════════════════════════════════════════════════════
+IDENTITY SKELETON (already defined for this series — DO NOT redefine):
+═══════════════════════════════════════════════════════════════════════════════
+{skeleton_summary}
+═══════════════════════════════════════════════════════════════════════════════
+{prior_summary}{history_section}{selected_titles_section}{expression_section}{setting_section}{_LANGUAGE_SECTION}{custom_section}
+═══════════════════════════════════════════════════════════════════════════════
+TASK: Generate ONE distinct thumbnail concept (image_index={image_index}).
+═══════════════════════════════════════════════════════════════════════════════
+
+Reference identities by character IDs from the skeleton (person_01, person_02, ...).
+You may pick a title from suggested_titles_pool, or refine one. Aim for each
+concept in the batch to use a different title.
+
+camera_and_lighting_override: leave as null to inherit the skeleton\'s base.
+Only set a different object if THIS concept benefits from a unique camera or
+lighting setup (dramatic low angle, hard rim light, etc.) that the base
+doesn\'t capture.
+
+TEXT TO RENDER:
+- text_in_image is the ONLY field for words that must appear inside the generated image.
+- When the user requests a headline, caption, or exact visible wording, put that
+  wording in text_in_image verbatim, including punctuation and accents. Do not
+  leave it null or put the requested wording only in suggested_title.
+- Use null when the concept has no visible text. An explicit request for no text
+  must produce null. Do not turn a video title into lettering unless wanted.
+- Keep typography, color, placement, and reserved space in visual_elements or
+  camera_and_lighting_override.composition; text_in_image holds the literal words.
+- suggested_title is the video title shown in the interface, not rendered lettering.
+
+OUTFITS:
+- A character's outfit in the skeleton is what they wear in the video: their
+  default clothing, not part of their identity.
+- outfit_changes: null keeps every outfit. When this concept needs other clothing
+  for someone (a costume, a uniform, swimwear, pajamas, a towel, no clothes...)
+  because the idea or the user's instructions call for it, list
+  {{"person_id": "person_XX", "outfit": "..."}} for each person whose clothing
+  changes, with the complete look they wear in this thumbnail. Without clothes,
+  say what covers the body instead.
+
+Required JSON (single object, no array, no markdown fence):
+
+{{
+  "image_index": {image_index},
+  "concept_name": "...",
+  "thumbnail_concept": "...",
+  "suggested_title": "...",
+  "mood": "...",
+  "colors": ["#...", "#..."],
+  "key_topics": ["...", "...", "..."],
+
+  "scene": "person_01 ...",
+  "subject_pose": "...",
+  "subject_expression": "...",
+  "subject_action": null,
+  "visual_elements": null,
+  "text_in_image": "...",
+  "background": "...",
+  "environment_effects": null,
+  "outfit_changes": null,
+
+  "camera_and_lighting_override": null
+}}
+
+Output ONLY the JSON object. No markdown fence. No extra prose.
+
+{thumbnail_style}
+"""
+
+
+# Camera and lighting of a concept or of the skeleton's base
+_CAMERA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "framing": {"type": "string"},
+        "equipment": {"type": "string"},
+        "lighting": {"type": "string"},
+        "composition": {"type": "string"},
+    },
+    "required": ["framing", "equipment", "lighting", "composition"],
+    "additionalProperties": False,
+}
+
+# Stage 1 answer. Its face_groups and characters are keyed by the people of the
+# video, so the schema is only checked here: Gran Sabio's native structured
+# output does not accept objects with free keys.
+SKELETON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "face_groups": {"type": "object"},
+        "characters": {"type": "object"},
+        "style_source": {"type": ["string", "null"]},
+        "style_analysis": {"type": ["object", "null"]},
+        "camera_and_lighting_base": _CAMERA_SCHEMA,
+        "colors_palette_base": {"type": "array", "items": {"type": "string"}},
+        "suggested_titles_pool": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "face_groups", "characters", "style_source", "style_analysis",
+        "camera_and_lighting_base", "colors_palette_base", "suggested_titles_pool",
+    ],
+}
+
+
+def skeleton_schema(reference_mapping):
+    """SKELETON_SCHEMA, plus the setting's description when setting photos are sent."""
+    if not environment_references(reference_mapping):
+        return SKELETON_SCHEMA
+    return {
+        **SKELETON_SCHEMA,
+        "properties": {**SKELETON_SCHEMA["properties"], "setting": {"type": "string", "minLength": 1}},
+        "required": [*SKELETON_SCHEMA["required"], "setting"],
+    }
+
+# Stage 2 answer, the JSON build_concept_prompt asks for. Sent to Gran Sabio as
+# the structured output schema and checked again here.
+CONCEPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "image_index": {"type": "integer"},
+        "concept_name": {"type": "string"},
+        "thumbnail_concept": {"type": "string"},
+        "suggested_title": {"type": "string"},
+        "mood": {"type": "string"},
+        "colors": {"type": "array", "items": {"type": "string"}},
+        "key_topics": {"type": "array", "items": {"type": "string"}},
+        "scene": {"type": "string"},
+        "subject_pose": {"type": "string"},
+        "subject_expression": {"type": "string"},
+        "subject_action": {"type": ["string", "null"]},
+        "visual_elements": {"type": ["array", "null"], "items": {"type": "string"}},
+        "text_in_image": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Exact visible wording requested for the image, including punctuation and accents; null for no lettering.",
+        },
+        "background": {"type": "string"},
+        "environment_effects": {"type": ["string", "null"]},
+        "outfit_changes": {
+            "type": ["array", "null"],
+            "items": {
+                "type": "object",
+                "properties": {"person_id": {"type": "string"}, "outfit": {"type": "string"}},
+                "required": ["person_id", "outfit"],
+                "additionalProperties": False,
+            },
+            "description": "Clothing that replaces the skeleton outfit of these people in this thumbnail; null keeps every outfit.",
+        },
+        "camera_and_lighting_override": {**_CAMERA_SCHEMA, "type": ["object", "null"]},
+    },
+    "required": [
+        "image_index", "concept_name", "thumbnail_concept", "suggested_title", "mood",
+        "colors", "key_topics", "scene", "subject_pose", "subject_expression",
+        "subject_action", "visual_elements", "text_in_image", "background",
+        "environment_effects", "outfit_changes", "camera_and_lighting_override",
+    ],
+    "additionalProperties": False,
+}
+
+# Gran Sabio accepts at most this many images in one generation request
+MAX_GRANSABIO_IMAGES = 20
 
 
 def generate_with_gransabio(
     prompt: str,
     config: PromptGenerationConfig,
     reference_image_base64: Optional[str] = None,
-    reference_images_base64: Optional[List[str]] = None
-) -> Optional[str]:
+    reference_images_base64: Optional[List[str]] = None,
+    json_schema: Optional[dict] = None,
+):
     """
-    Generate response using Gran Sabio LLM Engine.
+    Generate a JSON answer with Gran Sabio LLM Engine.
 
     Args:
         prompt: The prompt to send
         config: Generation configuration
         reference_image_base64: Optional single base64-encoded reference image
-        reference_images_base64: Optional list of base64-encoded images (max 20)
+        reference_images_base64: Optional list of base64-encoded images
+        json_schema: Structured output schema Gran Sabio makes the model follow
 
     Returns:
-        Generated response text or None on failure
+        The answer's content (text or already parsed JSON)
+
+    Raises:
+        GranSabioError: the request failed or came back empty
     """
     client = get_gransabio_client()
-    if not client:
-        logger.warning("Gran Sabio LLM not available, falling back to direct API")
-        return None
 
-    try:
-        # Get model (use default if not specified)
-        model = config.model or DEFAULT_MODELS.get(config.provider, "gpt-4o")
+    # Get model (use default if not specified)
+    model = resolve_text_model(config.provider, config.model)
 
-        # Build generation kwargs
-        # username is required when using images
-        gen_kwargs = {
-            "prompt": prompt,
-            "generator_model": model,
-            "username": GRANSABIO_USERNAME,
-            "qa_layers": [],  # Bypass QA for speed
-            "json_output": True,
-            "temperature": 0.8,
-            "max_iterations": 1,
-            "verbose": False,
-        }
+    # Build generation kwargs
+    # username is required when using images
+    gen_kwargs = {
+        "prompt": prompt,
+        "username": GRANSABIO_USERNAME,
+        "qa_layers": [],  # Bypass QA for speed
+        "json_output": True,
+        "temperature": 0.8,
+        "max_iterations": 1,
+        "verbose": False,
+        **text_generation_options(config.provider, model, config.thinking_enabled,
+                                  config.thinking_level, config.model_info,
+                                  vision=bool(reference_image_base64 or reference_images_base64)),
+    }
+    if json_schema is not None:
+        gen_kwargs["json_schema"] = json_schema
+        gen_kwargs["json_retry_without_iteration"] = True
+        gen_kwargs["content_type"] = "json"  # Avoid conflict with default "article"
+    if config.thinking_enabled:
+        logger.info(f"Using thinking mode: {config.thinking_level}")
 
-        # Add thinking mode if enabled (Gran Sabio handles token conversion)
-        if config.thinking_enabled:
-            level = config.thinking_level or "high"
-            gen_kwargs["thinking_level"] = level
-            logger.info(f"Using thinking mode: {level}")
+    # Handle reference images - Gran Sabio requires upload first, then reference by upload_id
+    images_to_upload = []
+    if reference_image_base64:
+        images_to_upload.append(reference_image_base64)
+    if reference_images_base64:
+        images_to_upload.extend(reference_images_base64)
+    if len(images_to_upload) > MAX_GRANSABIO_IMAGES:
+        raise GranSabioError(
+            f"{len(images_to_upload)} reference images given; Gran Sabio accepts at most {MAX_GRANSABIO_IMAGES}"
+        )
 
-        # Handle reference images - Gran Sabio requires upload first, then reference by upload_id
-        images_to_upload = []
-
-        # Single image (backward compatibility)
-        if reference_image_base64:
-            images_to_upload.append(reference_image_base64)
-
-        # Multiple images
-        if reference_images_base64:
-            images_to_upload.extend(reference_images_base64)
-
-        # Safety limit: Gran Sabio server accepts max 20 images
-        # (actual limit is already applied by generation_service based on user config)
-        images_to_upload = images_to_upload[:20]
-
-        # Upload images and build references
-        if images_to_upload:
-            image_refs = []
-            timestamp = int(time.time())
-
-            for i, img_b64 in enumerate(images_to_upload):
-                upload_id = upload_image_to_gransabio(
+    if images_to_upload:
+        timestamp = int(time.time())
+        gen_kwargs["images"] = [
+            {
+                "upload_id": upload_image_to_gransabio(
                     image_base64=img_b64,
                     filename=f"ref_frame_{timestamp}_{i}.jpg",
                     username=GRANSABIO_USERNAME
-                )
-                if upload_id:
-                    image_refs.append({
-                        "upload_id": upload_id,
-                        "username": GRANSABIO_USERNAME,
-                        "detail": GRANSABIO_IMAGE_DETAIL
-                    })
+                ),
+                "username": GRANSABIO_USERNAME,
+                "detail": GRANSABIO_IMAGE_DETAIL
+            }
+            for i, img_b64 in enumerate(images_to_upload)
+        ]
+        logger.info(f"Including {len(images_to_upload)} reference image(s) in prompt generation")
 
-            if image_refs:
-                gen_kwargs["images"] = image_refs
-                logger.info(f"Including {len(image_refs)} reference image(s) in prompt generation")
-            else:
-                logger.warning("Could not upload any reference images, proceeding without them")
-
-        logger.info(f"Generating prompts with Gran Sabio LLM ({config.provider}/{model})...")
+    logger.info(f"Generating prompts with Gran Sabio LLM ({config.provider}/{model})...")
+    try:
         result = client.generate(**gen_kwargs)
-
-        if result and result.get("content"):
-            return result["content"]
-        else:
-            logger.warning("Gran Sabio LLM returned empty content")
-            return None
-
     except Exception as e:
-        logger.error(f"Gran Sabio LLM generation error: {e}")
-        return None
+        raise GranSabioError(f"Gran Sabio LLM ({config.provider}/{model}) failed: {e}") from e
+
+    if not result or not result.get("content"):
+        raise GranSabioError(f"Gran Sabio LLM ({config.provider}/{model}) returned no content")
+    verify_local_execution(result, config.provider)
+    return result["content"]
 
 
-def generate_thumbnail_concepts_gransabio(
-    transcription: str,
-    video_title: str,
-    num_concepts: int = 5,
-    num_variations: int = 1,
-    cluster_description: Optional[str] = None,
-    config: Optional[PromptGenerationConfig] = None,
-    thumbnail_style: str = "",
-    selected_titles: Optional[List[str]] = None,
-    reference_image_base64: Optional[str] = None,
-    reference_images_base64: Optional[List[str]] = None
-) -> Optional[list]:
+def validated_json(content, schema: dict, what: str) -> dict:
+    """The JSON object of an LLM answer, checked against its schema.
+
+    ai_json_cleanroom pulls the JSON out of fences or surrounding prose and makes
+    only safe repairs. Raises GranSabioError naming the fields that do not fit.
     """
-    Generate thumbnail concepts using Gran Sabio LLM.
+    result = validate_ai_json(content, schema=schema)
+    if not result.json_valid:
+        problems = "; ".join(f"{issue.path}: {issue.message.rstrip('.')}" for issue in result.errors[:6])
+        truncated = " (the answer looks truncated)" if result.likely_truncated else ""
+        raise GranSabioError(f"Gran Sabio returned an invalid {what}{truncated}: {problems}")
+    return result.data
 
-    Args:
-        transcription: Video transcription text
-        video_title: Original video title
-        num_concepts: Number of concepts to generate
-        num_variations: Number of variations per concept
-        cluster_description: Optional context about reference images
-        config: Optional PromptGenerationConfig
-        thumbnail_style: Style guidance string
-        selected_titles: Optional list of user-selected titles to guide image generation
-        reference_image_base64: Optional single base64-encoded reference image
-        reference_images_base64: Optional list of base64-encoded images (max 20)
 
-    Returns:
-        List of concept dictionaries or None on failure
-    """
-    if config is None:
-        config = PromptGenerationConfig()
-
-    # Determine if we have any reference images
+def generate_skeleton_gransabio(
+    transcription,
+    video_title,
+    config,
+    cluster_description=None,
+    thumbnail_style="",
+    reference_image_base64=None,
+    reference_images_base64=None,
+    has_style_reference=False,
+    reference_mapping=None,
+):
+    """Stage 1: generate the identity/style/base skeleton via Gran Sabio."""
     has_reference = bool(reference_image_base64) or bool(reference_images_base64)
-
-    # Build the prompt (V1 legacy format for concept-based generation)
-    # Note: For image-based generation, use generate_thumbnail_images_gransabio instead
-    prompt = build_analysis_prompt(
+    prompt = build_skeleton_prompt(
         transcription=transcription,
         video_title=video_title,
-        num_concepts=num_concepts,
-        num_variations=num_variations,
         cluster_description=cluster_description,
         custom_instructions=config.custom_instructions,
-        history_prompts=config.history_prompts,
-        include_history=config.include_history,
         thumbnail_style=thumbnail_style,
-        selected_titles=selected_titles,
-        has_reference_image=has_reference
-    )
-
-    # Generate with Gran Sabio LLM (passing reference images if provided)
-    response = generate_with_gransabio(
-        prompt=prompt,
-        config=config,
-        reference_image_base64=reference_image_base64,
-        reference_images_base64=reference_images_base64
-    )
-
-    if not response:
-        return None
-
-    # Handle response - may be already parsed (list/dict) or string
-    try:
-        # If already a list (json_output=True returns parsed JSON), use directly
-        if isinstance(response, list):
-            logger.info(f"Gran Sabio LLM generated {len(response)} concepts successfully")
-            return response
-
-        # If already a dict (single concept), wrap in list
-        # This handles cases where LLM returns a single object instead of array
-        if isinstance(response, dict):
-            logger.warning("Gran Sabio LLM returned single concept (dict), wrapping in list")
-            return [response]
-
-        # If string, parse it
-        if isinstance(response, str):
-            # Clean response if needed
-            response = response.strip()
-
-            # Handle markdown code blocks
-            if "```json" in response:
-                start = response.find("```json") + 7
-                end = response.find("```", start)
-                response = response[start:end].strip()
-            elif "```" in response:
-                start = response.find("```") + 3
-                end = response.find("```", start)
-                response = response[start:end].strip()
-
-            data = orjson.loads(response)
-
-            if isinstance(data, list):
-                logger.info(f"Gran Sabio LLM generated {len(data)} concepts successfully")
-                return data
-            elif isinstance(data, dict):
-                # LLM returned single object instead of array - wrap it
-                logger.warning("Gran Sabio LLM returned single concept (parsed dict), wrapping in list")
-                return [data]
-            else:
-                logger.warning(f"Gran Sabio LLM returned unexpected type: {type(data)}")
-                return None
-
-        logger.warning(f"Unexpected response type: {type(response)}")
-        return None
-
-    except orjson.JSONDecodeError as e:
-        logger.error(f"Failed to parse Gran Sabio LLM response: {e}")
-        return None
-
-
-def generate_thumbnail_images_gransabio(
-    transcription: str,
-    video_title: str,
-    num_images: int = 5,
-    cluster_description: Optional[str] = None,
-    config: Optional[PromptGenerationConfig] = None,
-    thumbnail_style: str = "",
-    selected_titles: Optional[List[str]] = None,
-    reference_image_base64: Optional[str] = None,
-    reference_images_base64: Optional[List[str]] = None,
-    has_style_reference: bool = False
-) -> Optional[list]:
-    """
-    Generate thumbnail images using Gran Sabio LLM (flat structure, no variations).
-
-    Args:
-        transcription: Video transcription text
-        video_title: Original video title
-        num_images: Number of images to generate
-        cluster_description: Optional context about reference images
-        config: Optional PromptGenerationConfig
-        thumbnail_style: Style guidance string
-        selected_titles: Optional list of user-selected titles
-        reference_image_base64: Optional single base64-encoded reference image
-        reference_images_base64: Optional list of base64-encoded images (max 20)
-        has_style_reference: If True, the first image in references is a style guide
-
-    Returns:
-        List of image dictionaries or None on failure
-    """
-    if config is None:
-        config = PromptGenerationConfig()
-
-    # Determine if we have any reference images
-    has_reference = bool(reference_image_base64) or bool(reference_images_base64)
-
-    # Build the prompt using the new flat structure
-    prompt = build_analysis_prompt_images(
-        transcription=transcription,
-        video_title=video_title,
-        num_images=num_images,
-        cluster_description=cluster_description,
-        custom_instructions=config.custom_instructions,
-        history_prompts=config.history_prompts,
-        include_history=config.include_history,
-        thumbnail_style=thumbnail_style,
-        selected_titles=selected_titles,
+        has_reference_image=has_reference,
         has_style_reference=has_style_reference,
-        has_reference_image=has_reference
+        reference_mapping=reference_mapping,
     )
-
-    # Generate with Gran Sabio LLM
     response = generate_with_gransabio(
         prompt=prompt,
         config=config,
         reference_image_base64=reference_image_base64,
-        reference_images_base64=reference_images_base64
+        reference_images_base64=reference_images_base64,
     )
-
-    if not response:
-        return None
-
-    # Handle response
-    try:
-        if isinstance(response, list):
-            logger.info(f"Gran Sabio LLM generated {len(response)} images successfully")
-            return response
-
-        if isinstance(response, dict):
-            logger.warning("Gran Sabio LLM returned single image (dict), wrapping in list")
-            return [response]
-
-        if isinstance(response, str):
-            response = response.strip()
-
-            # Handle markdown code blocks
-            if "```json" in response:
-                start = response.find("```json") + 7
-                end = response.find("```", start)
-                response = response[start:end].strip()
-            elif "```" in response:
-                start = response.find("```") + 3
-                end = response.find("```", start)
-                response = response[start:end].strip()
-
-            data = orjson.loads(response)
-
-            if isinstance(data, list):
-                logger.info(f"Gran Sabio LLM generated {len(data)} images successfully")
-                return data
-            elif isinstance(data, dict):
-                logger.warning("Gran Sabio LLM returned single image (parsed dict), wrapping in list")
-                return [data]
-            else:
-                logger.warning(f"Gran Sabio LLM returned unexpected type: {type(data)}")
-                return None
-
-        logger.warning(f"Unexpected response type: {type(response)}")
-        return None
-
-    except orjson.JSONDecodeError as e:
-        logger.error(f"Failed to parse Gran Sabio LLM response: {e}")
-        return None
+    return validated_json(response, skeleton_schema(reference_mapping), "skeleton")
 
 
-# =============================================================================
-# HISTORY MANAGEMENT
-# =============================================================================
+def generate_concept_gransabio(
+    transcription,
+    video_title,
+    image_index,
+    total_images,
+    skeleton,
+    prior_concepts,
+    config,
+    thumbnail_style="",
+    selected_titles=None,
+    reference_mapping=None,
+):
+    """Stage 2: generate one thumbnail concept via Gran Sabio. No reference
+    images are re-sent — the identity and the setting already live in the skeleton."""
+    prompt = build_concept_prompt(
+        transcription=transcription,
+        video_title=video_title,
+        image_index=image_index,
+        total_images=total_images,
+        skeleton=skeleton,
+        prior_concepts=prior_concepts,
+        custom_instructions=config.custom_instructions,
+        history_prompts=config.history_prompts,
+        include_history=config.include_history,
+        selected_titles=selected_titles,
+        thumbnail_style=thumbnail_style,
+        facial_expression=config.facial_expression,
+        reference_mapping=reference_mapping,
+    )
+    response = generate_with_gransabio(
+        prompt=prompt,
+        config=config,
+        # No reference images: identity is in the skeleton.
+        json_schema=CONCEPT_SCHEMA,
+    )
+    concept = validated_json(response, CONCEPT_SCHEMA, f"concept {image_index}")
+    _check_outfit_changes(concept, skeleton, f"concept {image_index}")
+    return concept
+
+
+def _check_outfit_changes(concept: dict, skeleton: dict, what: str) -> None:
+    """A concept may only dress characters of the skeleton, once each, with an actual outfit."""
+    changes = concept["outfit_changes"] or []
+    people = [change["person_id"] for change in changes]
+    problems = [f"{person} is not a character of the skeleton"
+                for person in people if person not in skeleton["characters"]]
+    if len(people) != len(set(people)):
+        problems.append("a person is listed twice")
+    if any(not change["outfit"].strip() for change in changes):
+        problems.append("an outfit is empty")
+    if problems:
+        raise GranSabioError(f"Gran Sabio returned an invalid {what}: outfit_changes: {'; '.join(problems)}")
+
 
 def get_prompt_history_for_video(video_id: int, limit: int = 50) -> List[str]:
     """
@@ -1224,44 +1258,53 @@ def get_prompt_history_for_video(video_id: int, limit: int = 50) -> List[str]:
 # API ENDPOINT HELPERS
 # =============================================================================
 
-def get_available_models() -> dict:
+async def _model_catalog() -> dict:
+    """Gran Sabio's models by provider. Raises GranSabioError when it does not answer."""
+    try:
+        async with quick_gransabio_client() as client:
+            return await client.get_models()
+    except Exception as e:
+        raise GranSabioError(f"Gran Sabio's model list could not be loaded ({GRANSABIO_LLM_URL}): {e}") from e
+
+
+async def require_vision_model(provider: str, model: Optional[str]) -> dict:
+    """Fail unless Gran Sabio lists the thumbnail ideas model as one that sees images.
+
+    The skeleton request carries the face photos, so a text-only model would
+    only fail there, after the transcription. Raises GranSabioError naming it.
+    """
+    return _catalog_model(await _model_catalog(), provider, model, vision=True)
+
+
+async def get_available_models() -> dict:
     """
     Get available models directly from Gran Sabio LLM API.
 
     Fetches from GRANSABIO_LLM_URL/models endpoint.
     Returns dict mapping provider names to model lists.
+
+    Raises:
+        GranSabioError: Gran Sabio did not answer with its model list
     """
-    import requests
+    data = await _model_catalog()
 
-    try:
-        response = requests.get(f"{GRANSABIO_LLM_URL}/models", timeout=5)
-        response.raise_for_status()
-        data = response.json()
+    filtered = {}
+    for provider in TEXT_PROVIDER_NAMES:
+        if provider in data:
+            # Transform to simplified format for frontend
+            filtered[provider] = [
+                {
+                    "key": model.get("key", model.get("model_id", "")),
+                    "name": model.get("name", ""),
+                    "description": model.get("description", "")[:60] if model.get("description") else "",
+                    # Thumbnail ideas need it: their requests carry the face photos
+                    "vision": "vision" in (model.get("capabilities") or []),
+                    "reasoning": "reasoning" in (model.get("capabilities") or []),
+                    **({"pricing": model.get("pricing")} if provider == "openrouter" else {}),
+                }
+                for model in data[provider]
+                if provider not in CATALOG_TEXT_PROVIDERS or "text" in (model.get("capabilities") or [])
+            ]
 
-        # Filter to only include main providers (exclude openrouter, ollama)
-        main_providers = ["anthropic", "openai", "google", "xai"]
-        filtered = {}
-        for provider in main_providers:
-            if provider in data:
-                # Transform to simplified format for frontend
-                filtered[provider] = [
-                    {
-                        "key": model.get("key", model.get("model_id", "")),
-                        "name": model.get("name", ""),
-                        "description": model.get("description", "")[:60] if model.get("description") else ""
-                    }
-                    for model in data[provider]
-                ]
-
-        logger.info(f"Loaded {sum(len(v) for v in filtered.values())} models from Gran Sabio LLM")
-        return filtered
-
-    except Exception as e:
-        logger.warning(f"Could not fetch models from Gran Sabio LLM: {e}")
-        # Minimal fallback
-        return {
-            "anthropic": [{"key": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "description": "Default"}],
-            "openai": [{"key": "gpt-5.2", "name": "GPT-5.2", "description": "Default"}],
-            "google": [{"key": "gemini-3-flash-preview", "name": "Gemini 3 Flash", "description": "Default"}],
-            "xai": [{"key": "grok-4-1-fast-non-reasoning", "name": "Grok 4.1 Fast", "description": "Default"}],
-        }
+    logger.info(f"Loaded {sum(len(v) for v in filtered.values())} models from Gran Sabio LLM")
+    return filtered

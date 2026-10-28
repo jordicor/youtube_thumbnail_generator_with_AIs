@@ -2,35 +2,14 @@
 /* ============================= */
 
 /* Header button */
+/* The button itself is a .header-btn (style.css) */
 .task-queue-btn {
     position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    background-color: transparent;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.2s;
-    margin-right: 12px;
-}
-
-.task-queue-btn:hover {
-    border-color: var(--primary-color);
-    color: var(--primary-color);
 }
 
 .task-queue-btn.has-tasks {
-    border-color: var(--accent-color);
-    color: var(--accent-color);
-}
-
-.task-queue-icon {
-    font-size: 1.2rem;
+    border-color: var(--info);
+    color: var(--info);
 }
 
 /* Badge counter */
@@ -41,7 +20,7 @@
     min-width: 18px;
     height: 18px;
     padding: 0 5px;
-    background-color: var(--primary-color);
+    background-color: var(--primary);
     color: white;
     font-size: 0.7rem;
     font-weight: 600;
@@ -95,7 +74,7 @@
 }
 
 .task-queue-modal .modal-close:hover {
-    background-color: var(--surface-light);
+    background-color: var(--surface-3);
     color: var(--text);
 }
 
@@ -127,7 +106,7 @@
 }
 
 .task-section-count {
-    background-color: var(--surface-light);
+    background-color: var(--surface-3);
     padding: 2px 8px;
     border-radius: 10px;
     font-size: 0.75rem;
@@ -143,7 +122,7 @@
 }
 
 .task-item:hover {
-    background-color: var(--surface-light);
+    background-color: var(--surface-3);
 }
 
 .task-item-header {
@@ -167,7 +146,7 @@
 }
 
 .task-item-icon.analysis {
-    color: var(--accent-color);
+    color: var(--info);
 }
 
 .task-item-icon.generation {
@@ -181,15 +160,6 @@
 .task-item-details {
     flex: 1;
     min-width: 0;
-}
-
-.task-item-name {
-    font-size: 0.95rem;
-    font-weight: 500;
-    color: var(--text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
 
 .task-item-type {
@@ -210,8 +180,8 @@
 }
 
 .task-item-cancel:hover {
-    border-color: var(--error);
-    color: var(--error);
+    border-color: var(--danger);
+    color: var(--danger);
     background-color: rgba(255, 68, 68, 0.1);
 }
 
@@ -225,14 +195,14 @@
 .task-progress-bar {
     width: 100%;
     height: 6px;
-    background-color: var(--surface-light);
+    background-color: var(--surface-3);
     border-radius: 3px;
     overflow: hidden;
 }
 
 .task-progress-fill {
     height: 100%;
-    background-color: var(--accent-color);
+    background-color: var(--info);
     border-radius: 3px;
     transition: width 0.3s ease;
 }
@@ -297,7 +267,7 @@
 }
 
 .task-item-link:hover {
-    color: var(--primary-color);
+    color: var(--primary);
     text-decoration: underline;
 }
 

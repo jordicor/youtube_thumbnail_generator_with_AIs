@@ -1,155 +1,162 @@
 {% extends "base.html" %}
+{% from 'components/macros.html' import icon %}
 
-{% block title %}Videos - Thumbnail Generator{% endblock %}
+{% block title %}{{ t('index.title') }}{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <h1>{{ t('index.heading') }}</h1>
-    <div class="actions">
-        <button id="scanBtn" class="btn btn-secondary" disabled>
-            {{ t('index.scan_directory') }}
-        </button>
+    <div>
+        <h1>{{ t('index.heading') }}</h1>
+        <p class="page-subtitle" id="directorySubtitle"></p>
     </div>
-</div>
-
-<!-- Directory info bar -->
-<div class="directory-info-bar" id="directoryInfoBar" style="display: none;">
-    <div class="info-left">
-        <span class="info-stats" id="directoryStats">0 {{ t('video.count_other') }}</span>
-        <span class="info-time" id="directoryTime">{{ t('index.last_scan', time=t('time.never')) }}</span>
-    </div>
-    <div class="info-right">
-        <div class="filter-container">
-            <label for="statusFilter">{{ t('common.filter') }}:</label>
-            <select id="statusFilter" class="status-filter">
-                <option value="all">{{ t('index.filters.all') }}</option>
-                <option value="pending">{{ t('index.filters.pending') }}</option>
-                <option value="analyzed">{{ t('index.filters.analyzed') }}</option>
-                <option value="error">{{ t('index.filters.error') }}</option>
-                <option value="hidden">{{ t('index.filters.hidden') }}</option>
-            </select>
+    <div class="library-header-actions">
+        <div class="directory-selector" id="directorySelector">
+            <button type="button" class="directory-current" id="directoryCurrent" aria-haspopup="true" aria-expanded="false">
+                {{ icon('folder') }}
+                <span class="directory-name" id="directoryName">{{ t('header.select_directory') }}</span>
+                {{ icon('chevron-down', 'directory-arrow') }}
+            </button>
+            <div class="directory-dropdown" id="directoryDropdown">
+                <div class="directory-list" id="directoryList">
+                    <!-- Directories will be loaded here -->
+                </div>
+                <div class="directory-add">
+                    <input type="text" class="input" id="newDirectoryPath" placeholder="{{ t('header.directory_placeholder') }}">
+                    <button type="button" class="btn btn-primary btn-small" id="addDirectoryBtn">{{ icon('plus') }}<span>{{ t('header.add_directory') }}</span></button>
+                </div>
+            </div>
         </div>
+        <button type="button" id="scanBtn" class="btn btn-secondary" disabled>
+            {{ icon('refresh') }}<span>{{ t('index.scan_directory') }}</span>
+        </button>
     </div>
 </div>
 
-<!-- Selection bar -->
-<div class="selection-bar" id="selectionBar">
-    <div class="selection-bar-left">
-        <label class="checkbox-wrapper">
-            <input type="checkbox" id="selectAllCheckbox">
-            <span>{{ t('selection.select_all') }}</span>
+<div id="libraryControls" class="hidden">
+    <div class="library-controls">
+        <div class="search-field">
+            {{ icon('search') }}
+            <input type="search" class="input" id="videoSearch" placeholder="{{ t('index.search_placeholder') }}" autocomplete="off" maxlength="200">
+        </div>
+        <label class="library-sort">
+            <span>{{ t('index.sort_label') }}</span>
+            <select class="select" id="videoSort">
+                <option value="recent">{{ t('index.sort.recent') }}</option>
+                <option value="activity">{{ t('index.sort.activity') }}</option>
+                <option value="name">{{ t('index.sort.name') }}</option>
+                <option value="duration">{{ t('index.sort.duration') }}</option>
+            </select>
         </label>
-        <span class="selection-count" id="selectionCount">{{ t('selection.selected_count', count=0) }}</span>
     </div>
-    <div class="selection-bar-right">
-        <button id="analyzeSelectedBtn" class="btn btn-primary" disabled>
-            {{ t('index.analyze_selected') }}
-        </button>
-        <button id="hideSelectedBtn" class="btn btn-secondary" disabled>
-            {{ t('index.hide_selected') }}
-        </button>
+    <div class="library-controls">
+        <div class="filter-chips" id="filterChips"></div>
     </div>
-    <!-- Gmail-style selection banner -->
-    <div class="selection-banner" id="selectionBanner">
-        <span id="selectionBannerText"></span>
-        <button class="selection-banner-action" id="selectionBannerBtn"></button>
+    <div class="results-row">
+        <label>
+            <input type="checkbox" id="selectPageCheckbox" aria-label="{{ t('index.select_page') }}">
+            <span id="resultsSummary"></span>
+        </label>
     </div>
 </div>
 
-<!-- Video list -->
-<div class="video-grid" id="videoGrid">
-    <div class="empty-state">
-        <p>{{ t('directory.select_to_view') }}</p>
-        <p>{{ t('directory.use_selector') }}</p>
-    </div>
-</div>
+<div class="video-grid" id="videoGrid"></div>
 
 <!-- Pagination -->
-<div class="pagination-container" id="paginationContainer" style="display: none;">
+<div class="pagination-container hidden" id="paginationContainer">
     <div class="pagination-info">
-        <span id="paginationInfo">{{ t('pagination.showing', start=1, end=50, total=100) }}</span>
+        <span id="paginationInfo"></span>
     </div>
     <div class="pagination-controls">
-        <button class="pagination-btn" id="firstPageBtn" title="{{ t('pagination.first_page') }}">«</button>
-        <button class="pagination-btn" id="prevPageBtn" title="{{ t('pagination.prev_page') }}">‹</button>
+        <button type="button" class="pagination-btn" id="firstPageBtn" title="{{ t('pagination.first_page') }}">«</button>
+        <button type="button" class="pagination-btn" id="prevPageBtn" title="{{ t('pagination.prev_page') }}">‹</button>
         <div class="pagination-numbers" id="paginationNumbers"></div>
-        <button class="pagination-btn" id="nextPageBtn" title="{{ t('pagination.next_page') }}">›</button>
-        <button class="pagination-btn" id="lastPageBtn" title="{{ t('pagination.last_page') }}">»</button>
+        <button type="button" class="pagination-btn" id="nextPageBtn" title="{{ t('pagination.next_page') }}">›</button>
+        <button type="button" class="pagination-btn" id="lastPageBtn" title="{{ t('pagination.last_page') }}">»</button>
     </div>
+</div>
+
+<!-- Floating bulk actions, shown while videos are selected -->
+<div class="bulk-bar hidden" id="bulkBar" role="region" aria-label="{{ t('index.bulk.region') }}">
+    <span class="bulk-count" id="bulkCount"></span>
+    <button type="button" class="btn btn-ghost btn-small hidden" id="bulkSelectAll"></button>
+    <span class="bulk-divider"></span>
+    <button type="button" class="btn btn-primary btn-small" id="bulkAnalyze">{{ icon('play') }}<span>{{ t('index.bulk.analyze') }}</span></button>
+    <button type="button" class="btn btn-secondary btn-small" id="bulkHide">{{ icon('eye-off') }}<span>{{ t('index.bulk.hide') }}</span></button>
+    <button type="button" class="icon-btn" id="bulkClear" title="{{ t('index.bulk.clear') }}" aria-label="{{ t('index.bulk.clear') }}">{{ icon('x') }}</button>
 </div>
 
 <!-- Video card template -->
 <template id="videoCardTemplate">
-    <div class="video-card" data-id="">
+    <article class="video-card" data-id="">
         <div class="video-thumbnail">
-            <label class="card-checkbox" onclick="event.stopPropagation()">
-                <input type="checkbox" class="video-checkbox">
+            <label class="video-select" title="{{ t('common.select') }}">
+                <input type="checkbox" class="video-checkbox" aria-label="{{ t('common.select') }}">
             </label>
-            <img src="" alt="" onerror="this.src='/static/img/placeholder.svg'">
-            <span class="video-status"></span>
-            <!-- Analysis overlay -->
+            <img src="" alt="" loading="lazy" onerror="this.src='/static/img/placeholder.svg'">
+            <span class="status-pill"></span>
+            <span class="video-duration"></span>
             <div class="video-analysis-overlay">
-                <div class="overlay-spinner"></div>
+                {{ icon('loader', 'icon-lg icon-spin') }}
                 <span class="overlay-text">{{ t('analysis.analyzing') }}</span>
                 <span class="overlay-step"></span>
+                <div class="overlay-progress"><div class="overlay-progress-fill"></div></div>
             </div>
         </div>
-        <div class="video-info">
+        <div class="video-body">
             <h3 class="video-name"></h3>
-            <p class="video-meta"></p>
+            <div class="video-meta"></div>
         </div>
-        <div class="video-actions">
-            <button class="btn btn-primary btn-analyze">{{ t('index.card.analyze') }}</button>
-            <button class="btn btn-secondary btn-view">{{ t('index.card.view') }}</button>
-            <button class="btn btn-warning btn-reanalyze" title="{{ t('index.card.reanalyze') }}">{{ t('index.card.reanalyze') }}</button>
-            <button class="btn btn-secondary btn-hide" title="{{ t('index.card.hide') }}">{{ t('index.card.hide') }}</button>
-            <button class="btn btn-success btn-show" title="{{ t('index.card.show') }}">{{ t('index.card.show') }}</button>
+        <div class="video-footer">
+            <button type="button" class="btn btn-small video-primary-action"></button>
+            <button type="button" class="icon-btn video-more" aria-haspopup="menu" aria-expanded="false"
+                    title="{{ t('index.card.more') }}" aria-label="{{ t('index.card.more') }}">{{ icon('more') }}</button>
         </div>
-    </div>
+    </article>
 </template>
 
 {% endblock %}
 
 {% block scripts %}
 <script>
+    const PAGE_SIZE = 48;
+    const FILTERS = ['all', 'pending', 'processing', 'analyzed', 'completed', 'error', 'hidden'];
+    const SORTS = ['recent', 'activity', 'name', 'duration'];
+    const LOADING_CARDS = 8;
+
+    const getStatusView = ThumbnailApp.getVideoStatusView;
+
     // State
     let directories = [];
+    let directoriesLoaded = false;
     let currentDirectoryId = null;
-    let currentDirectory = null;
-    let currentStatusFilter = 'all';
-
-    // Pagination state
+    let currentFilter = 'all';
+    let currentSort = 'recent';
+    let currentSearch = '';
     let currentPage = 1;
-    const PAGE_SIZE = 50;
     let totalFilteredVideos = 0;
-    let allVideosSelected = false;  // Gmail-style global selection
+    let pageVideos = new Map();         // id -> video on the current page
+    let selectedIds = new Set();        // selected videos of the current page
+    let allMatchingSelected = false;    // Gmail-style: every video of the filter, across pages
 
     // DOM Elements
     const directorySelector = document.getElementById('directorySelector');
     const directoryCurrent = document.getElementById('directoryCurrent');
     const directoryName = document.getElementById('directoryName');
-    const directoryDropdown = document.getElementById('directoryDropdown');
     const directoryList = document.getElementById('directoryList');
+    const directorySubtitle = document.getElementById('directorySubtitle');
     const newDirectoryPath = document.getElementById('newDirectoryPath');
     const addDirectoryBtn = document.getElementById('addDirectoryBtn');
     const scanBtn = document.getElementById('scanBtn');
+    const libraryControls = document.getElementById('libraryControls');
+    const videoSearch = document.getElementById('videoSearch');
+    const videoSort = document.getElementById('videoSort');
+    const filterChips = document.getElementById('filterChips');
+    const resultsSummary = document.getElementById('resultsSummary');
+    const selectPageCheckbox = document.getElementById('selectPageCheckbox');
     const videoGrid = document.getElementById('videoGrid');
-    const directoryInfoBar = document.getElementById('directoryInfoBar');
-    const directoryStats = document.getElementById('directoryStats');
-    const directoryTime = document.getElementById('directoryTime');
-    const statusFilter = document.getElementById('statusFilter');
-
-    // Selection elements
-    const selectionBar = document.getElementById('selectionBar');
-    const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-    const selectionCount = document.getElementById('selectionCount');
-    const analyzeSelectedBtn = document.getElementById('analyzeSelectedBtn');
-    const hideSelectedBtn = document.getElementById('hideSelectedBtn');
-
-    // Selection banner elements (Gmail-style)
-    const selectionBanner = document.getElementById('selectionBanner');
-    const selectionBannerText = document.getElementById('selectionBannerText');
-    const selectionBannerBtn = document.getElementById('selectionBannerBtn');
+    const bulkBar = document.getElementById('bulkBar');
+    const bulkCount = document.getElementById('bulkCount');
+    const bulkSelectAll = document.getElementById('bulkSelectAll');
 
     // Pagination elements
     const paginationContainer = document.getElementById('paginationContainer');
@@ -162,26 +169,35 @@
 
     // Initialize
     document.addEventListener('DOMContentLoaded', () => {
-        loadDirectories();
-        setupDirectorySelector();
-        setupScan();
-        setupAddDirectory();
-        setupSelection();
-        setupStatusFilter();
-        setupPagination();
-
-        // Load saved directory from localStorage
         const savedDirId = localStorage.getItem('activeDirectoryId');
         if (savedDirId) {
             currentDirectoryId = parseInt(savedDirId);
         }
-
-        // Load saved filter from localStorage
         const savedFilter = localStorage.getItem('videoStatusFilter');
-        if (savedFilter) {
-            currentStatusFilter = savedFilter;
-            statusFilter.value = savedFilter;
+        if (FILTERS.includes(savedFilter)) {
+            currentFilter = savedFilter;
         }
+        const savedSort = localStorage.getItem('videoSort');
+        if (SORTS.includes(savedSort)) {
+            currentSort = savedSort;
+        }
+        videoSort.value = currentSort;
+
+        // Until the directories arrive: their videos' shape if one was open, else a neutral wait
+        if (currentDirectoryId) {
+            directoryName.textContent = t('common.loading');
+            directorySubtitle.innerHTML = skeletonText(260);
+            showLoadingState();
+        } else {
+            showDirectoriesLoadingState();
+        }
+        loadDirectories();
+        setupDirectorySelector();
+        setupScan();
+        setupAddDirectory();
+        setupControls();
+        setupSelection();
+        setupPagination();
 
         // Setup TaskQueue integration for analysis progress tracking
         setupTaskQueueIntegration();
@@ -192,26 +208,39 @@
     // ========================================================================
 
     function setupDirectorySelector() {
-        // Toggle dropdown
         directoryCurrent.addEventListener('click', (e) => {
             e.stopPropagation();
-            directorySelector.classList.toggle('open');
+            toggleDirectoryDropdown();
         });
 
         // Close on outside click
         document.addEventListener('click', (e) => {
             if (!directorySelector.contains(e.target)) {
-                directorySelector.classList.remove('open');
+                toggleDirectoryDropdown(false);
             }
         });
+    }
+
+    function toggleDirectoryDropdown(open = !directorySelector.classList.contains('open')) {
+        directorySelector.classList.toggle('open', open);
+        directoryCurrent.setAttribute('aria-expanded', String(open));
+        if (open && directories.length === 0) {
+            newDirectoryPath.focus();
+        }
     }
 
     async function loadDirectories() {
         try {
             const response = await fetch('/api/directories');
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = await response.json();
             directories = data.directories;
+            directoriesLoaded = true;
             renderDirectoryList();
+            // Directories whose path did not answer here moved to an alternative path
+            for (const dir of directories.filter(d => d.switched_from)) {
+                ThumbnailApp.showToast(t('directory.switched', {name: getDirectoryLabel(dir), path: dir.path}), 'info');
+            }
 
             // If we have a saved directory ID, select it
             if (currentDirectoryId) {
@@ -220,14 +249,30 @@
                     selectDirectory(dir);
                 } else {
                     // Saved directory no longer exists
-                    localStorage.removeItem('activeDirectoryId');
-                    currentDirectoryId = null;
+                    clearDirectorySelection();
                 }
             }
+            if (!currentDirectoryId) showNoDirectoryState();
         } catch (error) {
             console.error('Error loading directories:', error);
             ThumbnailApp.showToast(t('errors.load_directories'), 'error');
+            // On the first load nothing else would replace the loading state
+            if (!directoriesLoaded) {
+                directoryName.textContent = t('header.select_directory');
+                directorySubtitle.textContent = '';
+                libraryControls.classList.add('hidden');
+                videoGrid.innerHTML = `<div class="error">${t('errors.load_directories')}: ${escapeHtml(error.message)}</div>`;
+            }
         }
+    }
+
+    function getDirectoryLabel(dir) {
+        return dir.name || dir.path.split(/[/\\]/).pop();
+    }
+
+    function directoryPathsTitle(dir) {
+        if (dir.alternative_paths.length === 0) return dir.path;
+        return [dir.path, t('directory.alternatives_label') + ':', ...dir.alternative_paths].join('\n');
     }
 
     function renderDirectoryList() {
@@ -242,40 +287,36 @@
         }
 
         directoryList.innerHTML = directories.map(dir => `
-            <div class="directory-item ${dir.id === currentDirectoryId ? 'active' : ''}"
-                 data-id="${dir.id}">
+            <div class="directory-item ${dir.id === currentDirectoryId ? 'active' : ''}" data-id="${dir.id}">
                 <div class="directory-item-info">
-                    <div class="directory-item-name">${escapeHtml(dir.name || dir.path.split(/[/\\]/).pop())}</div>
-                    <div class="directory-item-path">${escapeHtml(dir.path)}</div>
+                    <div class="directory-item-name">${escapeHtml(getDirectoryLabel(dir))}</div>
+                    <div class="directory-item-path" title="${escapeHtml(directoryPathsTitle(dir))}">${escapeHtml(dir.path)}</div>
                 </div>
                 <div class="directory-item-meta">
                     <div class="directory-item-count">${t(dir.video_count === 1 ? 'video.count_one' : 'video.count_other', {count: dir.video_count})}</div>
-                    <div class="directory-item-time">${dir.time_ago}</div>
+                    <div class="directory-item-time">${escapeHtml(dir.time_ago)}</div>
                 </div>
-                <button class="directory-item-delete" data-id="${dir.id}" title="${t('common.delete')}">×</button>
+                <button type="button" class="icon-btn directory-item-edit" data-id="${dir.id}"
+                        title="${t('directory.edit_title')}" aria-label="${t('directory.edit_title')}">${ThumbnailApp.icon('pencil', 'icon-sm')}</button>
+                <button type="button" class="icon-btn directory-item-delete" data-id="${dir.id}"
+                        title="${t('directory.delete_title')}" aria-label="${t('directory.delete_title')}">${ThumbnailApp.icon('trash', 'icon-sm')}</button>
             </div>
         `).join('');
 
-        // Add click handlers
         directoryList.querySelectorAll('.directory-item').forEach(item => {
             item.addEventListener('click', (e) => {
-                if (e.target.classList.contains('directory-item-delete')) {
-                    return; // Handle delete separately
+                if (e.target.closest('.directory-item-edit, .directory-item-delete')) {
+                    return; // Handled by the edit and delete buttons
                 }
-                const dirId = parseInt(item.dataset.id);
-                const dir = directories.find(d => d.id === dirId);
-                if (dir) {
-                    selectDirectory(dir);
-                    directorySelector.classList.remove('open');
-                }
+                const dir = directories.find(d => d.id === parseInt(item.dataset.id));
+                selectDirectory(dir);
+                toggleDirectoryDropdown(false);
             });
         });
 
-        // Delete handlers
         directoryList.querySelectorAll('.directory-item-delete').forEach(btn => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                const dirId = parseInt(btn.dataset.id);
                 const confirmed = await ThumbnailApp.showModal({
                     title: t('directory.delete_title'),
                     htmlMessage: t('directory.delete_confirm_short') + '<br><br>' + t('directory.delete_videos_remain'),
@@ -284,58 +325,70 @@
                     cancelText: t('common.cancel')
                 });
                 if (confirmed) {
-                    await deleteDirectory(dirId);
+                    await deleteDirectory(parseInt(btn.dataset.id));
                 }
+            });
+        });
+
+        directoryList.querySelectorAll('.directory-item-edit').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleDirectoryDropdown(false);
+                editDirectory(directories.find(d => d.id === parseInt(btn.dataset.id)));
             });
         });
     }
 
     function selectDirectory(dir) {
+        const changed = currentDirectoryId !== dir.id;
         currentDirectoryId = dir.id;
-        currentDirectory = dir;
         localStorage.setItem('activeDirectoryId', dir.id);
 
-        // Update UI
-        directoryName.textContent = dir.name || dir.path.split(/[/\\]/).pop();
+        directoryName.textContent = getDirectoryLabel(dir);
+        directoryCurrent.title = dir.path;
         scanBtn.disabled = false;
+        updateDirectorySubtitle(dir);
 
-        // Mark as active in list
         directoryList.querySelectorAll('.directory-item').forEach(item => {
             item.classList.toggle('active', parseInt(item.dataset.id) === dir.id);
         });
 
-        // Show info bar
-        updateDirectoryInfoBar(dir);
-
-        // Load videos for this directory
-        loadVideosForDirectory(dir.id);
+        if (changed) {
+            currentPage = 1;
+            clearSelection();
+            showLoadingState();
+        }
+        loadVideos();
     }
 
-    function updateDirectoryInfoBar(dir) {
-        directoryInfoBar.style.display = 'flex';
-        // Stats will be updated by updateFilteredStats after videos load
-        directoryTime.textContent = t('index.last_scan', {time: dir.time_ago});
+    function clearDirectorySelection() {
+        currentDirectoryId = null;
+        localStorage.removeItem('activeDirectoryId');
+        directoryName.textContent = t('header.select_directory');
+        directoryCurrent.title = '';
+        directorySubtitle.textContent = '';
+        scanBtn.disabled = true;
+        libraryControls.classList.add('hidden');
+        clearSelection();
+    }
+
+    function updateDirectorySubtitle(dir) {
+        directorySubtitle.textContent = t('index.subtitle', {
+            videos: t(dir.video_count === 1 ? 'video.count_one' : 'video.count_other', {count: dir.video_count}),
+            time: dir.time_ago
+        });
     }
 
     async function deleteDirectory(dirId) {
         try {
-            const response = await fetch(`/api/directories/${dirId}`, {
-                method: 'DELETE'
-            });
-
+            const response = await fetch(`/api/directories/${dirId}`, { method: 'DELETE' });
             if (!response.ok) {
-                throw new Error('Error deleting directory');
+                throw new Error(`HTTP ${response.status}`);
             }
 
-            // If we deleted the current directory, clear selection
             if (currentDirectoryId === dirId) {
-                currentDirectoryId = null;
-                currentDirectory = null;
-                localStorage.removeItem('activeDirectoryId');
-                directoryName.textContent = t('header.select_directory');
-                scanBtn.disabled = true;
-                directoryInfoBar.style.display = 'none';
-                showEmptyState();
+                clearDirectorySelection();
+                showNoDirectoryState();
             }
 
             await loadDirectories();
@@ -347,12 +400,139 @@
     }
 
     // ========================================================================
+    // EDIT DIRECTORY
+    // ========================================================================
+
+    // Videos named when a new path lacks some; the rest are counted
+    const MISSING_VIDEOS_SHOWN = 8;
+
+    /**
+     * Ask for a directory's name and path and save them. A new path keeps the
+     * directory's videos with their analysis; if some videos are not in it,
+     * changing it needs a second confirmation.
+     * @param {Object} dir - Directory as listed by /api/directories
+     */
+    async function editDirectory(dir) {
+        let values = { name: dir.name || '', path: dir.path, alternative_paths: dir.alternative_paths };
+        // The form reopens with what was typed until it is saved or cancelled
+        while ((values = await askDirectoryValues(values))) {
+            if (!values.path) {
+                ThumbnailApp.showToast(t('errors.enter_directory_path'), 'error');
+                continue;
+            }
+            try {
+                let response = await putDirectory(dir.id, values, false);
+                if (response.status === 409) {
+                    const { detail } = await response.json();
+                    if (!await confirmMissingVideos(detail)) continue;
+                    response = await putDirectory(dir.id, values, true);
+                }
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || `HTTP ${response.status}`);
+                }
+            } catch (error) {
+                console.error('Error updating directory:', error);
+                ThumbnailApp.showToast(error.message, 'error');
+                continue;
+            }
+
+            await loadDirectories();
+            ThumbnailApp.showToast(t('directory.updated'), 'success');
+            return;
+        }
+    }
+
+    /**
+     * Show the directory form.
+     * @param {Object} values - Name, path and alternative_paths the form starts with
+     * @returns {Promise<Object|null>} Typed name, path and alternative_paths, null if cancelled
+     */
+    async function askDirectoryValues(values) {
+        const confirmed = ThumbnailApp.showModal({
+            title: t('directory.edit_title'),
+            htmlMessage: `
+                <div class="form-group">
+                    <label for="editDirectoryName">${t('directory.name_label')}</label>
+                    <input type="text" id="editDirectoryName" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="editDirectoryPath">${t('directory.path_label')}</label>
+                    <input type="text" id="editDirectoryPath" autocomplete="off" spellcheck="false">
+                    <span class="form-hint">${t('directory.edit_path_hint')}</span>
+                </div>
+                <div class="form-group">
+                    <label for="editDirectoryAlternatives">${t('directory.alternatives_label')}</label>
+                    <textarea class="input directory-alternatives" id="editDirectoryAlternatives"
+                              rows="2" spellcheck="false"></textarea>
+                    <span class="form-hint">${t('directory.alternatives_hint')}</span>
+                </div>
+            `,
+            confirmText: t('common.save'),
+            cancelText: t('common.cancel')
+        });
+        // The modal's body is in the page as soon as it opens
+        const nameInput = document.getElementById('editDirectoryName');
+        const pathInput = document.getElementById('editDirectoryPath');
+        const alternativesInput = document.getElementById('editDirectoryAlternatives');
+        nameInput.value = values.name;
+        pathInput.value = values.path;
+        alternativesInput.value = values.alternative_paths.join('\n');
+        pathInput.focus();
+
+        if (!await confirmed) return null;
+        return {
+            name: nameInput.value.trim(),
+            path: pathInput.value.trim(),
+            alternative_paths: alternativesInput.value.split('\n').map(line => line.trim()).filter(Boolean)
+        };
+    }
+
+    function putDirectory(dirId, values, allowMissingVideos) {
+        return fetch(`/api/directories/${dirId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...values, allow_missing_videos: allowMissingVideos })
+        });
+    }
+
+    /**
+     * Ask whether to change the path although some videos are not in it.
+     * @param {Object} detail - 409 detail: missing (paths relative to the directory, visible
+     *     videos first), hidden (how many of them are hidden) and total (videos of the directory)
+     * @returns {Promise<boolean>} True to change it anyway
+     */
+    function confirmMissingVideos({ missing, hidden, total }) {
+        const names = missing.slice(0, MISSING_VIDEOS_SHOWN)
+            .map(path => `<li>${escapeHtml(path)}</li>`).join('');
+        const more = missing.length - MISSING_VIDEOS_SHOWN;
+        let hiddenNote = '';
+        if (hidden === missing.length) {
+            hiddenNote = t('directory.missing_videos_all_hidden');
+        } else if (hidden > 0) {
+            hiddenNote = t('directory.missing_videos_some_hidden', {count: hidden});
+        }
+        return ThumbnailApp.showModal({
+            title: t('directory.missing_videos_title'),
+            htmlMessage: `
+                <p>${t('directory.missing_videos_message', {missing: missing.length, total})} ${hiddenNote}</p>
+                <ul class="missing-videos-list">${names}</ul>
+                ${more > 0 ? `<p>${t('directory.missing_videos_more', {count: more})}</p>` : ''}
+                <p>${t('directory.missing_videos_confirm')}</p>
+            `,
+            type: 'warning',
+            confirmText: t('directory.change_anyway'),
+            cancelText: t('common.back')
+        });
+    }
+
+    // ========================================================================
     // ADD DIRECTORY
     // ========================================================================
 
     function setupAddDirectory() {
         addDirectoryBtn.addEventListener('click', addDirectory);
-        newDirectoryPath.addEventListener('keypress', (e) => {
+        newDirectoryPath.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 addDirectory();
             }
@@ -367,7 +547,6 @@
         }
 
         addDirectoryBtn.disabled = true;
-        addDirectoryBtn.textContent = t('directory.adding');
 
         try {
             const response = await fetch('/api/directories', {
@@ -378,19 +557,17 @@
 
             if (!response.ok) {
                 const error = await response.json();
-                throw new Error(error.detail || 'Error adding directory');
+                throw new Error(error.detail || `HTTP ${response.status}`);
             }
 
             const newDir = await response.json();
             newDirectoryPath.value = '';
 
             await loadDirectories();
+            selectDirectory(directories.find(d => d.id === newDir.id));
+            toggleDirectoryDropdown(false);
 
-            // Auto-select the new directory and scan it
-            selectDirectory(newDir);
-            directorySelector.classList.remove('open');
-
-            // Auto-scan since it's new
+            // A new directory has never been scanned
             await scanDirectory();
 
             ThumbnailApp.showToast(t('directory.added'), 'success');
@@ -399,269 +576,337 @@
             ThumbnailApp.showToast(error.message, 'error');
         } finally {
             addDirectoryBtn.disabled = false;
-            addDirectoryBtn.textContent = t('header.add_directory');
         }
+    }
+
+    // ========================================================================
+    // SEARCH, SORT AND FILTERS
+    // ========================================================================
+
+    function setupControls() {
+        const applySearch = ThumbnailApp.debounce(() => {
+            const value = videoSearch.value.trim();
+            if (value === currentSearch) return;
+            currentSearch = value;
+            currentPage = 1;
+            clearSelection();
+            loadVideos();
+        }, 300);
+        videoSearch.addEventListener('input', applySearch);
+
+        videoSort.addEventListener('change', () => {
+            currentSort = videoSort.value;
+            localStorage.setItem('videoSort', currentSort);
+            currentPage = 1;
+            clearSelection();
+            loadVideos();
+        });
+    }
+
+    function setFilter(filter) {
+        if (filter === currentFilter) return;
+        currentFilter = filter;
+        localStorage.setItem('videoStatusFilter', filter);
+        currentPage = 1;
+        clearSelection();
+        loadVideos();
+    }
+
+    // Without counts (still loading) each count is a placeholder
+    function renderFilterChips(counts) {
+        filterChips.innerHTML = FILTERS.map(filter => `
+            <button type="button" class="chip ${filter === currentFilter ? 'active' : ''} ${counts?.[filter] === 0 ? 'empty' : ''}"
+                    data-filter="${filter}" aria-pressed="${filter === currentFilter}">
+                <span>${t('index.filters.' + filter)}</span>
+                ${counts ? `<span class="chip-count">${counts[filter]}</span>` : '<span class="chip-count skeleton"></span>'}
+            </button>
+        `).join('');
+
+        filterChips.querySelectorAll('.chip').forEach(chip => {
+            chip.addEventListener('click', () => setFilter(chip.dataset.filter));
+        });
     }
 
     // ========================================================================
     // VIDEOS
     // ========================================================================
 
-    async function loadVideosForDirectory(directoryId, filter = null, page = 1) {
-        videoGrid.innerHTML = '<div class="loading">' + t('common.loading') + '</div>';
-        showSelectionBar(false);
+    async function loadVideos() {
+        const directoryId = currentDirectoryId;
         hidePagination();
 
-        // Use provided filter or current global filter
-        const activeFilter = filter !== null ? filter : currentStatusFilter;
-
-        // Calculate pagination offset
-        const skip = (page - 1) * PAGE_SIZE;
+        const params = new URLSearchParams({
+            status: currentFilter,
+            sort: currentSort,
+            skip: (currentPage - 1) * PAGE_SIZE,
+            limit: PAGE_SIZE
+        });
+        if (currentSearch) {
+            params.set('search', currentSearch);
+        }
 
         try {
-            let url = `/api/directories/${directoryId}/videos?skip=${skip}&limit=${PAGE_SIZE}`;
-            if (activeFilter && activeFilter !== 'all') {
-                url += `&status=${activeFilter}`;
-            }
-            const response = await fetch(url);
+            const response = await fetch(`/api/directories/${directoryId}/videos?${params}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = await response.json();
 
-            // Update directory info
-            currentDirectory = data.directory;
-            updateDirectoryInfoBar(data.directory);
+            // A newer directory selection superseded this request
+            if (directoryId !== currentDirectoryId) return;
 
-            // Store total for pagination
             totalFilteredVideos = data.total;
-            currentPage = page;
+            updateDirectorySubtitle(data.directory);
+            renderFilterChips(data.counts);
+            resultsSummary.textContent = t(data.total === 1 ? 'index.results_one' : 'index.results_other', {count: data.total});
 
-            if (data.videos.length === 0) {
-                let emptyMessage = '';
-                if (activeFilter === 'pending') {
-                    emptyMessage = `
-                        <div class="empty-state">
-                            <p>${t('empty_state.no_pending')}</p>
-                            <p>${t('empty_state.change_filter')}</p>
-                        </div>
-                    `;
-                } else if (activeFilter === 'analyzed') {
-                    emptyMessage = `
-                        <div class="empty-state">
-                            <p>${t('empty_state.no_analyzed')}</p>
-                            <p>${t('empty_state.analyze_hint')}</p>
-                        </div>
-                    `;
-                } else if (activeFilter === 'error') {
-                    emptyMessage = `
-                        <div class="empty-state">
-                            <p>${t('empty_state.no_errors')}</p>
-                        </div>
-                    `;
-                } else if (activeFilter === 'hidden') {
-                    emptyMessage = `
-                        <div class="empty-state">
-                            <p>${t('empty_state.no_hidden')}</p>
-                            <p>${t('empty_state.hidden_hint')}</p>
-                        </div>
-                    `;
-                } else {
-                    emptyMessage = `
-                        <div class="empty-state">
-                            <p>${t('empty_state.no_videos')}</p>
-                            <p>${t('empty_state.scan_hint')}</p>
-                        </div>
-                    `;
-                }
-                videoGrid.innerHTML = emptyMessage;
-                showSelectionBar(false);
-                // Still update stats for empty state (data.total is 0 here)
-                updateFilteredStats(data.total, data.directory.video_count, data.directory.hidden_count, activeFilter);
+            // The page may have become empty (e.g. after hiding its last videos)
+            if (data.videos.length === 0 && currentPage > 1) {
+                currentPage = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+                loadVideos();
                 return;
             }
 
-            videoGrid.innerHTML = '';
-            for (const video of data.videos) {
-                const card = createVideoCard(video);
-                videoGrid.appendChild(card);
-            }
+            pageVideos = new Map(data.videos.map(v => [v.id, v]));
+            // Keep only the selection that is still on this page
+            selectedIds = new Set([...selectedIds].filter(id => pageVideos.has(id)));
 
-            // Update stats to show filtered count (use data.total for accurate count, not data.videos.length which is limited by pagination)
-            updateFilteredStats(data.total, data.directory.video_count, data.directory.hidden_count, activeFilter);
-
-            // Show selection bar when there are videos
-            showSelectionBar(true);
-
-            // If global selection is active, mark all checkboxes on this page
-            if (allVideosSelected) {
-                const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
-                checkboxes.forEach(cb => {
-                    cb.checked = true;
-                    updateCardSelection(cb);
-                });
-                selectAllCheckbox.checked = true;
+            if (data.videos.length === 0) {
+                renderEmptyState(data.counts);
+            } else {
+                videoGrid.replaceChildren(...data.videos.map(createVideoCard));
+                initializeActiveAnalysisOverlays();
             }
 
             updateSelectionUI();
-            updateSelectionBanner();
-
-            // Show pagination if needed
             if (totalFilteredVideos > PAGE_SIZE) {
                 renderPagination();
             }
         } catch (error) {
             console.error('Error loading videos:', error);
             videoGrid.innerHTML = `<div class="error">${t('errors.load_videos')}: ${escapeHtml(error.message)}</div>`;
-            showSelectionBar(false);
         }
     }
 
-    function showEmptyState() {
+    function renderEmptyState(counts) {
+        let iconName = 'info';
+        let title;
+        let hint = '';
+        let action = null;
+
+        if (currentSearch) {
+            iconName = 'search';
+            title = t('index.empty.no_search_results', {query: currentSearch});
+            hint = t('index.empty.no_search_results_hint');
+            action = { label: t('index.empty.clear_search'), run: () => { videoSearch.value = ''; videoSearch.dispatchEvent(new Event('input')); } };
+        } else if (currentFilter === 'all' && counts.hidden === 0) {
+            iconName = 'film';
+            title = t('empty_state.no_videos');
+            hint = t('empty_state.scan_hint');
+            action = { label: t('index.scan_directory'), run: scanDirectory };
+        } else if (currentFilter === 'all') {
+            title = t('index.empty.all_hidden');
+            action = { label: t('index.filters.hidden'), run: () => setFilter('hidden') };
+        } else {
+            title = t('index.empty.filter_' + currentFilter);
+            action = { label: t('index.empty.show_all'), run: () => setFilter('all') };
+        }
+
         videoGrid.innerHTML = `
             <div class="empty-state">
-                <p>${t('directory.select_to_view')}</p>
-                <p>${t('directory.use_selector')}</p>
+                ${ThumbnailApp.icon(iconName, 'icon-xl')}
+                <h3>${escapeHtml(title)}</h3>
+                ${hint ? `<p>${escapeHtml(hint)}</p>` : ''}
+                ${action ? `<button type="button" class="btn btn-secondary">${escapeHtml(action.label)}</button>` : ''}
             </div>
         `;
+        if (action) {
+            videoGrid.querySelector('.empty-state .btn').addEventListener('click', action.run);
+        }
+    }
+
+    function skeletonText(width) {
+        return `<span class="skeleton skeleton-text" style="width: ${width}px"></span>`;
+    }
+
+    // A directory is open and its videos are on their way: controls and cards hold their place
+    function showLoadingState() {
+        libraryControls.classList.remove('hidden');
+        renderFilterChips(null);
+        resultsSummary.innerHTML = skeletonText(64);
+        const card = `
+            <div class="video-skeleton" aria-hidden="true">
+                <div class="video-skeleton-thumb skeleton"></div>
+                <div class="video-body">
+                    <span class="skeleton skeleton-line"></span>
+                    <span class="skeleton skeleton-line skeleton-line-short"></span>
+                </div>
+                <div class="video-footer">
+                    <span class="skeleton skeleton-button"></span>
+                </div>
+            </div>
+        `;
+        videoGrid.innerHTML = `<span class="visually-hidden" role="status">${t('common.loading')}</span>`
+            + card.repeat(LOADING_CARDS);
+    }
+
+    // Without a directory open, the page cannot tell yet what comes: videos or the choice of one
+    function showDirectoriesLoadingState() {
+        videoGrid.innerHTML = `
+            <div class="library-loading" role="status">
+                <div class="loading-spinner"></div>
+                <span>${t('common.loading')}</span>
+            </div>
+        `;
+    }
+
+    function showNoDirectoryState() {
+        // With directories saved (another browser, cleared storage) the step is to pick one
+        const title = directories.length > 0
+            ? t('index.empty.pick_directory_title', {count: directories.length})
+            : t('index.empty.no_directory_title');
+        const hint = directories.length > 0 ? t('index.empty.pick_directory_hint') : t('index.empty.no_directory_hint');
+        videoGrid.innerHTML = `
+            <div class="empty-state">
+                ${ThumbnailApp.icon('folder', 'icon-xl')}
+                <h3>${escapeHtml(title)}</h3>
+                <p>${escapeHtml(hint)}</p>
+                <button type="button" class="btn btn-primary">${t('index.empty.choose_directory')}</button>
+            </div>
+        `;
+        videoGrid.querySelector('.empty-state .btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleDirectoryDropdown(true);
+        });
     }
 
     function createVideoCard(video) {
         const template = document.getElementById('videoCardTemplate');
         const card = template.content.cloneNode(true).querySelector('.video-card');
+        const view = getStatusView(video.status);
+        const isHiddenView = currentFilter === 'hidden';
+        const name = ThumbnailApp.formatVideoName(video.filename);
 
         card.dataset.id = video.id;
         card.dataset.status = video.status;
-        card.querySelector('.video-name').textContent = video.filename;
-        card.querySelector('.video-status').textContent = getStatusLabel(video.status);
-        card.querySelector('.video-status').className = `video-status status-${video.status}`;
 
-        const duration = video.duration_seconds
-            ? `${Math.floor(video.duration_seconds / 60)}:${String(Math.floor(video.duration_seconds % 60)).padStart(2, '0')}`
-            : t('common.na');
-        card.querySelector('.video-meta').textContent = t('video.duration') + ': ' + duration;
+        const nameEl = card.querySelector('.video-name');
+        nameEl.textContent = name;
+        nameEl.title = name;
 
-        // Thumbnail
         const img = card.querySelector('img');
         img.src = `/api/videos/${video.id}/thumbnail`;
+        img.alt = name;
 
-        // Checkbox for selection
+        const pill = card.querySelector('.status-pill');
+        pill.textContent = t(view.label);
+        pill.classList.add(`tone-${view.tone}`);
+        if (video.status === 'error' && video.error_message) {
+            pill.title = video.error_message;
+        }
+
+        const duration = card.querySelector('.video-duration');
+        if (video.duration_seconds) {
+            duration.textContent = ThumbnailApp.formatDuration(video.duration_seconds);
+        } else {
+            duration.remove();
+        }
+
+        card.querySelector('.video-meta').innerHTML = renderVideoMeta(video, view);
+
+        // Selection
         const checkbox = card.querySelector('.video-checkbox');
-        checkbox.addEventListener('change', () => {
-            updateCardSelection(checkbox);
-            // If unchecking, reset global selection
-            if (!checkbox.checked && allVideosSelected) {
-                allVideosSelected = false;
-            }
-            updateSelectionUI();
-            updateSelectionBanner();
-        });
+        checkbox.checked = allMatchingSelected || selectedIds.has(video.id);
+        card.classList.toggle('selected', checkbox.checked);
+        checkbox.addEventListener('change', () => toggleVideoSelection(video.id, checkbox.checked));
 
-        // Actions
-        const analyzeBtn = card.querySelector('.btn-analyze');
-        const viewBtn = card.querySelector('.btn-view');
-        const reanalyzeBtn = card.querySelector('.btn-reanalyze');
-        const hideBtn = card.querySelector('.btn-hide');
-        const showBtn = card.querySelector('.btn-show');
+        // Primary action and the "more" menu
+        const primary = card.querySelector('.video-primary-action');
+        const moreBtn = card.querySelector('.video-more');
+        const openable = view.kind === 'ready';
 
-        // Determine if we're in hidden view
-        const isHiddenView = currentStatusFilter === 'hidden';
-
-        // Show/Hide buttons based on view
         if (isHiddenView) {
-            hideBtn.classList.add('hidden');
-            showBtn.addEventListener('click', () => showVideo(video.id));
+            setButton(primary, 'eye', t('index.card.show'), 'btn-secondary');
+            primary.addEventListener('click', () => showVideo(video.id));
+        } else if (view.kind === 'pending') {
+            setButton(primary, 'play', t('index.card.analyze'), 'btn-primary');
+            primary.addEventListener('click', () => startAnalysis(video.id));
+        } else if (view.kind === 'ready') {
+            setButton(primary, 'arrow-right', t('index.card.open'), 'btn-secondary');
+            primary.addEventListener('click', () => openVideo(video.id));
         } else {
-            showBtn.classList.add('hidden');
-            hideBtn.addEventListener('click', () => hideVideo(video.id));
+            primary.remove();
         }
 
-        // Re-analyze button - only for analyzed/completed videos
-        if (video.status === 'analyzed' || video.status === 'completed') {
-            reanalyzeBtn.addEventListener('click', () => reanalyzeVideo(video.id));
+        if (view.kind === 'processing') {
+            moreBtn.remove();
         } else {
-            reanalyzeBtn.classList.add('hidden');
-        }
-
-        // Analyze/View buttons based on status
-        if (video.status === 'analyzed' || video.status === 'completed') {
-            analyzeBtn.classList.add('hidden');
-            viewBtn.addEventListener('click', () => {
-                window.location.href = `/video/${video.id}`;
+            moreBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                ThumbnailApp.showMenu(moreBtn, buildCardMenu(video, view, isHiddenView));
             });
-        } else if (video.status === 'analyzing' || video.status.startsWith('analyzing_') ||
-                   video.status === 'clustering' || video.status === 'transcribing') {
-            analyzeBtn.textContent = t('status.analyzing');
-            analyzeBtn.disabled = true;
-            viewBtn.classList.add('hidden');
+        }
 
-            // Activate the overlay for already analyzing videos
-            // TaskQueue handles progress updates via handleTaskQueueEvent
-            const overlay = card.querySelector('.video-analysis-overlay');
-            if (overlay) {
-                card.classList.add('analyzing');
-                overlay.classList.add('active');
-            }
-        } else {
-            viewBtn.classList.add('hidden');
-            analyzeBtn.addEventListener('click', () => startAnalysis(video.id));
+        if (openable) {
+            card.classList.add('openable');
+            card.tabIndex = 0;
+            card.addEventListener('click', (e) => {
+                if (!e.target.closest('button, input, label, a')) {
+                    openVideo(video.id);
+                }
+            });
+            card.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.target === card) {
+                    openVideo(video.id);
+                }
+            });
+        }
+
+        if (view.kind === 'processing') {
+            card.classList.add('analyzing');
+            card.querySelector('.video-analysis-overlay').classList.add('active');
         }
 
         return card;
     }
 
-    function getStatusLabel(status) {
-        const labels = {
-            'pending': t('status.pending'),
-            'analyzing': t('status.analyzing'),
-            'analyzing_scenes': t('analysis.detecting_scenes'),
-            'analyzing_faces': t('analysis.analyzing_faces'),
-            'clustering': t('analysis.clustering'),
-            'transcribing': t('analysis.transcribing'),
-            'analyzed': t('status.analyzed'),
-            'generating': t('status.generating'),
-            'completed': t('status.completed'),
-            'error': t('status.error')
-        };
-        return labels[status] || status;
+    function setButton(button, iconName, label, variant) {
+        button.classList.add(variant);
+        button.innerHTML = `${ThumbnailApp.icon(iconName, 'icon-sm')}<span>${escapeHtml(label)}</span>`;
     }
 
-    // ========================================================================
-    // STATUS FILTER
-    // ========================================================================
-
-    function setupStatusFilter() {
-        statusFilter.addEventListener('change', () => {
-            currentStatusFilter = statusFilter.value;
-            localStorage.setItem('videoStatusFilter', currentStatusFilter);
-
-            // Reset pagination and selection when filter changes
-            currentPage = 1;
-            allVideosSelected = false;
-
-            if (currentDirectoryId) {
-                loadVideosForDirectory(currentDirectoryId, null, 1);
-            }
-        });
-    }
-
-    function updateFilteredStats(filteredCount, totalCount, hiddenCount, filter) {
-        let statsText = '';
-
-        if (filter === 'all' || !filter) {
-            // "Todos" view: show total videos and hidden count if any
-            statsText = t(totalCount === 1 ? 'video.count_one' : 'video.count_other', {count: totalCount});
-            if (hiddenCount > 0) {
-                statsText += ' (' + t(hiddenCount === 1 ? 'video.hidden_one' : 'video.hidden_other', {count: hiddenCount}) + ')';
-            }
-        } else if (filter === 'pending') {
-            statsText = t('index.filters.pending') + ': ' + filteredCount;
-        } else if (filter === 'analyzed') {
-            statsText = t('index.filters.analyzed') + ': ' + filteredCount;
-        } else if (filter === 'error') {
-            statsText = t('index.filters.error') + ': ' + filteredCount;
-        } else if (filter === 'hidden') {
-            statsText = t('index.filters.hidden') + ': ' + filteredCount;
+    function renderVideoMeta(video, view) {
+        if (view.kind === 'pending') {
+            return `<span>${escapeHtml(t(video.status === 'error' ? 'index.card.analysis_failed' : 'index.card.not_analyzed'))}</span>`;
         }
+        if (view.kind === 'processing') {
+            return `<span>${escapeHtml(t('index.card.analysis_running'))}</span>`;
+        }
+        const parts = [
+            `<span>${ThumbnailApp.icon('users')}${escapeHtml(t(video.person_count === 1 ? 'index.card.persons_one' : 'index.card.persons_other', {count: video.person_count}))}</span>`
+        ];
+        if (video.thumbnail_count > 0) {
+            parts.push(`<span>${ThumbnailApp.icon('image')}${escapeHtml(t(video.thumbnail_count === 1 ? 'index.card.thumbnails_one' : 'index.card.thumbnails_other', {count: video.thumbnail_count}))}</span>`);
+        }
+        return parts.join('');
+    }
 
-        directoryStats.textContent = statsText;
+    function buildCardMenu(video, view, isHiddenView) {
+        const items = [];
+        if (view.kind === 'ready') {
+            items.push({ label: t('index.card.open'), icon: 'arrow-right', onSelect: () => openVideo(video.id) });
+        }
+        if (isHiddenView) {
+            items.push({ label: t('index.card.show'), icon: 'eye', onSelect: () => showVideo(video.id) });
+        } else {
+            items.push({ label: t('index.card.hide'), icon: 'eye-off', onSelect: () => hideVideo(video.id) });
+        }
+        if (view.kind === 'ready') {
+            items.push({ label: t('index.card.reanalyze'), icon: 'rotate', danger: true, onSelect: () => reanalyzeVideo(video.id) });
+        }
+        return items;
+    }
+
+    function openVideo(videoId) {
+        window.location.href = `/video/${videoId}`;
     }
 
     // ========================================================================
@@ -680,77 +925,60 @@
     }
 
     function goToPage(page) {
-        const totalPages = getTotalPages();
-        if (page < 1 || page > totalPages) return;
+        if (page < 1 || page > getTotalPages()) return;
 
-        // Reset page-level selection when changing pages
-        // but keep allVideosSelected if set
-        if (!allVideosSelected) {
+        // A page-level selection does not travel across pages; a global one does
+        if (!allMatchingSelected) {
             clearSelection();
         }
 
         currentPage = page;
-        loadVideosForDirectory(currentDirectoryId, null, page);
-
-        // Scroll to top of video grid
-        videoGrid.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        loadVideos();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function renderPagination() {
         const totalPages = getTotalPages();
-
-        // Calculate display range
         const startItem = (currentPage - 1) * PAGE_SIZE + 1;
         const endItem = Math.min(currentPage * PAGE_SIZE, totalFilteredVideos);
 
-        // Update info text
         paginationInfo.textContent = t('pagination.showing', {start: startItem, end: endItem, total: totalFilteredVideos});
 
-        // Update button states
         firstPageBtn.disabled = currentPage === 1;
         prevPageBtn.disabled = currentPage === 1;
         nextPageBtn.disabled = currentPage === totalPages;
         lastPageBtn.disabled = currentPage === totalPages;
 
-        // Render page numbers
         renderPageNumbers(totalPages);
-
-        // Show pagination container
-        paginationContainer.style.display = 'flex';
+        paginationContainer.classList.remove('hidden');
     }
 
     function renderPageNumbers(totalPages) {
         paginationNumbers.innerHTML = '';
 
-        // Determine which page numbers to show
         let pagesToShow = [];
-
         if (totalPages <= 7) {
-            // Show all pages
             for (let i = 1; i <= totalPages; i++) {
                 pagesToShow.push(i);
             }
+        } else if (currentPage <= 4) {
+            pagesToShow = [1, 2, 3, 4, 5, '...', totalPages];
+        } else if (currentPage >= totalPages - 3) {
+            pagesToShow = [1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
         } else {
-            // Show smart pagination with ellipsis
-            if (currentPage <= 4) {
-                pagesToShow = [1, 2, 3, 4, 5, '...', totalPages];
-            } else if (currentPage >= totalPages - 3) {
-                pagesToShow = [1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
-            } else {
-                pagesToShow = [1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages];
-            }
+            pagesToShow = [1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages];
         }
 
-        // Create buttons
         pagesToShow.forEach(page => {
             if (page === '...') {
                 const ellipsis = document.createElement('span');
                 ellipsis.className = 'pagination-ellipsis';
-                ellipsis.textContent = '...';
+                ellipsis.textContent = '…';
                 paginationNumbers.appendChild(ellipsis);
             } else {
                 const btn = document.createElement('button');
-                btn.className = `pagination-btn pagination-number ${page === currentPage ? 'active' : ''}`;
+                btn.type = 'button';
+                btn.className = `pagination-btn ${page === currentPage ? 'active' : ''}`;
                 btn.textContent = page;
                 btn.addEventListener('click', () => goToPage(page));
                 paginationNumbers.appendChild(btn);
@@ -759,7 +987,7 @@
     }
 
     function hidePagination() {
-        paginationContainer.style.display = 'none';
+        paginationContainer.classList.add('hidden');
     }
 
     // ========================================================================
@@ -777,61 +1005,51 @@
         }
 
         scanBtn.disabled = true;
-        scanBtn.textContent = t('directory.scanning');
+        scanBtn.querySelector('.icon').classList.add('icon-spin');
 
         try {
-            const response = await fetch(`/api/directories/${currentDirectoryId}/scan`, {
-                method: 'POST'
-            });
+            const response = await fetch(`/api/directories/${currentDirectoryId}/scan`, { method: 'POST' });
 
             if (!response.ok) {
                 const error = await response.json();
-                throw new Error(error.detail || 'Error scanning');
+                throw new Error(error.detail || `HTTP ${response.status}`);
             }
 
             const data = await response.json();
+            ThumbnailApp.showToast(t('directory.scan_complete_details', {new: data.new, existing: data.existing}), 'success');
 
-            ThumbnailApp.showToast(
-                t('directory.scan_complete_details', {new: data.new, existing: data.existing}),
-                'success'
-            );
-
-            // Reload directories to update counts
+            // Refresh directory counts and the list
             await loadDirectories();
-
-            // Reload videos
-            await loadVideosForDirectory(currentDirectoryId);
-
         } catch (error) {
             console.error('Error scanning:', error);
             ThumbnailApp.showToast(t('directory.scan_error') + ': ' + error.message, 'error');
         } finally {
             scanBtn.disabled = false;
-            scanBtn.textContent = t('index.scan_directory');
+            scanBtn.querySelector('.icon').classList.remove('icon-spin');
         }
     }
-
-    // ========================================================================
-    // ANALYSIS
-    // ========================================================================
 
     // ========================================================================
     // ANALYSIS SYSTEM (integrated with TaskQueueManager)
     // ========================================================================
 
-    // Start analysis for a video - uses global TaskQueue for state management
-    async function startAnalysis(videoId) {
-        // Check if already analyzing via TaskQueue
-        if (window.TaskQueue?.tasks) {
-            for (const task of window.TaskQueue.tasks.values()) {
-                if (task.type === 'analysis' && task.video_id === videoId) {
-                    ThumbnailApp.showToast(t('errors.already_analyzing'), 'info');
-                    return;
-                }
+    function isVideoAnalyzing(videoId) {
+        if (!window.TaskQueue?.tasks) return false;
+
+        for (const task of window.TaskQueue.tasks.values()) {
+            if (task.type === 'analysis' && task.video_id === videoId) {
+                return true;
             }
         }
+        return false;
+    }
 
-        // Show overlay immediately
+    async function startAnalysis(videoId) {
+        if (isVideoAnalyzing(videoId)) {
+            ThumbnailApp.showToast(t('errors.already_analyzing'), 'info');
+            return;
+        }
+
         updateVideoCardOverlay(videoId, 'analyzing');
 
         try {
@@ -843,74 +1061,39 @@
 
             if (!response.ok) {
                 const error = await response.json();
-                throw new Error(error.detail || 'Error starting analysis');
+                throw new Error(error.detail || `HTTP ${response.status}`);
             }
 
-            // TaskQueue SSE will handle progress updates via handleTaskQueueEvent
+            // TaskQueue SSE handles progress updates via handleTaskQueueEvent
         } catch (error) {
-            updateVideoCardOverlay(videoId, 'error');
+            updateVideoCardOverlay(videoId, 'idle');
             ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + error.message, 'error');
-            await refreshSingleVideo(videoId);
+            loadVideos();
         }
     }
 
-    // Update the visual overlay on a video card
-    function updateVideoCardOverlay(videoId, state, stepText = '') {
-        const card = document.querySelector(`.video-card[data-id="${videoId}"]`);
+    /**
+     * Show or hide the analysis progress over a video card.
+     * @param {number} videoId - Video ID
+     * @param {'analyzing'|'idle'} state - Whether the analysis is running
+     * @param {string} [stepText] - Current step
+     * @param {number} [progress] - Progress percentage
+     */
+    function updateVideoCardOverlay(videoId, state, stepText = '', progress = 0) {
+        const card = videoGrid.querySelector(`.video-card[data-id="${videoId}"]`);
         if (!card) return;
 
         const overlay = card.querySelector('.video-analysis-overlay');
-        const overlayText = overlay?.querySelector('.overlay-text');
-        const overlayStep = overlay?.querySelector('.overlay-step');
+        const active = state === 'analyzing';
+        card.classList.toggle('analyzing', active);
+        overlay.classList.toggle('active', active);
 
-        if (!overlay) return;
-
-        // Remove all state classes first
-        card.classList.remove('analyzing');
-        overlay.classList.remove('active');
-
-        switch (state) {
-            case 'analyzing':
-            case 'progress':
-                card.classList.add('analyzing');
-                overlay.classList.add('active');
-                if (overlayText) overlayText.textContent = t('analysis.analyzing');
-                if (overlayStep) overlayStep.textContent = stepText;
-                break;
-
-            case 'complete':
-            case 'error':
-            case 'cancelled':
-            default:
-                // Overlay hidden, classes removed
-                break;
-        }
-
-        // Also update the status badge
-        const statusEl = card.querySelector('.video-status');
-        if (statusEl && (state === 'analyzing' || state === 'progress')) {
-            statusEl.textContent = t('status.analyzing');
-            statusEl.className = 'video-status status-analyzing';
-        }
-    }
-
-    // Refresh a single video card without reloading the entire grid
-    async function refreshSingleVideo(videoId) {
-        try {
-            const response = await fetch(`/api/videos/${videoId}`);
-            if (!response.ok) {
-                throw new Error('Error fetching video');
-            }
-            const video = await response.json();
-
-            const existingCard = document.querySelector(`.video-card[data-id="${videoId}"]`);
-            if (existingCard) {
-                // Create new card with updated data
-                const newCard = createVideoCard(video);
-                existingCard.replaceWith(newCard);
-            }
-        } catch (error) {
-            console.error(`Error refreshing video ${videoId}:`, error);
+        if (active) {
+            overlay.querySelector('.overlay-step').textContent = stepText;
+            overlay.querySelector('.overlay-progress-fill').style.width = `${progress}%`;
+            const pill = card.querySelector('.status-pill');
+            pill.textContent = t('video_status.analyzing');
+            pill.className = 'status-pill tone-info';
         }
     }
 
@@ -918,7 +1101,6 @@
     // TASKQUEUE INTEGRATION
     // ========================================================================
 
-    let taskQueueUnsubscribe = null;
     let _taskQueueRetryCount = 0;
     const _taskQueueMaxRetries = 50;
 
@@ -934,108 +1116,75 @@
             return;
         }
 
-        // Subscribe to task events
-        taskQueueUnsubscribe = window.TaskQueue.subscribe(handleTaskQueueEvent);
-
-        // Initialize overlays for any currently active analysis tasks
+        window.TaskQueue.subscribe(handleTaskQueueEvent);
         initializeActiveAnalysisOverlays();
     }
 
-    // Initialize overlays for videos that are currently being analyzed
+    // Show progress on the cards of videos that are being analyzed right now
     function initializeActiveAnalysisOverlays() {
         if (!window.TaskQueue?.tasks) return;
 
         for (const task of window.TaskQueue.tasks.values()) {
             if (task.type === 'analysis') {
-                updateVideoCardOverlay(task.video_id, 'progress', task.current_step || '');
+                updateVideoCardOverlay(task.video_id, 'analyzing', task.current_step || '', task.progress || 0);
             }
         }
     }
 
-    // Handle events from TaskQueueManager
     function handleTaskQueueEvent(eventType, data) {
-        // For snapshot, initialize all active analysis overlays
         if (eventType === 'tasks_snapshot') {
-            if (data.tasks && Array.isArray(data.tasks)) {
-                for (const task of data.tasks) {
-                    if (task.type === 'analysis') {
-                        updateVideoCardOverlay(task.video_id, 'progress', task.current_step || '');
-                    }
+            for (const task of data.tasks || []) {
+                if (task.type === 'analysis') {
+                    updateVideoCardOverlay(task.video_id, 'analyzing', task.current_step || '', task.progress || 0);
                 }
             }
             return;
         }
 
-        // For individual task events, only handle analysis tasks
         if (data.type !== 'analysis') return;
 
         switch (eventType) {
             case 'task_started':
             case 'task_progress':
-                updateVideoCardOverlay(data.video_id, 'progress', data.current_step || '');
+                updateVideoCardOverlay(data.video_id, 'analyzing', data.current_step || '', data.progress || 0);
                 break;
 
             case 'task_completed':
-                updateVideoCardOverlay(data.video_id, 'complete');
-                refreshSingleVideo(data.video_id);
                 ThumbnailApp.showToast(t('analysis.complete'), 'success');
+                loadVideos();
                 break;
 
             case 'task_error':
-                updateVideoCardOverlay(data.video_id, 'error');
-                refreshSingleVideo(data.video_id);
-                ThumbnailApp.showToast(t('status.error') + ': ' + (data.error_message || t('errors.generic')), 'error');
+                ThumbnailApp.showToast(t('video_status.error') + ': ' + (data.error_message || t('errors.generic')), 'error');
+                loadVideos();
                 break;
 
             case 'task_cancelled':
-                updateVideoCardOverlay(data.video_id, 'cancelled');
-                refreshSingleVideo(data.video_id);
+                loadVideos();
                 break;
         }
-    }
-
-    // Check if a video is currently being analyzed (via TaskQueue)
-    function isVideoAnalyzing(videoId) {
-        if (!window.TaskQueue?.tasks) return false;
-
-        for (const task of window.TaskQueue.tasks.values()) {
-            if (task.type === 'analysis' && task.video_id === videoId) {
-                return true;
-            }
-        }
-        return false;
     }
 
     // ========================================================================
     // HIDE/SHOW/REANALYZE VIDEO
     // ========================================================================
 
+    async function setVideoHidden(videoId, hidden) {
+        const response = await fetch(`/api/videos/${videoId}/${hidden ? 'hide' : 'show'}`, { method: 'PATCH' });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    }
+
+    // Hiding is reversible, so it happens at once and the toast offers to undo it
     async function hideVideo(videoId) {
-        const confirmed = await ThumbnailApp.showModal({
-            title: t('video_hide.title'),
-            message: t('video_hide.message'),
-            type: 'warning',
-            confirmText: t('index.card.hide'),
-            cancelText: t('common.cancel')
-        });
-
-        if (!confirmed) return;
-
         try {
-            const response = await fetch(`/api/videos/${videoId}/hide`, {
-                method: 'PATCH'
+            await setVideoHidden(videoId, true);
+            ThumbnailApp.showToast(t('video_hide.success'), 'success', {
+                label: t('common.undo'),
+                onClick: () => showVideo(videoId)
             });
-
-            if (!response.ok) {
-                throw new Error('Error hiding video');
-            }
-
-            ThumbnailApp.showToast(t('video_hide.success'), 'success');
-
-            if (currentDirectoryId) {
-                await loadVideosForDirectory(currentDirectoryId);
-                await loadDirectories();
-            }
+            await refreshAfterVisibilityChange();
         } catch (error) {
             ThumbnailApp.showToast(t('errors.hide_failed') + ': ' + error.message, 'error');
         }
@@ -1043,29 +1192,27 @@
 
     async function showVideo(videoId) {
         try {
-            const response = await fetch(`/api/videos/${videoId}/show`, {
-                method: 'PATCH'
-            });
-
-            if (!response.ok) {
-                throw new Error('Error showing video');
-            }
-
+            await setVideoHidden(videoId, false);
             ThumbnailApp.showToast(t('video_hide.restored'), 'success');
-
-            if (currentDirectoryId) {
-                await loadVideosForDirectory(currentDirectoryId);
-                await loadDirectories();
-            }
+            await refreshAfterVisibilityChange();
         } catch (error) {
             ThumbnailApp.showToast(t('errors.show_failed') + ': ' + error.message, 'error');
         }
     }
 
+    async function refreshAfterVisibilityChange() {
+        await loadVideos();
+        // Directory video counts changed too
+        const response = await fetch('/api/directories');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        directories = (await response.json()).directories;
+        renderDirectoryList();
+    }
+
     async function reanalyzeVideo(videoId) {
         const confirmed = await ThumbnailApp.showModal({
             title: t('analysis.reanalyze_title'),
-            message: t('analysis.reanalyze_message'),
+            htmlMessage: t('analysis.reanalyze_message'),
             type: 'danger',
             confirmText: t('index.card.reanalyze'),
             cancelText: t('common.cancel')
@@ -1074,21 +1221,20 @@
         if (!confirmed) return;
 
         try {
-            const response = await fetch(`/api/videos/${videoId}/reanalyze`, {
-                method: 'POST'
-            });
-
-            if (!response.ok) {
-                throw new Error('Error reanalyzing video');
-            }
-
-            // Refresh the card to show pending state, then queue for analysis
-            await refreshSingleVideo(videoId);
-            await startAnalysis(videoId);
-
+            await requestReanalysis(videoId);
             ThumbnailApp.showToast(t('analysis.reanalyze_started'), 'success');
         } catch (error) {
             ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + error.message, 'error');
+        }
+        loadVideos();
+    }
+
+    // The reanalyze endpoint resets the video and queues the analysis itself
+    async function requestReanalysis(videoId) {
+        const response = await fetch(`/api/videos/${videoId}/reanalyze`, { method: 'POST' });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || `HTTP ${response.status}`);
         }
     }
 
@@ -1097,336 +1243,205 @@
     // ========================================================================
 
     function setupSelection() {
-        // Select all checkbox
-        selectAllCheckbox.addEventListener('change', () => {
-            const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
-            checkboxes.forEach(cb => {
-                cb.checked = selectAllCheckbox.checked;
-                updateCardSelection(cb);
-            });
-
-            // Reset global selection when manually toggling
-            if (!selectAllCheckbox.checked) {
-                allVideosSelected = false;
-            }
-
-            updateSelectionUI();
-            updateSelectionBanner();
-        });
-
-        // Selection banner button (Gmail-style select all / clear all)
-        selectionBannerBtn.addEventListener('click', () => {
-            if (allVideosSelected) {
-                // Clear all selection
-                clearSelection();
-                allVideosSelected = false;
+        selectPageCheckbox.addEventListener('change', () => {
+            if (selectPageCheckbox.checked) {
+                selectedIds = new Set(pageVideos.keys());
             } else {
-                // Select all videos globally
-                allVideosSelected = true;
-                // Also check all visible checkboxes
-                const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
-                checkboxes.forEach(cb => {
-                    cb.checked = true;
-                    updateCardSelection(cb);
-                });
-                selectAllCheckbox.checked = true;
-                selectAllCheckbox.indeterminate = false;
+                clearSelection();
             }
+            syncCardSelection();
             updateSelectionUI();
-            updateSelectionBanner();
         });
 
-        // Analyze selected button
-        analyzeSelectedBtn.addEventListener('click', analyzeSelected);
+        bulkSelectAll.addEventListener('click', () => {
+            allMatchingSelected = true;
+            selectedIds = new Set(pageVideos.keys());
+            syncCardSelection();
+            updateSelectionUI();
+        });
 
-        // Hide selected button
-        hideSelectedBtn.addEventListener('click', hideSelected);
+        document.getElementById('bulkClear').addEventListener('click', () => {
+            clearSelection();
+            syncCardSelection();
+            updateSelectionUI();
+        });
+
+        document.getElementById('bulkAnalyze').addEventListener('click', analyzeSelected);
+        document.getElementById('bulkHide').addEventListener('click', hideSelected);
     }
 
-    function getSelectedVideoIds() {
-        const checkboxes = videoGrid.querySelectorAll('.video-checkbox:checked');
-        return Array.from(checkboxes).map(cb => {
-            const card = cb.closest('.video-card');
-            return parseInt(card.dataset.id);
+    function toggleVideoSelection(videoId, selected) {
+        if (selected) {
+            selectedIds.add(videoId);
+        } else {
+            selectedIds.delete(videoId);
+            allMatchingSelected = false;
+        }
+        syncCardSelection();
+        updateSelectionUI();
+    }
+
+    function syncCardSelection() {
+        videoGrid.querySelectorAll('.video-card').forEach(card => {
+            const selected = allMatchingSelected || selectedIds.has(parseInt(card.dataset.id));
+            card.classList.toggle('selected', selected);
+            card.querySelector('.video-checkbox').checked = selected;
         });
     }
 
     function updateSelectionUI() {
-        const selectedIds = getSelectedVideoIds();
-        const totalCheckboxes = videoGrid.querySelectorAll('.video-checkbox').length;
-        const count = selectedIds.length;
+        const pageCount = pageVideos.size;
+        const count = allMatchingSelected ? totalFilteredVideos : selectedIds.size;
+        const pageFullySelected = pageCount > 0 && selectedIds.size === pageCount;
 
-        // Determine effective count (page selection vs global selection)
-        const effectiveCount = allVideosSelected ? totalFilteredVideos : count;
+        bulkBar.classList.toggle('hidden', count === 0);
+        videoGrid.classList.toggle('selecting', count > 0);
+        bulkCount.textContent = allMatchingSelected
+            ? t('selection.selected_all', {count})
+            : t('selection.selected_count', {count});
 
-        // Update count text
-        if (allVideosSelected) {
-            selectionCount.textContent = t('selection.selected_all', {count: totalFilteredVideos});
-        } else {
-            selectionCount.textContent = count === 0
-                ? t('selection.selected_count', {count: 0})
-                : t('selection.selected_count', {count: count});
+        const offerAll = pageFullySelected && !allMatchingSelected && totalFilteredVideos > pageCount;
+        bulkSelectAll.classList.toggle('hidden', !offerAll);
+        if (offerAll) {
+            bulkSelectAll.textContent = t('selection.select_all_videos', {count: totalFilteredVideos});
         }
-        selectionCount.classList.toggle('has-selection', effectiveCount > 0);
 
-        // Update buttons state
-        analyzeSelectedBtn.disabled = effectiveCount === 0;
-        hideSelectedBtn.disabled = effectiveCount === 0;
+        // Hidden videos can only be shown again, one by one
+        document.getElementById('bulkHide').classList.toggle('hidden', currentFilter === 'hidden');
 
-        // Update select all checkbox state
-        if (totalCheckboxes > 0) {
-            selectAllCheckbox.checked = count === totalCheckboxes || allVideosSelected;
-            selectAllCheckbox.indeterminate = count > 0 && count < totalCheckboxes && !allVideosSelected;
-        }
+        selectPageCheckbox.checked = pageFullySelected;
+        selectPageCheckbox.indeterminate = selectedIds.size > 0 && !pageFullySelected;
     }
 
-    function updateSelectionBanner() {
-        const selectedIds = getSelectedVideoIds();
-        const totalCheckboxes = videoGrid.querySelectorAll('.video-checkbox').length;
-        const pageIsFullySelected = selectedIds.length === totalCheckboxes && totalCheckboxes > 0;
-        const hasMorePages = totalFilteredVideos > PAGE_SIZE;
-
-        // Only show banner if:
-        // 1. All items on page are selected AND there are more pages
-        // 2. OR allVideosSelected is true
-        if (allVideosSelected) {
-            // Show "all selected" state
-            selectionBanner.classList.add('visible');
-            selectionBannerText.textContent = t('selection.all_selected', {count: totalFilteredVideos});
-            selectionBannerBtn.textContent = t('selection.clear_selection');
-        } else if (pageIsFullySelected && hasMorePages) {
-            // Show "select all" option
-            selectionBanner.classList.add('visible');
-            const pageCount = Math.min(PAGE_SIZE, totalCheckboxes);
-            selectionBannerText.textContent = t('selection.page_selected', {count: pageCount});
-            selectionBannerBtn.textContent = t('selection.select_all_videos', {count: totalFilteredVideos});
-        } else {
-            // Hide banner
-            selectionBanner.classList.remove('visible');
-        }
+    function clearSelection() {
+        selectedIds.clear();
+        allMatchingSelected = false;
     }
 
-    // Get all video IDs for the current filter (for global selection actions)
-    async function getAllFilteredVideoIds() {
-        if (!currentDirectoryId) return [];
-
-        try {
-            // Fetch all video IDs without pagination limit
-            let url = `/api/directories/${currentDirectoryId}/videos?skip=0&limit=${totalFilteredVideos}`;
-            if (currentStatusFilter && currentStatusFilter !== 'all') {
-                url += `&status=${currentStatusFilter}`;
+    // Every video of the current filter and search, across pages
+    async function getAllMatchingVideos() {
+        const BATCH = 500;  // API page size limit
+        const videos = [];
+        let total = Infinity;
+        while (videos.length < total) {
+            const params = new URLSearchParams({ status: currentFilter, sort: currentSort, skip: videos.length, limit: BATCH });
+            if (currentSearch) {
+                params.set('search', currentSearch);
             }
-
-            const response = await fetch(url);
+            const response = await fetch(`/api/directories/${currentDirectoryId}/videos?${params}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = await response.json();
-            return data.videos.map(v => v.id);
-        } catch (error) {
-            console.error('Error fetching all video IDs:', error);
-            return [];
+            total = data.total;
+            if (data.videos.length === 0) break;
+            videos.push(...data.videos);
         }
+        return videos;
     }
 
-    function updateCardSelection(checkbox) {
-        const card = checkbox.closest('.video-card');
-        card.classList.toggle('selected', checkbox.checked);
-    }
-
-    function showSelectionBar(show) {
-        selectionBar.classList.toggle('visible', show);
-        if (!show) {
-            selectAllCheckbox.checked = false;
-            selectAllCheckbox.indeterminate = false;
-            allVideosSelected = false;
-            selectionBanner.classList.remove('visible');
-        }
+    async function getSelectedVideos() {
+        return allMatchingSelected
+            ? await getAllMatchingVideos()
+            : [...selectedIds].map(id => pageVideos.get(id));
     }
 
     async function analyzeSelected() {
-        let selectedIds;
-
-        // If all videos are selected globally, fetch all IDs
-        if (allVideosSelected) {
-            selectedIds = await getAllFilteredVideoIds();
-            if (selectedIds.length === 0) {
-                ThumbnailApp.showToast(t('errors.no_videos_to_analyze'), 'info');
-                return;
-            }
-        } else {
-            selectedIds = getSelectedVideoIds();
-            if (selectedIds.length === 0) return;
+        let videos;
+        try {
+            videos = await getSelectedVideos();
+        } catch (error) {
+            ThumbnailApp.showToast(t('errors.load_videos') + ': ' + error.message, 'error');
+            return;
         }
 
-        // For global selection, we need to fetch video statuses from API
-        // For page selection, we can check the DOM
-        let pendingIds = [];
-        let analyzedIds = [];
+        const toAnalyze = videos.filter(v => getStatusView(v.status).kind === 'pending').map(v => v.id);
+        const toReanalyze = videos.filter(v => getStatusView(v.status).kind === 'ready').map(v => v.id);
 
-        if (allVideosSelected) {
-            // Fetch all videos to get their statuses
-            try {
-                let url = `/api/directories/${currentDirectoryId}/videos?skip=0&limit=${totalFilteredVideos}`;
-                if (currentStatusFilter && currentStatusFilter !== 'all') {
-                    url += `&status=${currentStatusFilter}`;
-                }
-                const response = await fetch(url);
-                const data = await response.json();
-
-                data.videos.forEach(video => {
-                    if (video.status === 'pending') {
-                        pendingIds.push(video.id);
-                    } else if (video.status === 'analyzed' || video.status === 'completed') {
-                        analyzedIds.push(video.id);
-                    }
-                });
-            } catch (error) {
-                console.error('Error fetching video statuses:', error);
-                ThumbnailApp.showToast(t('errors.load_videos'), 'error');
-                return;
-            }
-        } else {
-            // Check DOM for page selection
-            selectedIds.forEach(id => {
-                const card = videoGrid.querySelector(`.video-card[data-id="${id}"]`);
-                const status = card?.dataset.status;
-                if (status === 'pending') {
-                    pendingIds.push(id);
-                } else if (status === 'analyzed' || status === 'completed') {
-                    analyzedIds.push(id);
-                }
-            });
-        }
-
-        // If nothing to analyze
-        if (pendingIds.length === 0 && analyzedIds.length === 0) {
+        if (toAnalyze.length === 0 && toReanalyze.length === 0) {
             ThumbnailApp.showToast(t('video_analyze.no_videos_in_selection'), 'info');
             return;
         }
 
-        // If there are already analyzed videos
-        if (analyzedIds.length > 0) {
-            const confirmed = await ThumbnailApp.showModal({
+        const confirmed = toReanalyze.length > 0
+            ? await ThumbnailApp.showModal({
                 title: t('video_analyze.already_analyzed_title'),
-                message: t('video_analyze.already_analyzed_message', {count: analyzedIds.length}),
-                type: 'warning',
+                htmlMessage: t('video_analyze.already_analyzed_message', {count: toReanalyze.length}),
+                type: 'danger',
                 confirmText: t('video_analyze.reanalyze_all'),
                 cancelText: t('common.cancel')
-            });
-
-            if (!confirmed) return;
-
-            // Re-analyze videos that were already analyzed
-            // First reset them, then queue them for analysis
-            for (const videoId of analyzedIds) {
-                try {
-                    await fetch(`/api/videos/${videoId}/reanalyze`, { method: 'POST' });
-                    // After reset, refresh the card and queue for analysis
-                    await refreshSingleVideo(videoId);
-                    await startAnalysis(videoId);
-                } catch (error) {
-                    console.error(`Error reanalyzing video ${videoId}:`, error);
-                }
-            }
-        } else {
-            // Only pending videos - show normal modal
-            const confirmed = await ThumbnailApp.showModal({
+            })
+            : await ThumbnailApp.showModal({
                 title: t('video_analyze.title'),
-                message: t('video_analyze.message', {count: pendingIds.length}),
+                htmlMessage: t('video_analyze.message', {count: toAnalyze.length}),
                 type: 'info',
                 confirmText: t('analysis.start'),
                 cancelText: t('common.cancel')
             });
 
-            if (!confirmed) return;
-        }
+        if (!confirmed) return;
 
-        // Start analysis for pending videos
-        for (const videoId of pendingIds) {
+        const failures = [];
+        for (const videoId of toReanalyze) {
             try {
-                await startAnalysis(videoId);
+                await requestReanalysis(videoId);
             } catch (error) {
-                console.error(`Error starting analysis for video ${videoId}:`, error);
+                failures.push(error.message);
             }
         }
+        for (const videoId of toAnalyze) {
+            await startAnalysis(videoId);
+        }
 
-        const totalStarted = pendingIds.length + analyzedIds.length;
-        ThumbnailApp.showToast(t('analysis.started_for_count', {count: totalStarted}), 'success');
+        if (failures.length > 0) {
+            ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + failures[0], 'error');
+        }
+        ThumbnailApp.showToast(t('analysis.started_for_count', {count: toAnalyze.length + toReanalyze.length - failures.length}), 'success');
 
-        // Clear selection (no need to reload the grid - overlays show progress)
         clearSelection();
+        loadVideos();
     }
 
     async function hideSelected() {
-        let selectedIds;
-
-        // If all videos are selected globally, fetch all IDs
-        if (allVideosSelected) {
-            selectedIds = await getAllFilteredVideoIds();
-            if (selectedIds.length === 0) {
-                ThumbnailApp.showToast(t('errors.no_videos_to_hide'), 'info');
-                return;
-            }
-        } else {
-            selectedIds = getSelectedVideoIds();
-            if (selectedIds.length === 0) return;
+        let ids;
+        try {
+            ids = (await getSelectedVideos()).map(v => v.id);
+        } catch (error) {
+            ThumbnailApp.showToast(t('errors.load_videos') + ': ' + error.message, 'error');
+            return;
         }
-
-        const confirmed = await ThumbnailApp.showModal({
-            title: t('video_hide.bulk_title'),
-            message: t('video_hide.bulk_message', {count: selectedIds.length}),
-            type: 'warning',
-            confirmText: t('index.card.hide'),
-            cancelText: t('common.cancel')
-        });
-
-        if (!confirmed) return;
 
         try {
             const response = await fetch('/api/videos/bulk/hide', {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ video_ids: selectedIds })
+                body: JSON.stringify({ video_ids: ids })
             });
-
             if (!response.ok) {
-                throw new Error('Error hiding videos');
+                throw new Error(`HTTP ${response.status}`);
             }
 
             const data = await response.json();
-            ThumbnailApp.showToast(t('video_hide.bulk_success', {count: data.count}), 'success');
+            ThumbnailApp.showToast(t('video_hide.bulk_success', {count: data.count}), 'success', {
+                label: t('common.undo'),
+                onClick: () => showVideos(ids)
+            });
 
-            // Clear selection and reload from page 1 (list has changed)
             clearSelection();
-            currentPage = 1;
-            if (currentDirectoryId) {
-                await loadVideosForDirectory(currentDirectoryId, null, 1);
-                await loadDirectories();
-            }
+            await refreshAfterVisibilityChange();
         } catch (error) {
             ThumbnailApp.showToast(t('errors.hide_failed') + ': ' + error.message, 'error');
         }
     }
 
-    function clearSelection() {
-        const checkboxes = videoGrid.querySelectorAll('.video-checkbox');
-        checkboxes.forEach(cb => {
-            cb.checked = false;
-            updateCardSelection(cb);
-        });
-        selectAllCheckbox.checked = false;
-        selectAllCheckbox.indeterminate = false;
-        allVideosSelected = false;
-        selectionBanner.classList.remove('visible');
-        updateSelectionUI();
-    }
-
-    // ========================================================================
-    // UTILITIES
-    // ========================================================================
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+    async function showVideos(ids) {
+        try {
+            for (const id of ids) {
+                await setVideoHidden(id, false);
+            }
+            ThumbnailApp.showToast(t('video_hide.restored'), 'success');
+            await refreshAfterVisibilityChange();
+        } catch (error) {
+            ThumbnailApp.showToast(t('errors.show_failed') + ': ' + error.message, 'error');
+        }
     }
 </script>
 {% endblock %}

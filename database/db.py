@@ -4,11 +4,15 @@ Database Manager
 Async SQLite database connection and management.
 """
 
-import aiosqlite
-from pathlib import Path
-from contextlib import asynccontextmanager
-from typing import Optional
+import os
 import sys
+import tempfile
+from contextlib import asynccontextmanager
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Optional
+
+import aiosqlite
+import orjson
 
 # Add project root to path
 ROOT_DIR = Path(__file__).parent.parent
@@ -376,7 +380,6 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
 
     # Migration 9: Architecture V2 - Create video_frames and cluster_frame_assignments tables
     # This enables independent views where frames exist separately from cluster assignments.
-    # Data migration is handled by scripts/migrate_to_v2.py (run manually).
     try:
         # Check if video_frames table exists
         async with db.execute("""
@@ -464,6 +467,390 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
 
     except Exception as e:
         print(f"Migration warning (Architecture V2 tables): {e}")
+
+    # Migrations 10-13 fail fast: the code requires their schema and path
+    # format, so a skipped migration would only surface later as confusing
+    # runtime errors.
+
+    # Migration 12: Add face-swap columns to thumbnails
+    async with db.execute("PRAGMA table_info(thumbnails)") as cursor:
+        columns = [col[1] for col in await cursor.fetchall()]
+
+    if 'raw_path' not in columns:
+        print("Migration: Adding raw_path column to thumbnails...")
+        await db.execute("ALTER TABLE thumbnails ADD COLUMN raw_path TEXT")
+        await db.commit()
+
+    if 'face_swap_applied' not in columns:
+        print("Migration: Adding face_swap_applied column to thumbnails...")
+        await db.execute("ALTER TABLE thumbnails ADD COLUMN face_swap_applied INTEGER DEFAULT 0")
+        await db.commit()
+
+    if 'face_swap_metadata' not in columns:
+        print("Migration: Adding face_swap_metadata column to thumbnails...")
+        await db.execute("ALTER TABLE thumbnails ADD COLUMN face_swap_metadata TEXT")
+        await db.commit()
+
+    # Migration 11: Replace single cluster_id with generation_job_clusters table.
+    # IDEMPOTENT — works on three starting states:
+    #   (a) Brand-new DB: schema.sql already created the new table; this just
+    #       creates indices.
+    #   (b) Legacy DB with cluster_id column AND new table not yet existing:
+    #       create new table, backfill from legacy, then drop the column.
+    #   (c) Legacy DB with cluster_id column but new table already created
+    #       (e.g. schema.sql ran before this migration on a legacy DB): backfill
+    #       missing rows then drop the column.
+    # Ensure the new table exists (idempotent CREATE)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS generation_job_clusters (
+            job_id INTEGER NOT NULL,
+            cluster_id INTEGER NOT NULL,
+            person_id TEXT NOT NULL,
+            cluster_order INTEGER NOT NULL,
+            PRIMARY KEY (job_id, cluster_id),
+            FOREIGN KEY (job_id) REFERENCES generation_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY (cluster_id) REFERENCES clusters(id) ON DELETE CASCADE
+        )
+    """)
+    await db.commit()
+
+    # Detect whether the legacy column is still present
+    async with db.execute("PRAGMA table_info(generation_jobs)") as cursor:
+        columns = [col[1] for col in await cursor.fetchall()]
+    has_legacy_cluster_id = 'cluster_id' in columns
+
+    if has_legacy_cluster_id:
+        print("Migration: Migrating generation_jobs.cluster_id (legacy) -> generation_job_clusters...")
+
+        # (1) Backfill: INSERT OR IGNORE so re-runs don't duplicate. Each
+        # legacy job becomes a single person_01 entry.
+        await db.execute("""
+            INSERT OR IGNORE INTO generation_job_clusters
+                (job_id, cluster_id, person_id, cluster_order)
+            SELECT id, cluster_id, 'person_01', 0
+            FROM generation_jobs
+            WHERE cluster_id IS NOT NULL
+        """)
+        await db.commit()
+
+        # (2) Recreate generation_jobs without cluster_id. Standard SQLite
+        # table-swap procedure (https://www.sqlite.org/lang_altertable.html).
+        # CRITICAL: disable FK enforcement around the swap so the cascade
+        # from generation_job_clusters → generation_jobs(id) does NOT wipe
+        # the data we just backfilled when we drop the old table.
+        await db.execute("PRAGMA foreign_keys = OFF")
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute("""
+                CREATE TABLE generation_jobs_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id INTEGER NOT NULL,
+                    num_images INTEGER DEFAULT 5,
+                    preferred_expression TEXT,
+                    status TEXT DEFAULT 'pending',
+                    progress INTEGER DEFAULT 0,
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+                )
+            """)
+            await db.execute("""
+                INSERT INTO generation_jobs_new
+                    (id, video_id, num_images, preferred_expression, status,
+                     progress, error_message, created_at, completed_at)
+                SELECT id, video_id, num_images, preferred_expression, status,
+                       progress, error_message, created_at, completed_at
+                FROM generation_jobs
+            """)
+            await db.execute("DROP TABLE generation_jobs")
+            await db.execute("ALTER TABLE generation_jobs_new RENAME TO generation_jobs")
+            await db.execute("COMMIT")
+            print("Migration: generation_jobs recreated without legacy cluster_id column")
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+        finally:
+            # Always restore FK enforcement, even if the swap failed
+            await db.execute("PRAGMA foreign_keys = ON")
+
+    # Indices for fast lookup (idempotent)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_video ON generation_jobs(video_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON generation_jobs(status)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_job_clusters_job ON generation_job_clusters(job_id)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_job_clusters_cluster ON generation_job_clusters(cluster_id)")
+    await db.commit()
+
+    # Migration 10: Add physical_description columns to clusters
+    # Caches LLM-generated facial description per cluster for deterministic
+    # face_groups population across generations.
+    async with db.execute("PRAGMA table_info(clusters)") as cursor:
+        columns = await cursor.fetchall()
+        column_names = [col[1] for col in columns]
+
+    if 'physical_description' not in column_names:
+        print("Migration: Adding physical_description column to clusters...")
+        await db.execute("ALTER TABLE clusters ADD COLUMN physical_description TEXT")
+        await db.commit()
+        print("Migration: physical_description column added successfully")
+
+    if 'physical_description_updated_at' not in column_names:
+        print("Migration: Adding physical_description_updated_at column to clusters...")
+        await db.execute("ALTER TABLE clusters ADD COLUMN physical_description_updated_at TIMESTAMP")
+        await db.commit()
+        print("Migration: physical_description_updated_at column added successfully")
+
+    # Migration 13: Store paths under OUTPUT_DIR relative to it, so the project
+    # and its output folder can move without breaking stored references.
+    await _migrate_output_paths_to_relative(db)
+
+    # Migration 14: Face sheet of each person (views chosen by hand, on/off)
+    async with db.execute("PRAGMA table_info(clusters)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'reference_format' not in column_names and 'face_sheet' not in column_names:
+        print("Migration: Adding face sheet columns to clusters...")
+        await db.execute("ALTER TABLE clusters ADD COLUMN face_sheet TEXT")
+        await db.execute("ALTER TABLE clusters ADD COLUMN face_sheet_enabled INTEGER NOT NULL DEFAULT 0")
+        await db.commit()
+        print("Migration: face sheet columns added successfully")
+
+    # Migration 15: Face match of each thumbnail (how much the people look like themselves)
+    async with db.execute("PRAGMA table_info(thumbnails)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'face_match_status' not in column_names:
+        print("Migration: Adding face match columns to thumbnails...")
+        await db.execute("ALTER TABLE thumbnails ADD COLUMN face_match_status TEXT")
+        await db.execute("ALTER TABLE thumbnails ADD COLUMN face_match_score REAL")
+        await db.execute("ALTER TABLE thumbnails ADD COLUMN face_match_people TEXT")
+        await db.commit()
+        print("Migration: face match columns added successfully")
+
+    # Body and environment references are independent of face-photo selections.
+    async with db.execute("PRAGMA table_info(clusters)") as cursor:
+        reference_columns = {row[1] for row in await cursor.fetchall()}
+    for name in ("body_reference", "environment_reference"):
+        if "reference_format" not in reference_columns and name not in reference_columns:
+            await db.execute(f"ALTER TABLE clusters ADD COLUMN {name} TEXT")
+    await db.commit()
+
+    # Migration 16: Index the frame a cluster is represented by. Deleting a
+    # video_frames row sets that column to NULL in the clusters pointing at it;
+    # without an index SQLite scans every cluster for each frame deleted.
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_clusters_representative_frame ON clusters(representative_frame_id)"
+    )
+    await db.commit()
+
+    # Migration 17: Moving a directory rewrites its videos' paths, which must not
+    # bump their updated_at (the library's activity order)
+    async with db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'update_videos_timestamp'"
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None or 'WHEN NEW.filepath IS OLD.filepath' not in row[0]:
+        print("Migration: Making the videos updated_at trigger skip path changes...")
+        await db.execute("DROP TRIGGER IF EXISTS update_videos_timestamp")
+        await db.execute("""
+            CREATE TRIGGER update_videos_timestamp
+            AFTER UPDATE ON videos
+            WHEN NEW.filepath IS OLD.filepath
+            BEGIN
+                UPDATE videos SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END
+        """)
+        await db.commit()
+        print("Migration: videos updated_at trigger updated successfully")
+
+    # Migration 18: Alternative paths of each directory (the same folder reached
+    # from other machines), used when its path does not answer
+    async with db.execute("PRAGMA table_info(directories)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'alternative_paths' not in column_names:
+        print("Migration: Adding alternative_paths column to directories...")
+        await db.execute("ALTER TABLE directories ADD COLUMN alternative_paths TEXT NOT NULL DEFAULT '[]'")
+        await db.commit()
+        print("Migration: alternative_paths column added successfully")
+
+    # Migration 19: App settings (AI engines, values every video starts with)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            data TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.commit()
+
+    # Migration 20: Restoration is independent from swapping and starts off.
+    await db.execute("""
+        UPDATE app_settings
+        SET data = json_set(data, '$.generation.face_restoration', json('false'))
+        WHERE json_type(data, '$.generation.face_restoration') IS NULL
+    """)
+    await db.commit()
+
+    # Migration 21: People whose face never moves are pictures (paintings, posters)
+    async with db.execute("PRAGMA table_info(clusters)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'is_picture' not in column_names:
+        print("Migration: Adding is_picture column to clusters...")
+        await db.execute("ALTER TABLE clusters ADD COLUMN is_picture INTEGER NOT NULL DEFAULT 0")
+        await db.commit()
+        print("Migration: is_picture column added successfully")
+
+    # Migration 22: Whether the video's thumbnails use its setting photos ('photos')
+    # or let the AI choose the background ('ai'); NULL until the user picks
+    async with db.execute("PRAGMA table_info(videos)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'environment_source' not in column_names:
+        print("Migration: Adding environment_source column to videos...")
+        await db.execute(
+            "ALTER TABLE videos ADD COLUMN environment_source TEXT CHECK(environment_source IN ('photos', 'ai'))"
+        )
+        await db.commit()
+        print("Migration: environment_source column added successfully")
+
+    # Migration 23: Add the local image connection without changing saved engines.
+    from services.comfyui_service import Connection
+    await db.execute("""
+        UPDATE app_settings SET data = json_set(data, '$.comfyui', json(?))
+        WHERE json_type(data, '$.comfyui') IS NULL
+    """, (Connection().model_dump_json(),))
+    await db.commit()
+
+    from database.reference_migration import migrate_visual_references
+    await migrate_visual_references(db)
+
+
+# Columns holding files under OUTPUT_DIR, stored relative to it (POSIX separators)
+_OUTPUT_PATH_COLUMNS = (
+    ('video_frames', 'frame_path'),
+    ('cluster_frames', 'frame_path'),
+    ('clusters', 'representative_frame'),
+    ('thumbnails', 'filepath'),
+    ('thumbnails', 'raw_path'),
+)
+# Subdirectories of a video's output folder that stored paths point into
+_VIDEO_OUTPUT_SUBDIRS = {'frames', 'clusters', 'thumbnails'}
+
+
+def _is_absolute_stored_path(value: str) -> bool:
+    return '\\' in value or value.startswith('/') or value[1:2] == ':'
+
+
+def _legacy_output_relative(value: str) -> str:
+    """Convert an absolute path from any former output location to OUTPUT_DIR-relative form."""
+    import config
+
+    path = PureWindowsPath(value) if ('\\' in value or value[1:2] == ':') else PurePosixPath(value)
+    output_dir = Path(config.OUTPUT_DIR)
+    try:
+        return path.relative_to(type(path)(str(output_dir))).as_posix()
+    except ValueError:
+        pass
+
+    # Moved project: find the former output folder, i.e. the component followed
+    # by <video folder>/<frames|clusters|thumbnails>/...
+    output_names = {output_dir.name.lower(), 'output'}
+    parts = path.parts
+    for i, part in enumerate(parts[:-3]):
+        if part.lower() in output_names and parts[i + 2].lower() in _VIDEO_OUTPUT_SUBDIRS:
+            return '/'.join(parts[i + 1:])
+    raise ValueError(f"Cannot locate the output folder in stored path: {value}")
+
+
+def _relative_cache_path(value: str) -> str:
+    return _legacy_output_relative(value) if _is_absolute_stored_path(value) else value
+
+
+def _convert_faces_cache(data) -> None:
+    faces = data if isinstance(data, list) else data.get('all_faces', [])
+    for face in faces:
+        if face.get('frame_path'):
+            face['frame_path'] = _relative_cache_path(face['frame_path'])
+    if isinstance(data, dict) and 'processed_frames' in data:
+        data['processed_frames'] = [_relative_cache_path(p) for p in data['processed_frames']]
+
+
+def _convert_clustering_cache(data) -> None:
+    for cluster in data.get('clusters', []):
+        if cluster.get('representative_frame'):
+            cluster['representative_frame'] = _relative_cache_path(cluster['representative_frame'])
+        cluster['top_frames'] = [_relative_cache_path(p) for p in cluster.get('top_frames', [])]
+
+
+def _convert_clusters_metadata(data) -> None:
+    for cluster in data.get('clusters', []):
+        if cluster.get('representative'):
+            cluster['representative'] = _relative_cache_path(cluster['representative'])
+
+
+def _migrate_output_json_caches() -> int:
+    """Rewrite absolute paths in per-video JSON caches relative to OUTPUT_DIR."""
+    import config
+
+    output_dir = Path(config.OUTPUT_DIR)
+    if not output_dir.is_dir():
+        return 0
+
+    converted = 0
+    for video_dir in output_dir.iterdir():
+        if not video_dir.is_dir():
+            continue
+        for cache_file, convert in (
+            (video_dir / 'faces.json', _convert_faces_cache),
+            (video_dir / 'clustering_result.json', _convert_clustering_cache),
+            (video_dir / 'clusters' / 'clusters.json', _convert_clusters_metadata),
+        ):
+            if not cache_file.exists():
+                continue
+            original = cache_file.read_bytes()
+            data = orjson.loads(original)
+            convert(data)
+            updated = orjson.dumps(data, option=orjson.OPT_INDENT_2)
+            if updated == original:
+                continue
+            # Atomic write: a crash leaves either the old or the new file
+            temp_fd, temp_path = tempfile.mkstemp(dir=str(cache_file.parent), suffix='.tmp')
+            try:
+                with os.fdopen(temp_fd, 'wb') as f:
+                    f.write(updated)
+                os.replace(temp_path, cache_file)
+            except BaseException:
+                os.unlink(temp_path)
+                raise
+            converted += 1
+    return converted
+
+
+async def _migrate_output_paths_to_relative(db: aiosqlite.Connection) -> None:
+    legacy = {}
+    for table, column in _OUTPUT_PATH_COLUMNS:
+        async with db.execute(
+            f"SELECT rowid, {column} FROM {table} WHERE {column} IS NOT NULL "
+            f"AND (instr({column}, char(92)) > 0 OR substr({column}, 1, 1) = '/' "
+            f"OR substr({column}, 2, 1) = ':')"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        if rows:
+            legacy[(table, column)] = rows
+    if not legacy:
+        return
+
+    total = sum(len(rows) for rows in legacy.values())
+    print(f"Migration: Converting {total} stored output paths to OUTPUT_DIR-relative form...")
+    # JSON caches first: if they fail, the database keeps its absolute paths
+    # and the whole migration runs again on the next start.
+    converted_files = _migrate_output_json_caches()
+    # Convert every value before writing, so an unknown layout changes nothing.
+    updates = {
+        key: [(_legacy_output_relative(value), rowid) for rowid, value in rows]
+        for key, rows in legacy.items()
+    }
+    for (table, column), pairs in updates.items():
+        await db.executemany(f"UPDATE {table} SET {column} = ? WHERE rowid = ?", pairs)
+    await db.commit()
+    print(f"Migration: {total} database paths and {converted_files} JSON caches converted")
 
 
 async def close_db() -> None:
@@ -652,44 +1039,6 @@ async def list_videos(status: str = None, limit: int = 50, offset: int = 0) -> l
 # CLUSTER CRUD
 # =============================================================================
 
-async def get_cluster(cluster_id: int) -> Optional[dict]:
-    """Get a cluster by ID."""
-    return await execute_one(
-        "SELECT * FROM clusters WHERE id = ?",
-        (cluster_id,)
-    )
-
-
-async def get_clusters_for_video(video_id: int) -> list:
-    """Get all clusters for a video."""
-    return await execute_query(
-        """
-        SELECT * FROM clusters
-        WHERE video_id = ?
-        ORDER BY cluster_index
-        """,
-        (video_id,)
-    )
-
-
-async def create_cluster(
-    video_id: int,
-    cluster_index: int,
-    num_frames: int,
-    representative_frame: str,
-    embedding_centroid: bytes = None
-) -> int:
-    """Create a new cluster."""
-    return await execute_insert(
-        """
-        INSERT INTO clusters
-        (video_id, cluster_index, num_frames, representative_frame, embedding_centroid)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (video_id, cluster_index, num_frames, representative_frame, embedding_centroid)
-    )
-
-
 async def delete_clusters_for_video(video_id: int) -> int:
     """Delete all clusters for a video."""
     return await execute_update(
@@ -712,18 +1061,57 @@ async def get_job(job_id: int) -> Optional[dict]:
 
 async def create_job(
     video_id: int,
-    cluster_id: int,
+    cluster_ids: list,
     num_images: int = 5,
     preferred_expression: str = None
 ) -> int:
-    """Create a new generation job."""
-    return await execute_insert(
+    """Create a new generation job referencing one or more clusters.
+
+    Each cluster in `cluster_ids` is mapped to a sequential person_id
+    (person_01, person_02, ...) by its position in the list.
+    """
+    if not cluster_ids:
+        raise ValueError("cluster_ids must contain at least one cluster")
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO generation_jobs
+            (video_id, num_images, preferred_expression, status)
+            VALUES (?, ?, ?, 'pending')
+            """,
+            (video_id, num_images, preferred_expression)
+        )
+        job_id = cursor.lastrowid
+
+        for order, cluster_id in enumerate(cluster_ids):
+            person_id = f"person_{order + 1:02d}"
+            await db.execute(
+                """
+                INSERT INTO generation_job_clusters
+                (job_id, cluster_id, person_id, cluster_order)
+                VALUES (?, ?, ?, ?)
+                """,
+                (job_id, cluster_id, person_id, order)
+            )
+
+        await db.commit()
+        return job_id
+
+
+async def get_job_clusters(job_id: int) -> list:
+    """Return clusters linked to a job, ordered by cluster_order.
+
+    Each row contains: cluster_id, person_id, cluster_order.
+    """
+    return await execute_query(
         """
-        INSERT INTO generation_jobs
-        (video_id, cluster_id, num_images, preferred_expression, status)
-        VALUES (?, ?, ?, ?, 'pending')
+        SELECT cluster_id, person_id, cluster_order
+        FROM generation_job_clusters
+        WHERE job_id = ?
+        ORDER BY cluster_order ASC
         """,
-        (video_id, cluster_id, num_images, preferred_expression)
+        (job_id,)
     )
 
 
@@ -763,62 +1151,6 @@ async def complete_job(job_id: int) -> None:
         WHERE id = ?
         """,
         (job_id,)
-    )
-
-
-# =============================================================================
-# THUMBNAIL CRUD
-# =============================================================================
-
-async def get_thumbnail(thumbnail_id: int) -> Optional[dict]:
-    """Get a thumbnail by ID."""
-    return await execute_one(
-        "SELECT * FROM thumbnails WHERE id = ?",
-        (thumbnail_id,)
-    )
-
-
-async def create_thumbnail(
-    job_id: int,
-    image_index: int,
-    filepath: str,
-    prompt_text: str = None,
-    suggested_title: str = None,
-    text_overlay: str = None
-) -> int:
-    """Create a new thumbnail record."""
-    return await execute_insert(
-        """
-        INSERT INTO thumbnails
-        (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)
-    )
-
-
-async def get_thumbnails_for_job(job_id: int) -> list:
-    """Get all thumbnails for a job."""
-    return await execute_query(
-        """
-        SELECT * FROM thumbnails
-        WHERE job_id = ?
-        ORDER BY image_index
-        """,
-        (job_id,)
-    )
-
-
-async def get_thumbnails_for_video(video_id: int) -> list:
-    """Get all thumbnails for a video."""
-    return await execute_query(
-        """
-        SELECT t.* FROM thumbnails t
-        JOIN generation_jobs j ON t.job_id = j.id
-        WHERE j.video_id = ?
-        ORDER BY t.created_at DESC
-        """,
-        (video_id,)
     )
 
 

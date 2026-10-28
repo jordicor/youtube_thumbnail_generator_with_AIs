@@ -1,18 +1,24 @@
 {% extends "base.html" %}
+{% from 'components/macros.html' import icon %}
 
 {% block title %}{{ t('video_detail.title') }} - {{ t('common.app_name') }}{% endblock %}
+{% block help_page %}video{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="breadcrumbs" aria-label="{{ t('nav.breadcrumbs') }}">
+    <a href="/">{{ t('nav.library') }}</a>
+    {{ icon('chevron-right') }}
+    <span aria-current="page" data-breadcrumb-video>{{ t('common.loading') }}</span>
+</nav>
+{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <a href="/" class="back-link">&larr; {{ t('video_detail.back_to_list') }}</a>
-    <h1 id="videoTitle">{{ t('common.loading') }}</h1>
-</div>
-
-<div class="video-detail" id="videoDetailApp" data-video-id="{{ video_id }}">
+{% set face_swap_note = t('generate_form.face_swap_missing', missing=face_swap_missing | join(', ')) if face_swap_missing else '' %}
+<div class="video-detail" id="videoDetailApp" data-video-id="{{ video_id }}" data-tab="generate" data-face-swap-missing="{{ face_swap_note }}">
     <!-- Analysis Overlay - shown when video is being analyzed -->
     <div id="analysisOverlay" class="analysis-overlay hidden">
         <div class="analysis-overlay-content">
-            <div class="analysis-overlay-icon">🔍</div>
+            {{ icon('loader', 'icon-xl icon-spin') }}
             <h2 id="analysisOverlayTitle">{{ t('analysis_overlay.title') }}</h2>
             <div class="analysis-progress-bar">
                 <div class="analysis-progress-fill" id="analysisProgressFill"></div>
@@ -23,74 +29,686 @@
         </div>
     </div>
 
-    <!-- Video info section -->
-    <section class="section">
-        <h2>{{ t('video_detail.info.title') }}</h2>
-        <div id="videoInfo" class="video-info-card">
-            <div class="loading">{{ t('common.loading') }}</div>
+    <!-- Video header -->
+    <header class="video-hero">
+        <img class="video-hero-thumb" src="/api/videos/{{ video_id }}/thumbnail" alt="" onerror="this.src='/static/img/placeholder.svg'">
+        <div class="video-hero-info">
+            <h1 id="videoTitle">{{ t('common.loading') }}</h1>
+            <div class="video-hero-meta">
+                <span class="status-pill hidden" id="videoStatusPill"></span>
+                <span class="meta-item hidden" id="videoMetaDuration">{{ icon('clock', 'icon-sm') }}<span></span></span>
+                <span class="meta-item hidden" id="videoMetaPeople">{{ icon('users', 'icon-sm') }}<span></span></span>
+                <span class="meta-item hidden" id="videoMetaThumbnails">{{ icon('image', 'icon-sm') }}<span></span></span>
+            </div>
+        </div>
+        <div class="video-hero-actions">
+            <button type="button" class="icon-btn hidden" id="videoMoreBtn" aria-haspopup="menu" aria-expanded="false"
+                    title="{{ t('index.card.more') }}" aria-label="{{ t('index.card.more') }}">{{ icon('more') }}</button>
+        </div>
+    </header>
+
+    <!-- Workspace tabs -->
+    <div class="workspace-bar">
+        <nav class="workspace-tabs" role="tablist" aria-label="{{ t('video_detail.tabs.label') }}">
+            <button type="button" class="workspace-tab" role="tab" data-tab="generate" id="tab-generate" aria-controls="panel-generate">
+                {{ icon('play') }}<span>{{ t('video_detail.tabs.generate') }}</span>
+            </button>
+            <button type="button" class="workspace-tab" role="tab" data-tab="people" id="tab-people" aria-controls="panel-people">
+                {{ icon('users') }}<span>{{ t('video_detail.tabs.people') }}</span><span class="tab-count" id="peopleTabCount"></span>
+            </button>
+            <button type="button" class="workspace-tab" role="tab" data-tab="thumbnails" id="tab-thumbnails" aria-controls="panel-thumbnails">
+                {{ icon('image') }}<span>{{ t('video_detail.tabs.thumbnails') }}</span><span class="tab-count" id="thumbnailsTabCount"></span>
+            </button>
+            <button type="button" class="workspace-tab" role="tab" data-tab="texts" id="tab-texts" aria-controls="panel-texts">
+                {{ icon('text') }}<span>{{ t('video_detail.tabs.texts') }}</span><span class="tab-count" id="textsTabCount"></span>
+            </button>
+            <button type="button" class="workspace-tab hidden" role="tab" data-tab="transcript" id="tab-transcript" aria-controls="panel-transcript">
+                {{ icon('captions') }}<span>{{ t('video_detail.tabs.transcript') }}</span>
+            </button>
+        </nav>
+    </div>
+
+    <!-- ===================== GENERATE ===================== -->
+    <section class="tab-panel" id="panel-generate" role="tabpanel" aria-labelledby="tab-generate">
+        <!-- A video without analysis has no people yet: analyzing is the only thing to do -->
+        <div class="not-analyzed hidden" id="notAnalyzedState">
+            <div class="not-analyzed-icon">{{ icon('scan', 'icon-xl') }}</div>
+            <h2>{{ t('video_detail.not_analyzed_title') }}</h2>
+            <p>{{ t('video_detail.not_analyzed_text') }}</p>
+            <p class="not-analyzed-error hidden" id="notAnalyzedError"></p>
+            <ul class="not-analyzed-stages">
+                <li>{{ icon('film', 'icon-sm') }}<span>{{ t('video_detail.stage_scenes') }}</span></li>
+                <li>{{ icon('users', 'icon-sm') }}<span>{{ t('video_detail.stage_people') }}</span></li>
+                <li>{{ icon('captions', 'icon-sm') }}<span>{{ t('video_detail.stage_transcript') }}</span></li>
+            </ul>
+            <button type="button" class="btn btn-primary btn-large" id="analyzeVideoBtn">{{ icon('play') }}<span>{{ t('video_detail.analyze') }}</span></button>
+            <p class="form-hint">{{ t('video_detail.not_analyzed_after') }}</p>
+        </div>
+
+        <div class="generate-layout">
+            <form id="generateForm" class="generate-panel">
+                <fieldset class="form-step">
+                    <legend><span class="step-number">1</span>{{ t('generate_form.step_people') }}</legend>
+                    <p class="step-hint">{{ t('generate_form.step_people_hint') }}</p>
+                    <ol class="people-selected" id="peopleSelected"></ol>
+                    <div class="people-picker" id="peoplePicker">
+                        <button type="button" class="btn btn-secondary btn-small" id="addPersonBtn" aria-haspopup="dialog" aria-expanded="false">
+                            {{ icon('plus') }}<span>{{ t('generate_form.add_person') }}</span>
+                        </button>
+                        <div class="people-picker-popover hidden" id="peoplePickerPopover" role="dialog" aria-label="{{ t('generate_form.pick_people') }}">
+                            <div class="people-picker-header">
+                                <strong>{{ t('generate_form.pick_people') }}</strong>
+                                <div class="segmented" id="pickerViewToggle" role="group" aria-label="{{ t('clusters.group_label') }}">
+                                    <button type="button" data-view="person">{{ t('generate_form.pick_by_person') }}</button>
+                                    <button type="button" data-view="person_scene">{{ t('generate_form.pick_by_scene') }}</button>
+                                </div>
+                            </div>
+                            <p class="step-hint hidden" id="pickerSceneHint">{{ t('generate_form.pick_scene_hint') }}</p>
+                            <div class="people-picker-grid" id="peoplePickerGrid"></div>
+                            <div class="people-picker-footer">
+                                <button type="button" class="btn btn-primary btn-small" id="peoplePickerDone">{{ t('generate_form.pick_done') }}</button>
+                            </div>
+                        </div>
+                    </div>
+                    <p class="step-rescue">{{ t('generate_form.rescue_question') }}
+                        <button type="button" class="link-btn" data-goto-tab="people">{{ t('generate_form.rescue_link') }}</button>
+                    </p>
+                </fieldset>
+
+                <fieldset class="form-step" id="backgroundStep">
+                    <legend><span class="step-number">2</span>{{ t('generate_form.step_background') }}</legend>
+                    <div class="background-choices" role="radiogroup" aria-label="{{ t('generate_form.step_background') }}">
+                        <label class="background-choice">
+                            <input type="radio" name="backgroundSource" value="ai" checked>
+                            <span class="background-choice-icon">{{ icon('wand') }}</span>
+                            <span class="background-choice-text">
+                                <strong>{{ t('generate_form.background_ai') }}</strong>
+                                <small>{{ t('generate_form.background_ai_hint') }}</small>
+                            </span>
+                        </label>
+                        <label class="background-choice">
+                            <input type="radio" name="backgroundSource" value="photos">
+                            <span class="background-choice-icon">{{ icon('landscape') }}</span>
+                            <span class="background-choice-text">
+                                <strong>{{ t('generate_form.background_photos') }}</strong>
+                                <small>{{ t('generate_form.background_photos_hint') }}</small>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="background-photos hidden" id="backgroundPhotos">
+                        <ol class="background-list" id="backgroundList"></ol>
+                        <div class="background-actions">
+                            <button type="button" class="btn btn-secondary btn-small" id="backgroundFromVideo">{{ icon('image', 'icon-sm') }}<span>{{ t('generate_form.background_from_video') }}</span></button>
+                            <button type="button" class="btn btn-secondary btn-small" id="backgroundUpload">{{ icon('upload', 'icon-sm') }}<span>{{ t('generate_form.background_upload') }}</span></button>
+                            <input type="file" id="backgroundUploadInput" accept="image/jpeg,image/png,image/webp" hidden>
+                        </div>
+                        <label class="field background-mode hidden" id="backgroundModeField">
+                            <span class="field-label">{{ t('generate_form.background_mode_label') }}</span>
+                            <select class="select" id="backgroundMode">
+                                {% for mode in ['same', 'alternatives', 'split'] %}
+                                <option value="{{ mode }}">{{ t('generate_form.background_mode_' + mode) }}</option>
+                                {% endfor %}
+                            </select>
+                            <span class="form-hint" id="backgroundModeHint"></span>
+                        </label>
+                    </div>
+                </fieldset>
+
+                <fieldset class="form-step">
+                    <legend id="stepCountTitle"><span class="step-number">3</span>{{ t('generate_form.step_count') }}</legend>
+                    <div class="step-inline">
+                        <div class="stepper">
+                            <button type="button" data-step="-1" aria-label="{{ t('generate_form.fewer') }}">−</button>
+                            <input type="number" class="stepper-input" id="numImages" min="1" max="50" aria-labelledby="stepCountTitle">
+                            <button type="button" data-step="1" aria-label="{{ t('generate_form.more') }}">+</button>
+                        </div>
+                        <span class="step-hint">{{ t('generate_form.count_hint') }}</span>
+                    </div>
+                </fieldset>
+
+                <details class="form-step form-step-collapsible" id="lookStep">
+                    <summary>
+                        <span class="step-head">
+                            <span class="step-number">4</span>
+                            <span class="step-title">{{ t('generate_form.step_look') }}</span>
+                            <span class="step-optional">{{ t('generate_form.optional') }}</span>
+                            <span class="step-toggle">
+                                <span class="step-toggle-closed">{{ icon('pencil', 'icon-sm') }}{{ t('generate_form.step_change') }}</span>
+                                <span class="step-toggle-open">{{ t('generate_form.step_fold') }}</span>
+                                {{ icon('chevron-down', 'step-chevron') }}
+                            </span>
+                        </span>
+                        <span class="step-summary">
+                            <span class="step-summary-row" data-default="expression"><span>{{ t('generate_form.expression_short') }}</span><span id="summaryExpression"></span></span>
+                            <span class="step-summary-row"><span>{{ t('generate_form.style_label') }}</span><span id="summaryStyle"></span></span>
+                            <span class="step-summary-row"><span>{{ t('generate_form.titles_label') }}</span><span id="summaryTitles"></span></span>
+                            <span class="step-summary-row"><span>{{ t('generate_form.instructions_label') }}</span><span id="summaryInstructions"></span></span>
+                        </span>
+                    </summary>
+                    <div class="form-step-body">
+                        <p class="step-defaults">
+                            {{ icon('info', 'icon-sm') }}
+                            <span class="step-defaults-text">{{ t('generate_form.defaults_note') }}</span>
+                            <span class="step-defaults-actions">
+                                <button type="button" class="link-btn hidden" data-reset-step="look">{{ t('generate_form.defaults_reset') }}</button>
+                                <button type="button" class="link-btn" data-open-settings="thumbnails">{{ t('generate_form.defaults_open') }}</button>
+                            </span>
+                        </p>
+                        <label class="field">
+                            <span class="field-label" id="expressionLabel">{{ t('generate_form.expression_label_other') }}</span>
+                            <select class="select" id="expression">
+                                <option value="">{{ t('generate_form.expression_auto') }}</option>
+                                <option value="smiling">{{ t('generate_form.expression_smiling') }}</option>
+                                <option value="mouth_closed">{{ t('generate_form.expression_mouth_closed') }}</option>
+                                <option value="neutral">{{ t('generate_form.expression_neutral') }}</option>
+                            </select>
+                            <span class="form-hint" id="expressionHint">{{ t('generate_form.expression_hint_auto') }}</span>
+                            <span class="form-hint form-warning hidden" id="expressionWarning"></span>
+                        </label>
+
+                        <div class="field">
+                            <span class="field-label">{{ t('generate_form.style_label') }}</span>
+                            <input type="file" id="referenceImageInput" accept="image/*" hidden>
+                            <button type="button" class="drop-zone" id="referenceDropZone">
+                                {{ icon('image', 'icon-lg') }}
+                                <span>{{ t('generate_form.style_drop') }}</span>
+                            </button>
+                            <div id="referenceImagePreview" class="reference-image-preview hidden">
+                                <img id="referenceImageImg" src="" alt="">
+                                <button type="button" id="clearReferenceImage" class="icon-btn reference-image-clear"
+                                        title="{{ t('generate_form.remove_image') }}" aria-label="{{ t('generate_form.remove_image') }}">
+                                    {{ icon('x') }}
+                                </button>
+                            </div>
+                            <span class="form-hint" id="styleImageHint">{{ t('generate_form.style_hint') }}</span>
+                        </div>
+
+                        <div class="field">
+                            <span class="field-label">{{ t('generate_form.titles_label') }}</span>
+                            <div class="guiding-titles" id="guidingTitles"></div>
+                            <span class="form-hint">{{ t('generate_form.titles_hint') }}</span>
+                        </div>
+
+                        <label class="field">
+                            <span class="field-label">{{ t('generate_form.instructions_label') }}</span>
+                            <textarea id="promptCustomInstructions" class="input custom-instructions-textarea" rows="3" placeholder="{{ t('generate_form.instructions_placeholder') }}"></textarea>
+                            <span class="form-hint">{{ t('generate_form.instructions_hint') }}</span>
+                        </label>
+                    </div>
+                </details>
+
+                <details class="form-step form-step-collapsible" id="advancedStep">
+                    <summary>
+                        <span class="step-head">
+                            <span class="step-number">5</span>
+                            <span class="step-title">{{ t('generate_form.step_advanced') }}</span>
+                            <span class="step-optional">{{ t('generate_form.optional') }}</span>
+                            <span class="step-toggle">
+                                <span class="step-toggle-closed">{{ icon('pencil', 'icon-sm') }}{{ t('generate_form.step_change') }}</span>
+                                <span class="step-toggle-open">{{ t('generate_form.step_fold') }}</span>
+                                {{ icon('chevron-down', 'step-chevron') }}
+                            </span>
+                        </span>
+                        <span class="step-summary">
+                            <span class="step-summary-row" data-default="face_swap"><span>{{ t('generate_form.face_swap_short') }}</span><span id="summaryFaceSwap"></span></span>
+                            <span class="step-summary-row hidden" data-default="face_restoration"><span>{{ t('generate_form.face_restoration_short') }}</span><span id="summaryFaceRestoration"></span></span>
+                            <span class="step-summary-row" data-default="avoid_repeat"><span>{{ t('generate_form.avoid_repeat_short') }}</span><span id="summaryAvoidRepeat"></span></span>
+                            <span class="step-summary-row" data-default="face_photos"><span>{{ t('generate_form.face_photos_label') }}</span><span id="summaryFacePhotos"></span></span>
+                            <span class="step-summary-row" data-default="provider_fallback"><span>{{ t('generate_form.fallback_short') }}</span><span id="summaryFallback"></span></span>
+                        </span>
+                    </summary>
+                    <div class="form-step-body">
+                        <p class="step-defaults">
+                            {{ icon('info', 'icon-sm') }}
+                            <span class="step-defaults-text">{{ t('generate_form.defaults_note') }}</span>
+                            <span class="step-defaults-actions">
+                                <button type="button" class="link-btn hidden" data-reset-step="advanced">{{ t('generate_form.defaults_reset') }}</button>
+                                <button type="button" class="link-btn" data-open-settings="thumbnails">{{ t('generate_form.defaults_open') }}</button>
+                            </span>
+                        </p>
+                        {% if face_swap_missing %}
+                        <div class="toggle-row is-unavailable">
+                            <input type="checkbox" id="applyFaceSwap" disabled>
+                            <span>
+                                <span class="toggle-label">{{ t('generate_form.face_swap_label') }}</span>
+                                <span class="form-hint unavailable-reason">{{ icon('alert', 'icon-sm') }}{{ face_swap_note }}</span>
+                            </span>
+                        </div>
+                        {% else %}
+                        <label class="toggle-row">
+                            <input type="checkbox" id="applyFaceSwap">
+                            <span>
+                                <span class="toggle-label">{{ t('generate_form.face_swap_label') }}</span>
+                                <span class="form-hint">{{ t('generate_form.face_swap_hint') }}</span>
+                            </span>
+                        </label>
+                        {% endif %}
+                        <label class="toggle-row hidden" id="faceRestorationOption">
+                            <input type="checkbox" id="applyFaceRestoration"{% if face_restoration_missing %} disabled{% endif %}>
+                            <span>
+                                <span class="toggle-label">{{ t('generate_form.face_restoration_label') }}</span>
+                                <span class="form-hint">{{ t('generate_form.face_restoration_hint') }}</span>
+                                {% if face_restoration_missing %}
+                                <span class="form-hint unavailable-reason">{{ t('generate_form.face_restoration_missing', missing=face_restoration_missing | join(', ')) }}</span>
+                                {% endif %}
+                            </span>
+                        </label>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="promptIncludeHistory">
+                            <span>
+                                <span class="toggle-label">{{ t('generate_form.avoid_repeat') }}</span>
+                                <span class="form-hint">{{ t('generate_form.avoid_repeat_hint') }}</span>
+                            </span>
+                        </label>
+                        <div class="field">
+                            <span class="field-label" id="facePhotosLabel">{{ t('generate_form.face_photos_label') }}</span>
+                            <div class="step-inline">
+                                <div class="stepper">
+                                    <button type="button" data-step="-1" aria-label="{{ t('generate_form.fewer') }}">−</button>
+                                    <input type="number" class="stepper-input" id="facePhotosPerThumbnail" min="1" aria-labelledby="facePhotosLabel">
+                                    <button type="button" data-step="1" aria-label="{{ t('generate_form.more') }}">+</button>
+                                </div>
+                                <span class="form-hint" id="facePhotosHint"></span>
+                            </div>
+                        </div>
+                        <label class="toggle-row">
+                            <input type="checkbox" id="imageAiProviderFallback">
+                            <span>
+                                <span class="toggle-label">{{ t('generate_form.fallback_label') }}</span>
+                                <span class="form-hint">{{ t('generate_form.fallback_hint') }}</span>
+                            </span>
+                        </label>
+                    </div>
+                </details>
+
+                <!-- Always in view at the bottom of the form -->
+                <div class="generate-submit">
+                    <div class="gransabio-banner hidden" role="alert">
+                        {{ icon('alert') }}<span>{{ t('ai_config.gran_sabio.down') }}</span>
+                        <button type="button" class="btn btn-secondary btn-small" data-gransabio-retry>{{ t('ai_config.gran_sabio.retry') }}</button>
+                    </div>
+                    <p class="generate-references" id="generateReferences" role="status"></p>
+                    <p class="generate-summary" id="generateSummary"></p>
+                    <div class="generation-button-group">
+                        <button type="submit" class="btn btn-primary btn-generate requires-gransabio gransabio-blocked" id="generateBtn"></button>
+                        <!-- Queue badge - shows task count for this video -->
+                        <span class="generation-queue-badge hidden" id="generationQueueBadge">0</span>
+                        <button type="button" class="btn btn-danger btn-cancel hidden" id="cancelGenerationBtn"
+                                title="{{ t('task_queue.cancel') }}" aria-label="{{ t('task_queue.cancel') }}">
+                            {{ icon('x') }}
+                        </button>
+                    </div>
+                    <!-- Queue status line below button -->
+                    <div class="generation-queue-status hidden" id="generationQueueStatus">
+                        <span class="queue-status-text" id="generationQueueText"></span>
+                        <a href="#" class="queue-status-link" id="generationQueueLink">{{ t('queue_indicator.view') }}</a>
+                    </div>
+                    <p class="engine-line">
+                        {{ icon('settings', 'icon-sm') }}<span id="generateEngineSummary"></span>
+                        <button type="button" class="link-btn" data-open-settings="thumbnails" title="{{ t('settings.open_hint') }}">{{ t('ai_config.change') }}</button>
+                    </p>
+                </div>
+            </form>
+
+            <aside class="generate-results" aria-live="polite">
+                <div class="generate-results-header">
+                    <h3 id="resultsTitle">{{ t('generate_form.results_recent') }}</h3>
+                    <button type="button" class="btn btn-ghost btn-small" id="viewAllThumbnailsBtn">
+                        <span id="viewAllThumbnailsLabel">{{ t('generate_form.results_view_all') }}</span>{{ icon('arrow-right', 'icon-sm') }}
+                    </button>
+                </div>
+                <div class="generation-progress hidden" id="generationStatus">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <p id="progressText">{{ t('generate_form.progress_starting') }}</p>
+                </div>
+                <div class="results-grid" id="thumbnailsGrid"></div>
+                <div class="results-grid" id="recentThumbnailsGrid"></div>
+                <div class="results-empty hidden" id="resultsEmpty">
+                    {{ icon('image', 'icon-xl') }}
+                    <p>{{ t('generate_form.results_empty') }}</p>
+                </div>
+            </aside>
         </div>
     </section>
 
-    <!-- Transcription section (Collapsible) -->
-    <section class="section transcription-section" id="transcriptionSection" style="display: none;">
-        <div class="section-header-collapsible" onclick="VideoDetail.toggleSection('transcriptionContent')">
-            <h2>
-                <span class="collapse-icon" id="transcriptionContentIcon">&#9660;</span>
-                {{ t('transcription.title') }}
-            </h2>
+    <!-- ===================== PEOPLE ===================== -->
+    <section class="tab-panel" id="panel-people" role="tabpanel" aria-labelledby="tab-people">
+        <div class="panel-head">
+            <h2>{{ t('clusters.title') }}</h2>
+            <p>{{ t('clusters.intro') }}</p>
         </div>
-        <div id="transcriptionContent" class="collapsible-content">
-            <div class="transcription-container">
-                <div id="transcriptionText" class="transcription-text">
-                    <div class="loading">{{ t('transcription.loading') }}</div>
+        <div class="panel-toolbar">
+            <div class="panel-toolbar-left">
+                <span class="toolbar-label" id="clusterViewLabel">{{ t('clusters.group_label') }}</span>
+                <div class="segmented" id="clusterViewToggle" role="group" aria-labelledby="clusterViewLabel">
+                    <button type="button" data-view="person">{{ t('clusters.by_person') }}</button>
+                    <button type="button" data-view="person_scene">{{ t('clusters.by_person_scene') }}</button>
+                </div>
+                <span class="info-tooltip" tabindex="0" data-tooltip="{{ t('clusters.scene_help') }}" aria-label="{{ t('clusters.scene_help') }}">&#9432;</span>
+            </div>
+            <div class="panel-toolbar-right">
+                <a href="/video/{{ video_id }}/person/new?view_mode=person" class="btn btn-secondary btn-small" id="createPersonLink">
+                    {{ icon('plus', 'icon-sm') }}<span>{{ t('video_detail.clusters.create_cluster') }}</span>
+                </a>
+            </div>
+        </div>
+        <div id="clustersGrid" class="clusters-grid">
+            <div class="loading">{{ t('clusters.loading') }}</div>
+        </div>
+        <!-- Floating actions on the people checked for merge/delete -->
+        <div class="bulk-bar hidden" id="clusterBulkBar" role="region" aria-label="{{ t('clusters.selection_label') }}">
+            <span class="bulk-count" id="clusterSelectionCount"></span>
+            <span class="bulk-divider"></span>
+            <button type="button" class="btn btn-secondary btn-small" id="btnMergeClusters">{{ icon('users', 'icon-sm') }}<span>{{ t('clusters.merge') }}</span></button>
+            <button type="button" class="btn btn-danger btn-small" id="btnDeleteSelectedClusters">{{ icon('trash', 'icon-sm') }}<span>{{ t('common.delete') }}</span></button>
+            <button type="button" class="icon-btn" id="btnClearClusterSelection" title="{{ t('clusters.clear_selection') }}" aria-label="{{ t('clusters.clear_selection') }}">{{ icon('x') }}</button>
+        </div>
+    </section>
+
+    <!-- ===================== THUMBNAILS ===================== -->
+    <section class="tab-panel" id="panel-thumbnails" role="tabpanel" aria-labelledby="tab-thumbnails">
+        <div class="panel-toolbar">
+            <div class="panel-toolbar-left">
+                <h2 class="panel-title">{{ t('thumbnails.saved_title') }} <span class="thumbnail-count-badge" id="thumbnailCountBadge">0</span></h2>
+            </div>
+            <div class="panel-toolbar-right">
+                <label class="library-sort">
+                    <span>{{ t('thumbnails.sort_label') }}</span>
+                    <select class="select" id="thumbnailsSort">
+                        <option value="recent" selected>{{ t('thumbnails.sort_recent') }}</option>
+                        <option value="failures_last">{{ t('thumbnails.sort_failures_last') }}</option>
+                        <option value="match">{{ t('thumbnails.sort_match') }}</option>
+                    </select>
+                </label>
+                <button type="button" class="btn btn-secondary btn-small" id="downloadAllBtn" style="display: none;">
+                    {{ icon('download', 'icon-sm') }}<span>{{ t('thumbnails.download_all') }}</span>
+                </button>
+            </div>
+        </div>
+        <div id="existingThumbnailsContainer">
+            <div class="existing-thumbnails-grid" id="existingThumbnailsGrid">
+                <div class="loading">{{ t('thumbnails.loading') }}</div>
+            </div>
+            <div class="thumbnails-load-more hidden" id="thumbnailsLoadMore">
+                <button type="button" class="btn btn-secondary" id="thumbnailsLoadMoreBtn"></button>
+            </div>
+        </div>
+        <div class="empty-state" id="noThumbnailsMessage" style="display: none;">
+            {{ icon('image', 'icon-xl') }}
+            <h3>{{ t('empty_state.no_thumbnails') }}</h3>
+            <p>{{ t('empty_state.thumbnails_hint') }}</p>
+            <button type="button" class="btn btn-primary" data-goto-tab="generate">{{ icon('play', 'icon-sm') }}<span>{{ t('empty_state.go_generate') }}</span></button>
+        </div>
+    </section>
+
+    <!-- ===================== TITLES & DESCRIPTIONS ===================== -->
+    <section class="tab-panel" id="panel-texts" role="tabpanel" aria-labelledby="tab-texts">
+        <div class="texts-card">
+            <div class="segmented texts-switch" id="contentTabs" role="group" aria-label="{{ t('video_detail.tabs.texts') }}">
+                <button type="button" data-content-tab="titles" id="tabTitles">{{ t('content_optimization.tab_titles') }}</button>
+                <button type="button" data-content-tab="descriptions" id="tabDescriptions">{{ t('content_optimization.tab_descriptions') }}</button>
+            </div>
+
+            <div class="gransabio-banner hidden" role="alert">
+                {{ icon('alert') }}<span>{{ t('ai_config.gran_sabio.down_texts') }}</span>
+                <button type="button" class="btn btn-secondary btn-small" data-gransabio-retry>{{ t('ai_config.gran_sabio.retry') }}</button>
+            </div>
+
+            <!-- Titles -->
+            <div id="tabContentTitles" class="texts-pane">
+                <p class="texts-intro">{{ t('titles_form.intro') }}</p>
+                <div class="texts-form-grid">
+                    <label class="field">
+                        <span class="field-label">{{ t('titles_form.style_label') }} <span class="info-tooltip" data-tooltip="{{ t('titles_form.style_tooltip') }}">&#9432;</span></span>
+                        <select class="select" id="titleStyle">
+                            <option value="neutral">{{ t('titles_form.style_neutral') }}</option>
+                            <option value="seo">{{ t('titles_form.style_seo') }}</option>
+                            <option value="clickbait">{{ t('titles_form.style_clickbait') }}</option>
+                            <option value="custom">{{ t('titles_form.style_custom') }}</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">{{ t('titles_form.language_label') }}</span>
+                        <select class="select" id="titleLanguage">
+                            <option value="es" selected>{{ t('languages.es') }}</option>
+                            <option value="en">{{ t('languages.en') }}</option>
+                            <option value="fr">{{ t('languages.fr') }}</option>
+                            <option value="it">{{ t('languages.it') }}</option>
+                            <option value="de">{{ t('languages.de') }}</option>
+                            <option value="pt">{{ t('languages.pt') }}</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">{{ t('titles_form.quantity_label') }}</span>
+                        <input type="number" class="input" id="titleQuantity" value="5" min="1" max="50">
+                    </label>
+                </div>
+
+                <label class="field" id="customPromptGroup" style="display: none;">
+                    <span class="field-label">{{ t('titles_form.custom_prompt_label') }}</span>
+                    <textarea class="input" id="titleCustomPrompt" rows="3" placeholder="{{ t('titles_form.custom_prompt_placeholder') }}"></textarea>
+                </label>
+
+                <label class="field" id="customInstructionsGroup">
+                    <span class="field-label">{{ t('titles_form.instructions_label') }}</span>
+                    <textarea class="input" id="titleCustomInstructions" rows="2" placeholder="{{ t('titles_form.instructions_placeholder') }}"></textarea>
+                </label>
+
+                <div class="texts-actions">
+                    <button type="button" class="btn btn-primary requires-gransabio gransabio-blocked" id="generateTitlesBtn">
+                        {{ icon('text', 'icon-sm') }}<span id="generateTitlesLabel"></span>
+                    </button>
+                    <p class="engine-line">
+                        {{ icon('settings', 'icon-sm') }}<span class="texts-engine-summary"></span>
+                        <button type="button" class="link-btn" data-open-settings="texts" title="{{ t('settings.open_hint') }}">{{ t('ai_config.change') }}</button>
+                    </p>
+                </div>
+
+                <div class="content-loading" id="titlesLoading" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <div class="content-loading-text">
+                        <span id="titlesLoadingMain">{{ t('titles_form.preparing') }}</span>
+                        <small id="titlesLoadingHint"></small>
+                    </div>
+                </div>
+
+                <div class="texts-results" id="titlesResultsSection" style="display: none;">
+                    <div class="texts-results-header">
+                        <div class="texts-results-title">
+                            <strong>{{ t('titles_form.results_header') }}</strong>
+                            <span class="tab-count" id="titlesCount"></span>
+                            <span class="form-hint" id="titlesSelectionInfo"></span>
+                        </div>
+                        <button type="button" class="btn btn-secondary btn-small" id="copyAllTitlesBtn">
+                            {{ icon('copy', 'icon-sm') }}<span>{{ t('titles_form.copy_all') }}</span>
+                        </button>
+                    </div>
+                    <ol id="titlesResultsList" class="titles-results-list"></ol>
+                </div>
+            </div>
+
+            <!-- Descriptions -->
+            <div id="tabContentDescriptions" class="texts-pane hidden">
+                <p class="texts-intro">{{ t('descriptions_form.intro') }}</p>
+                <div class="texts-form-grid texts-form-grid-wide">
+                    <label class="field">
+                        <span class="field-label">{{ t('descriptions_form.style_label') }}</span>
+                        <select class="select" id="descStyle">
+                            <option value="informative">{{ t('descriptions_form.style_informative') }}</option>
+                            <option value="seo">{{ t('descriptions_form.style_seo') }}</option>
+                            <option value="minimal">{{ t('descriptions_form.style_minimal') }}</option>
+                            <option value="custom">{{ t('descriptions_form.style_custom') }}</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">{{ t('descriptions_form.language_label') }}</span>
+                        <select class="select" id="descLanguage">
+                            <option value="es" selected>{{ t('languages.es') }}</option>
+                            <option value="en">{{ t('languages.en') }}</option>
+                            <option value="fr">{{ t('languages.fr') }}</option>
+                            <option value="it">{{ t('languages.it') }}</option>
+                            <option value="de">{{ t('languages.de') }}</option>
+                            <option value="pt">{{ t('languages.pt') }}</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">{{ t('descriptions_form.length_label') }}</span>
+                        <select class="select" id="descLength">
+                            <option value="short">{{ t('descriptions_form.length_short') }}</option>
+                            <option value="medium" selected>{{ t('descriptions_form.length_medium') }}</option>
+                            <option value="long">{{ t('descriptions_form.length_long') }}</option>
+                            <option value="very_long">{{ t('descriptions_form.length_very_long') }}</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">{{ t('descriptions_form.quantity_label') }}</span>
+                        <input type="number" class="input" id="descQuantity" value="1" min="1" max="3">
+                    </label>
+                </div>
+
+                <div class="field">
+                    <span class="field-label">{{ t('descriptions_form.options_label') }}</span>
+                    <div class="option-chips">
+                        <label class="option-chip">
+                            <input type="checkbox" id="descTimestamps">
+                            <span>{{ t('descriptions_form.timestamps') }}</span>
+                        </label>
+                        <label class="option-chip">
+                            <input type="checkbox" id="descHashtags">
+                            <span>{{ t('descriptions_form.hashtags') }}</span>
+                        </label>
+                        <label class="option-chip">
+                            <input type="checkbox" id="descEmojis">
+                            <span>{{ t('descriptions_form.emojis') }}</span>
+                        </label>
+                        <label class="option-chip">
+                            <input type="checkbox" id="descSocialLinks">
+                            <span>{{ t('descriptions_form.social_links') }}</span>
+                        </label>
+                    </div>
+                </div>
+
+                <label class="field" id="descCustomPromptGroup" style="display: none;">
+                    <span class="field-label">{{ t('descriptions_form.custom_prompt_label') }}</span>
+                    <textarea class="input" id="descCustomPrompt" rows="3" placeholder="{{ t('descriptions_form.custom_prompt_placeholder') }}"></textarea>
+                </label>
+
+                <label class="field" id="descCustomInstructionsGroup">
+                    <span class="field-label">{{ t('descriptions_form.instructions_label') }}</span>
+                    <textarea class="input" id="descCustomInstructions" rows="2" placeholder="{{ t('descriptions_form.instructions_placeholder') }}"></textarea>
+                </label>
+
+                <div class="texts-actions">
+                    <button type="button" class="btn btn-primary requires-gransabio gransabio-blocked" id="generateDescBtn">
+                        {{ icon('text', 'icon-sm') }}<span id="generateDescLabel"></span>
+                    </button>
+                    <p class="engine-line">
+                        {{ icon('settings', 'icon-sm') }}<span class="texts-engine-summary"></span>
+                        <button type="button" class="link-btn" data-open-settings="texts" title="{{ t('settings.open_hint') }}">{{ t('ai_config.change') }}</button>
+                    </p>
+                </div>
+
+                <div class="content-loading" id="descriptionsLoading" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <div class="content-loading-text">
+                        <span id="descriptionsLoadingMain">{{ t('descriptions_form.preparing') }}</span>
+                        <small id="descriptionsLoadingHint"></small>
+                    </div>
+                </div>
+
+                <div class="texts-results" id="descriptionsResultsSection" style="display: none;">
+                    <div class="texts-results-header">
+                        <div class="texts-results-title">
+                            <strong>{{ t('descriptions_form.results_header') }}</strong>
+                            <span class="tab-count" id="descriptionsCount"></span>
+                        </div>
+                        <div class="texts-results-actions">
+                            <button type="button" class="btn btn-secondary btn-small" id="copyAllDescriptionsBtn">
+                                {{ icon('copy', 'icon-sm') }}<span>{{ t('descriptions_form.copy_all') }}</span>
+                            </button>
+                            <button type="button" class="btn btn-danger btn-small" id="deleteAllDescriptionsBtn">
+                                {{ icon('trash', 'icon-sm') }}<span>{{ t('descriptions_form.delete_all') }}</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="descriptionsResultsList" class="descriptions-results-list"></div>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- Clusters section -->
-    <section class="section">
-        <div class="section-header-row">
-            <h2 class="section-title">{{ t('clusters.title') }} <span class="info-tooltip" data-tooltip="{{ t('clusters.tooltip') }}">&#9432;</span></h2>
-            <div class="cluster-view-selector">
-                <label for="clusterViewType">{{ t('clusters.view_as') }}</label>
-                <select id="clusterViewType" onchange="VideoDetail.changeClusterViewType()">
-                    <option value="person" selected>{{ t('clusters.by_person') }}</option>
-                    <option value="person_scene">{{ t('clusters.by_person_scene') }}</option>
-                </select>
-            </div>
-        </div>
-
-        <!-- Selection bar -->
-        <div id="clusterSelectionBar" class="selection-bar visible">
-            <div class="selection-bar-left">
-                <label class="checkbox-wrapper">
-                    <input type="checkbox" id="selectAllClusters" onchange="VideoDetail.toggleSelectAllClusters()">
-                    <span>{{ t('common.select_all') }}</span>
-                </label>
-                <span id="clusterSelectionCount" class="selection-count">{{ t('selection.selected_count', count=0) }}</span>
-            </div>
-            <div class="selection-bar-right">
-                <a href="/video/{{ video_id }}/cluster/create" class="btn btn-secondary btn-create-cluster" title="{{ t('clusters.create_cluster') }}">
-                    {{ t('clusters.new') }}
-                </a>
-                <button id="btnMergeClusters" class="btn btn-secondary" onclick="VideoDetail.showMergeModal()" disabled>
-                    {{ t('clusters.merge') }}
-                </button>
-                <button id="btnDeleteSelectedClusters" class="btn btn-danger" onclick="VideoDetail.showDeleteSelectedModal()" disabled>
-                    {{ t('common.delete') }}
-                </button>
-            </div>
-        </div>
-
-        <div id="clustersGridContainer" class="clusters-grid-container">
-            <div id="clustersGrid" class="clusters-grid">
-                <div class="loading">{{ t('clusters.loading') }}</div>
+    <!-- ===================== TRANSCRIPT ===================== -->
+    <section class="tab-panel" id="panel-transcript" role="tabpanel" aria-labelledby="tab-transcript">
+        <p class="panel-hint">{{ t('transcription.hint') }}</p>
+        <div class="transcription-container">
+            <div id="transcriptionText" class="transcription-text">
+                <div class="loading">{{ t('transcription.loading') }}</div>
             </div>
         </div>
     </section>
 
+    <!-- Thumbnail viewer -->
+    <div class="lightbox hidden" id="thumbLightbox" tabindex="-1" role="dialog" aria-modal="true" aria-label="{{ t('thumbnails.viewer_label') }}">
+        <div class="lightbox-stage" id="thumbLightboxStage">
+            <div class="lightbox-frame" id="thumbLightboxFrame">
+                <img id="thumbLightboxImage" alt="">
+            </div>
+            <div class="lightbox-end hidden" id="thumbLightboxEnd">
+                {{ icon('check', 'icon-xl') }}
+                <h3>{{ t('thumbnails.viewer_recent_end') }}</h3>
+                <p id="thumbLightboxEndCount"></p>
+                <button type="button" class="btn btn-primary" id="thumbLightboxRest">
+                    <span>{{ t('thumbnails.viewer_see_rest') }}</span>{{ icon('arrow-right', 'icon-sm') }}
+                </button>
+            </div>
+        </div>
+        <div class="lightbox-bar">
+            <button type="button" class="icon-btn" id="thumbLightboxPrev" title="{{ t('common.previous') }}" aria-label="{{ t('common.previous') }}">{{ icon('chevron-left') }}</button>
+            <div class="lightbox-info" id="thumbLightboxInfo" aria-live="polite"></div>
+            <a class="btn btn-secondary btn-small" id="thumbLightboxDownload" download>{{ icon('download', 'icon-sm') }}<span>{{ t('thumbnails.download') }}</span></a>
+            <button type="button" class="btn btn-danger btn-small" id="thumbLightboxDelete">{{ icon('trash', 'icon-sm') }}<span>{{ t('common.delete') }}</span></button>
+            <button type="button" class="icon-btn" id="thumbLightboxNext" title="{{ t('common.next') }}" aria-label="{{ t('common.next') }}">{{ icon('chevron-right') }}</button>
+            <button type="button" class="icon-btn" id="thumbLightboxClose" title="{{ t('common.close') }}" aria-label="{{ t('common.close') }}">{{ icon('x') }}</button>
+        </div>
+    </div>
+
     <!-- Delete Cluster Modal -->
+    <!-- Frames of the video to use as the setting of the thumbnails -->
+    <div class="modal-overlay" id="backgroundPicker">
+        <div class="modal-dialog background-picker" role="dialog" aria-modal="true" aria-labelledby="backgroundPickerTitle">
+            <div class="modal-header">
+                <h3 class="modal-title" id="backgroundPickerTitle">{{ t('generate_form.background_pick_title') }}</h3>
+            </div>
+            <div class="modal-body">
+                <p class="form-hint">{{ t('generate_form.background_pick_hint') }}</p>
+                <div class="background-picker-grid" id="backgroundPickerGrid"></div>
+            </div>
+            <div class="modal-footer">
+                <span class="background-picker-count" id="backgroundPickerCount"></span>
+                <button type="button" class="btn btn-cancel" data-background-picker="cancel">{{ t('common.cancel') }}</button>
+                <button type="button" class="btn btn-primary" data-background-picker="apply">{{ t('generate_form.background_pick_apply') }}</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- What the image model gets with each thumbnail -->
+    <div class="modal-overlay" id="referencesPreview">
+        <div class="modal-dialog references-preview" role="dialog" aria-modal="true" aria-labelledby="referencesPreviewTitle">
+            <div class="modal-header">
+                <h3 class="modal-title" id="referencesPreviewTitle">{{ t('generate_form.references_title') }}</h3>
+                <button type="button" class="icon-btn" data-close-references title="{{ t('common.close') }}" aria-label="{{ t('common.close') }}">{{ icon('x') }}</button>
+            </div>
+            <div class="modal-body">
+                <p class="form-hint">{{ t('generate_form.references_hint') }}</p>
+                <div class="references-preview-grid" id="referencesPreviewGrid"></div>
+            </div>
+        </div>
+    </div>
+
+    {% include 'components/crop_dialog.html' %}
+
     <div id="deleteClusterModal" class="modal-overlay">
         <div class="modal-dialog modal-danger">
             <div class="modal-header">
@@ -101,8 +719,8 @@
                 <p id="deleteClusterMessage">{{ t('clusters.delete_message') }}</p>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('deleteClusterModal')">{{ t('common.cancel') }}</button>
-                <button class="btn btn-confirm" id="confirmDeleteBtn" onclick="VideoDetail.confirmDeleteCluster()">{{ t('common.delete') }}</button>
+                <button type="button" class="btn btn-cancel" data-close-modal="deleteClusterModal">{{ t('common.cancel') }}</button>
+                <button type="button" class="btn btn-confirm" id="confirmDeleteBtn">{{ t('common.delete') }}</button>
             </div>
         </div>
     </div>
@@ -120,549 +738,11 @@
                 <div id="mergeTargetOptions" class="merge-target-options" style="margin-top: 15px;"></div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('mergeClustersModal')">{{ t('common.cancel') }}</button>
-                <button class="btn btn-confirm" onclick="VideoDetail.confirmMergeClusters()">{{ t('clusters.merge') }}</button>
+                <button type="button" class="btn btn-cancel" data-close-modal="mergeClustersModal">{{ t('common.cancel') }}</button>
+                <button type="button" class="btn btn-confirm" id="confirmMergeBtn">{{ t('clusters.merge') }}</button>
             </div>
         </div>
     </div>
-
-    <!-- Reference Limit Conflict Modal -->
-    <div id="refConflictModal" class="modal-overlay">
-        <div class="modal-dialog modal-warning">
-            <div class="modal-header">
-                <span class="modal-icon">&#9888;</span>
-                <span class="modal-title">{{ t('generate_form.ref_conflict_title') }}</span>
-            </div>
-            <div class="modal-body">
-                <p id="refConflictMessage"></p>
-            </div>
-            <div class="modal-footer" style="flex-direction: column; gap: 10px;">
-                <button class="btn btn-primary" id="refConflictReduceCluster" style="width: 100%;">
-                    {{ t('generate_form.ref_conflict_reduce_cluster') }}
-                </button>
-                <button class="btn btn-secondary" id="refConflictRemoveStyle" style="width: 100%;">
-                    {{ t('generate_form.ref_conflict_remove_style') }}
-                </button>
-                <button class="btn btn-cancel" onclick="VideoDetail.closeModal('refConflictModal')" style="width: 100%;">
-                    {{ t('common.cancel') }}
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- AI Configuration Chips Bar -->
-    <div class="ai-config-bar" id="aiConfigBar">
-        <span class="ai-config-bar-label">{{ t('ai_config.bar_label') }}</span>
-
-        <!-- Overlay for closing popovers -->
-        <div class="ai-config-overlay" id="aiConfigOverlay" onclick="VideoDetail.closeAllAiPopovers()"></div>
-
-        <!-- Text AI Chip -->
-        <div class="ai-config-chip-wrapper">
-            <div class="ai-config-chip" id="textAiChip" onclick="VideoDetail.toggleAiPopover('textAi')">
-                <span class="ai-config-chip-icon">&#129302;</span>
-                <div class="ai-config-chip-content">
-                    <span class="ai-config-chip-title">{{ t('ai_config.text_ai') }}</span>
-                    <span class="ai-config-chip-value" id="textAiChipValue">
-                        {{ t('ai_providers.anthropic') }}
-                        <span class="ai-config-chip-badge" id="textAiThinkingBadge" style="display: none;">{{ t('ai_config.thinking_badge') }}</span>
-                    </span>
-                </div>
-                <span class="ai-config-chip-arrow">&#9660;</span>
-            </div>
-
-            <!-- Text AI Popover -->
-            <div class="ai-config-popover" id="textAiPopover">
-                <div class="ai-config-popover-header">
-                    <span class="ai-config-popover-title">&#129302; {{ t('ai_config.text_config_title') }}</span>
-                    <button class="ai-config-popover-close" onclick="VideoDetail.closeAiPopover('textAi')">&times;</button>
-                </div>
-                <div class="ai-config-popover-body">
-                    <div class="form-group">
-                        <label for="textAiProvider">{{ t('ai_config.provider') }}</label>
-                        <select id="textAiProvider" onchange="VideoDetail.updateTextAiModelOptions()">
-                            <option value="anthropic">{{ t('ai_providers.anthropic') }}</option>
-                            <option value="openai">{{ t('ai_providers.openai') }}</option>
-                            <option value="google">{{ t('ai_providers.google') }}</option>
-                            <option value="xai">{{ t('ai_providers.xai') }}</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="textAiModel">{{ t('ai_config.model') }}</label>
-                        <select id="textAiModel">
-                            <option value="">{{ t('ai_config.loading_models') }}</option>
-                        </select>
-                    </div>
-                    <div class="ai-config-thinking-row">
-                        <label class="ai-config-thinking-toggle">
-                            <input type="checkbox" id="textAiThinkingEnabled" onchange="VideoDetail.toggleTextAiThinkingLevel()">
-                            <span>{{ t('ai_config.thinking_mode') }}</span>
-                        </label>
-                        <div class="ai-config-thinking-level hidden" id="textAiThinkingLevelGroup">
-                            <label for="textAiThinkingLevel">{{ t('ai_config.thinking_level') }}</label>
-                            <select id="textAiThinkingLevel">
-                                <option value="low">{{ t('ai_config.thinking_low') }}</option>
-                                <option value="medium" selected>{{ t('ai_config.thinking_medium') }}</option>
-                                <option value="high">{{ t('ai_config.thinking_high') }}</option>
-                            </select>
-                        </div>
-                    </div>
-                </div>
-                <div class="ai-config-popover-info">
-                    <span class="ai-config-popover-info-icon">&#9432;</span>
-                    <span>{{ t('ai_config.text_info') }}</span>
-                </div>
-            </div>
-        </div>
-
-        <!-- Image AI Chip -->
-        <div class="ai-config-chip-wrapper">
-            <div class="ai-config-chip" id="imageAiChip" onclick="VideoDetail.toggleAiPopover('imageAi')">
-                <span class="ai-config-chip-icon">&#128247;</span>
-                <div class="ai-config-chip-content">
-                    <span class="ai-config-chip-title">{{ t('ai_config.image_ai') }}</span>
-                    <span class="ai-config-chip-value" id="imageAiChipValue">
-                        {{ t('ai_providers.gemini') }}
-                        <span class="ai-config-chip-badge" id="imageAiRefBadge">{{ t('ai_config.refs_badge', count=3) }}</span>
-                    </span>
-                </div>
-                <span class="ai-config-chip-arrow">&#9660;</span>
-            </div>
-
-            <!-- Image AI Popover -->
-            <div class="ai-config-popover ai-config-popover-wide" id="imageAiPopover">
-                <div class="ai-config-popover-header">
-                    <span class="ai-config-popover-title">&#128247; {{ t('ai_config.image_config_title') }}</span>
-                    <button class="ai-config-popover-close" onclick="VideoDetail.closeAiPopover('imageAi')">&times;</button>
-                </div>
-                <div class="ai-config-popover-body">
-                    <div class="form-group">
-                        <label for="imageAiProvider">{{ t('ai_config.image_provider') }}</label>
-                        <select id="imageAiProvider" onchange="VideoDetail.updateImageAiModelOptions(true)">
-                            <option value="gemini">{{ t('ai_providers.gemini') }}</option>
-                            <option value="poe">{{ t('ai_providers.poe') }}</option>
-                            <option value="openai">{{ t('ai_providers.openai') }}</option>
-                            <option value="replicate">{{ t('ai_providers.replicate') }}</option>
-                        </select>
-                        <small class="ai-config-ref-indicator supported" id="imageAiRefIndicator">{{ t('ai_config.supports_refs') }}</small>
-                    </div>
-
-                    <!-- Gemini Model -->
-                    <div class="ai-config-model-subsection" id="imageAiGeminiModelGroup">
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label for="imageAiGeminiModel">{{ t('ai_config.model') }}</label>
-                            <select id="imageAiGeminiModel" onchange="VideoDetail.updateImageAiRefMax(true)">
-                                <option value="gemini-2.5-flash-image">gemini-2.5-flash-image ({{ t('ai_config.fast') }})</option>
-                                <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview (4K)</option>
-                                <option value="gemini-3.1-flash-image-preview">gemini-3.1-flash-image-preview (4K, {{ t('ai_config.fast') }})</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <!-- Poe Model -->
-                    <div class="ai-config-model-subsection" id="imageAiPoeModelGroup" style="display: none;">
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label for="imageAiPoeModel">{{ t('ai_config.model') }}</label>
-                            <select id="imageAiPoeModel" onchange="VideoDetail.updateImageAiRefMax(true)">
-                                <option value="flux2pro">flux2pro - {{ t('ai_config.best_quality') }}</option>
-                                <option value="flux2flex">flux2flex - {{ t('ai_config.high_res') }}</option>
-                                <option value="fluxkontextpro">fluxkontextpro - {{ t('ai_config.best_prompt') }}</option>
-                                <option value="seedream40">seedream40 - {{ t('ai_config.combine_refs') }}</option>
-                                <option value="nanobananapro">nanobananapro - Gemini 3</option>
-                                <option value="Ideogram-v3">Ideogram-v3 - {{ t('ai_config.text_logos') }}</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <!-- OpenAI Model -->
-                    <div class="ai-config-model-subsection" id="imageAiOpenaiModelGroup" style="display: none;">
-                        <div class="warning-box" id="imageAiOpenaiWarning" style="display: none; margin-bottom: 10px;">
-                            <strong>{{ t('common.warning') }}:</strong> DALL-E 3 {{ t('ai_config.no_refs_warning') }}
-                        </div>
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label for="imageAiOpenaiModel">{{ t('ai_config.model') }}</label>
-                            <select id="imageAiOpenaiModel" onchange="VideoDetail.updateImageAiOpenaiWarning(); VideoDetail.updateImageAiRefMax(true)">
-                                <option value="gpt-image-2" data-ref="true">gpt-image-2 - {{ t('ai_config.best') }}</option>
-                                <option value="gpt-image-1.5" data-ref="true">gpt-image-1.5</option>
-                                <option value="gpt-image-1" data-ref="true">gpt-image-1 - {{ t('ai_config.standard') }}</option>
-                                <option value="gpt-image-1-mini" data-ref="true">gpt-image-1-mini - {{ t('ai_config.fast') }}</option>
-                                <option value="dall-e-3" data-ref="false">dall-e-3 - {{ t('ai_config.no_refs') }}</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <!-- Reference Images -->
-                    <div class="form-group" id="imageAiRefGroup" style="margin-top: 14px;">
-                        <label for="imageAiNumRefs">
-                            {{ t('ai_config.ref_images') }} <span id="imageAiRefMaxLabel" class="ref-max-label">{{ t('ai_config.ref_max', max=3) }}</span>
-                        </label>
-                        <input type="number" id="imageAiNumRefs" value="3" min="1" max="3">
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Gran Sabio LLM Status -->
-        <span class="gransabio-status unavailable" id="gransabioStatusChip" title="{{ t('ai_config.gran_sabio.status') }}">
-            <span class="status-dot"></span>
-            <span class="status-text">{{ t('ai_config.gran_sabio.offline') }}</span>
-        </span>
-    </div>
-
-    <!-- Content Optimization Section (Collapsible with Tabs) -->
-    <section class="section content-optimization-section">
-        <div class="section-header-collapsible" onclick="VideoDetail.toggleSection('contentSection')">
-            <h2>
-                <span class="collapse-icon" id="contentSectionIcon">&#9660;</span>
-                {{ t('content_optimization.title') }}
-            </h2>
-        </div>
-
-        <div id="contentSection" class="collapsible-content">
-            <!-- Tabs -->
-            <div class="content-tabs">
-                <button class="tab-btn active" onclick="VideoDetail.switchContentTab('titles')" id="tabTitles">
-                    {{ t('content_optimization.tab_titles') }}
-                </button>
-                <button class="tab-btn" onclick="VideoDetail.switchContentTab('descriptions')" id="tabDescriptions">
-                    {{ t('content_optimization.tab_descriptions') }}
-                </button>
-            </div>
-
-            <!-- Tab Content: Titles -->
-            <div id="tabContentTitles" class="tab-content active">
-                <div class="content-generation-form content-generation-form-simplified">
-                    <div class="form-section">
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="titleStyle">{{ t('titles_form.style_label') }} <span class="info-tooltip" data-tooltip="{{ t('titles_form.style_tooltip') }}">&#9432;</span></label>
-                                <select id="titleStyle" onchange="VideoDetail.updateTitleStyleUI()">
-                                    <option value="neutral">{{ t('titles_form.style_neutral') }}</option>
-                                    <option value="seo">{{ t('titles_form.style_seo') }}</option>
-                                    <option value="clickbait">{{ t('titles_form.style_clickbait') }}</option>
-                                    <option value="custom">{{ t('titles_form.style_custom') }}</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="titleLanguage">{{ t('titles_form.language_label') }}</label>
-                                <select id="titleLanguage">
-                                    <option value="es" selected>{{ t('languages.es') }}</option>
-                                    <option value="en">{{ t('languages.en') }}</option>
-                                    <option value="fr">{{ t('languages.fr') }}</option>
-                                    <option value="it">{{ t('languages.it') }}</option>
-                                    <option value="de">{{ t('languages.de') }}</option>
-                                    <option value="pt">{{ t('languages.pt') }}</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="titleQuantity">{{ t('titles_form.quantity_label') }}</label>
-                                <input type="number" id="titleQuantity" value="5" min="1" max="50">
-                            </div>
-                        </div>
-
-                        <div class="form-group" id="customPromptGroup" style="display: none;">
-                            <label for="titleCustomPrompt">{{ t('titles_form.custom_prompt_label') }}</label>
-                            <textarea id="titleCustomPrompt" rows="3" placeholder="{{ t('titles_form.custom_prompt_placeholder') }}"></textarea>
-                        </div>
-
-                        <div class="form-group" id="customInstructionsGroup">
-                            <label for="titleCustomInstructions">{{ t('titles_form.instructions_label') }}</label>
-                            <textarea id="titleCustomInstructions" rows="2" placeholder="{{ t('titles_form.instructions_placeholder') }}"></textarea>
-                        </div>
-
-                        <button type="button" class="btn btn-primary" id="generateTitlesBtn" onclick="VideoDetail.generateTitles()">
-                            {{ t('titles_form.generate_button') }}
-                        </button>
-                    </div>
-
-                    <div class="titles-results-section" id="titlesResultsSection" style="display: none;">
-                        <div class="titles-results-header">
-                            <h4>{{ t('titles_form.results_header') }} <span id="titlesCount" class="titles-count"></span></h4>
-                            <div class="titles-header-actions">
-                                <span id="titlesSelectionInfo" class="titles-selection-info" title="{{ t('titles_form.selection_info') }}">
-                                    {{ t('titles_form.selection_info') }}
-                                </span>
-                                <div class="titles-action-buttons">
-                                    <button class="btn btn-small btn-secondary" id="selectAllTitlesBtn" onclick="VideoDetail.toggleSelectAllTitles()" title="{{ t('common.select_all') }}">
-                                        &#9744; {{ t('titles_form.select_all') }}
-                                    </button>
-                                    <button class="btn btn-small btn-delete-selected" id="deleteSelectedTitlesBtn" onclick="VideoDetail.deleteSelectedTitles()" title="{{ t('titles_form.delete_selected') }}">
-                                        &#128465; {{ t('titles_form.delete_selected') }}
-                                    </button>
-                                    <button class="btn btn-small btn-secondary" onclick="VideoDetail.copyAllTitles()" title="{{ t('titles_form.copy_all') }}">
-                                        &#128203; {{ t('titles_form.copy_all') }}
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        <div id="titlesResultsList" class="titles-results-list"></div>
-                        <p class="titles-hint">
-                            <span class="info-icon">&#9432;</span>
-                            {{ t('titles_form.hint') }}
-                        </p>
-                    </div>
-
-                    <div class="content-loading" id="titlesLoading" style="display: none;">
-                        <div class="loading-spinner"></div>
-                        <div class="content-loading-text">
-                            <span id="titlesLoadingMain">{{ t('titles_form.preparing') }}</span>
-                            <small id="titlesLoadingHint"></small>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Tab Content: Descriptions -->
-            <div id="tabContentDescriptions" class="tab-content">
-                <div class="content-generation-form content-generation-form-simplified">
-                    <div class="form-section">
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="descStyle">{{ t('descriptions_form.style_label') }}</label>
-                                <select id="descStyle" onchange="VideoDetail.updateDescStyleUI()">
-                                    <option value="informative">{{ t('descriptions_form.style_informative') }}</option>
-                                    <option value="seo">{{ t('descriptions_form.style_seo') }}</option>
-                                    <option value="minimal">{{ t('descriptions_form.style_minimal') }}</option>
-                                    <option value="custom">{{ t('descriptions_form.style_custom') }}</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="descLanguage">{{ t('descriptions_form.language_label') }}</label>
-                                <select id="descLanguage">
-                                    <option value="es" selected>{{ t('languages.es') }}</option>
-                                    <option value="en">{{ t('languages.en') }}</option>
-                                    <option value="fr">{{ t('languages.fr') }}</option>
-                                    <option value="it">{{ t('languages.it') }}</option>
-                                    <option value="de">{{ t('languages.de') }}</option>
-                                    <option value="pt">{{ t('languages.pt') }}</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="descLength">{{ t('descriptions_form.length_label') }}</label>
-                                <select id="descLength">
-                                    <option value="short">{{ t('descriptions_form.length_short') }}</option>
-                                    <option value="medium" selected>{{ t('descriptions_form.length_medium') }}</option>
-                                    <option value="long">{{ t('descriptions_form.length_long') }}</option>
-                                    <option value="very_long">{{ t('descriptions_form.length_very_long') }}</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="descQuantity">{{ t('descriptions_form.quantity_label') }}</label>
-                                <input type="number" id="descQuantity" value="1" min="1" max="3">
-                            </div>
-                        </div>
-
-                        <!-- Checkboxes for extra options -->
-                        <div class="form-group">
-                            <label>{{ t('descriptions_form.options_label') }}</label>
-                            <div class="checkbox-group">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" id="descTimestamps">
-                                    <span>{{ t('descriptions_form.timestamps') }} <span class="info-tooltip" data-tooltip="{{ t('descriptions_form.timestamps_tooltip') }}">&#9432;</span></span>
-                                </label>
-                                <label class="checkbox-label">
-                                    <input type="checkbox" id="descHashtags">
-                                    <span>{{ t('descriptions_form.hashtags') }}</span>
-                                </label>
-                                <label class="checkbox-label">
-                                    <input type="checkbox" id="descEmojis">
-                                    <span>{{ t('descriptions_form.emojis') }}</span>
-                                </label>
-                                <label class="checkbox-label">
-                                    <input type="checkbox" id="descSocialLinks">
-                                    <span>{{ t('descriptions_form.social_links') }}</span>
-                                </label>
-                            </div>
-                        </div>
-
-                        <div class="form-group" id="descCustomPromptGroup" style="display: none;">
-                            <label for="descCustomPrompt">{{ t('descriptions_form.custom_prompt_label') }}</label>
-                            <textarea id="descCustomPrompt" rows="3" placeholder="{{ t('descriptions_form.custom_prompt_placeholder') }}"></textarea>
-                        </div>
-
-                        <div class="form-group" id="descCustomInstructionsGroup">
-                            <label for="descCustomInstructions">{{ t('descriptions_form.instructions_label') }}</label>
-                            <textarea id="descCustomInstructions" rows="2" placeholder="{{ t('descriptions_form.instructions_placeholder') }}"></textarea>
-                        </div>
-
-                        <button type="button" class="btn btn-primary" id="generateDescBtn" onclick="VideoDetail.generateDescriptions()">
-                            {{ t('descriptions_form.generate_button') }}
-                        </button>
-                    </div>
-
-                    <div class="form-section descriptions-results-section" id="descriptionsResultsSection" style="display: none;">
-                        <div class="descriptions-results-header">
-                            <h4>{{ t('descriptions_form.results_header') }} <span id="descriptionsCount" class="descriptions-count"></span></h4>
-                            <div class="descriptions-header-actions">
-                                <div class="descriptions-action-buttons">
-                                    <button class="btn btn-small btn-delete-selected" id="deleteAllDescriptionsBtn" onclick="VideoDetail.deleteAllDescriptions()" title="{{ t('descriptions_form.delete_all') }}">
-                                        &#128465; {{ t('descriptions_form.delete_all') }}
-                                    </button>
-                                    <button class="btn btn-small btn-secondary" onclick="VideoDetail.copyAllDescriptions()" title="{{ t('descriptions_form.copy_all') }}">
-                                        &#128203; {{ t('descriptions_form.copy_all') }}
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        <div id="descriptionsResultsList" class="descriptions-results-list"></div>
-                    </div>
-
-                    <div class="content-loading" id="descriptionsLoading" style="display: none;">
-                        <div class="loading-spinner"></div>
-                        <div class="content-loading-text">
-                            <span id="descriptionsLoadingMain">{{ t('descriptions_form.preparing') }}</span>
-                            <small id="descriptionsLoadingHint"></small>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Generation form -->
-    <section class="section">
-        <h2>{{ t('generate_form.title') }}</h2>
-        <form id="generateForm" class="generate-form generate-form-simplified">
-            <div class="form-group cluster-select-group">
-                <label>{{ t('generate_form.cluster_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.cluster_tooltip') }}">&#9432;</span></label>
-                <div id="selectedClusterDisplay" class="selected-cluster-display">
-                    <span class="no-selection">&#9734; {{ t('generate_form.no_cluster_selected') }}</span>
-                </div>
-                <select id="clusterSelect" required style="display: none;">
-                    <option value="">{{ t('common.select') }}</option>
-                </select>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="numImages">{{ t('generate_form.images_label') }} <span class="info-tooltip" data-tooltip="{{ t('generate_form.images_tooltip') }}">&#9432;</span></label>
-                    <input type="number" id="numImages" value="5" min="1" max="50">
-                </div>
-                <div class="form-group">
-                    <label for="expression">{{ t('generate_form.expression_label') }}</label>
-                    <select id="expression">
-                        <option value="">{{ t('generate_form.expression_auto') }}</option>
-                        <option value="smiling">{{ t('generate_form.expression_smiling') }}</option>
-                        <option value="mouth_closed">{{ t('generate_form.expression_mouth_closed') }}</option>
-                        <option value="neutral">{{ t('generate_form.expression_neutral') }}</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="form-row" style="margin-top: 10px;">
-                <label class="checkbox-label">
-                    <input type="checkbox" id="promptIncludeHistory">
-                    <span>{{ t('generate_form.avoid_repeat') }}</span>
-                </label>
-            </div>
-
-            <!-- Reference Image Section -->
-            <div class="form-group reference-image-group" style="margin-top: 15px;">
-                <label for="referenceImageInput">
-                    {{ t('generate_form.reference_image_label') }}
-                    <span class="info-tooltip" data-tooltip="{{ t('generate_form.reference_image_tooltip') }}">&#9432;</span>
-                </label>
-
-                <div class="reference-image-upload">
-                    <input type="file" id="referenceImageInput" accept="image/*" style="display: none;">
-                    <button type="button" class="btn btn-secondary btn-small" onclick="document.getElementById('referenceImageInput').click()">
-                        &#128247; {{ t('generate_form.select_image') }}
-                    </button>
-                    <span id="referenceImageName" class="reference-image-name">{{ t('generate_form.no_image_selected') }}</span>
-                </div>
-
-                <div id="referenceImagePreview" class="reference-image-preview" style="display: none;">
-                    <img id="referenceImageImg" src="" alt="Preview">
-                    <button type="button" id="clearReferenceImage" class="reference-image-clear"
-                            onclick="VideoDetail.clearReferenceImage()" title="{{ t('generate_form.remove_image') }}">
-                        &#10005;
-                    </button>
-                </div>
-
-                <div id="referenceImageOptions" class="reference-image-options" style="display: none; margin-top: 10px;">
-                    <span class="reference-image-info">
-                        &#10003; {{ t('generate_form.style_ref_always_used') }}
-                    </span>
-                    <span id="styleRefWarning" class="style-ref-warning" style="display: none;"></span>
-                </div>
-            </div>
-
-            <!-- Custom Instructions (at the end, as they override everything) -->
-            <div class="form-group" style="margin-top: 15px;">
-                <label for="promptCustomInstructions">
-                    {{ t('generate_form.instructions_label') }}
-                    <span class="info-tooltip" data-tooltip="{{ t('generate_form.instructions_tooltip') }}">&#9432;</span>
-                </label>
-                <textarea id="promptCustomInstructions" class="custom-instructions-textarea" placeholder="{{ t('generate_form.instructions_placeholder') }}"></textarea>
-            </div>
-
-            <div class="generation-button-wrapper">
-                <div class="generation-button-group">
-                    <button type="submit" class="btn btn-primary btn-generate" id="generateBtn">
-                        {{ t('generate_form.generate_button') }}
-                    </button>
-                    <!-- Queue badge - shows task count for this video -->
-                    <span class="generation-queue-badge hidden" id="generationQueueBadge">0</span>
-                    <button type="button" class="btn btn-danger btn-cancel hidden" id="cancelGenerationBtn"
-                            title="{{ t('task_queue.cancel') }}">
-                        ■
-                    </button>
-                </div>
-                <!-- Queue status line below button -->
-                <div class="generation-queue-status hidden" id="generationQueueStatus">
-                    <span class="queue-status-icon">⏳</span>
-                    <span class="queue-status-text" id="generationQueueText"></span>
-                    <a href="#" class="queue-status-link" id="generationQueueLink">{{ t('queue_indicator.view') }}</a>
-                </div>
-            </div>
-        </form>
-    </section>
-
-    <!-- Generation status -->
-    <section class="section hidden" id="generationStatus">
-        <h2>{{ t('generate_form.progress_title') }}</h2>
-        <div class="progress-container">
-            <div class="progress-bar">
-                <div class="progress-fill" id="progressFill"></div>
-            </div>
-            <p id="progressText">{{ t('generate_form.progress_starting') }}</p>
-        </div>
-    </section>
-
-    <!-- Results (shown during/after generation) -->
-    <section class="section hidden" id="resultsSection">
-        <h2>{{ t('generate_form.results_generating') }}</h2>
-        <div id="thumbnailsGrid" class="thumbnails-grid"></div>
-    </section>
-
-    <!-- Existing Thumbnails Gallery -->
-    <section class="section" id="existingThumbnailsSection">
-        <div class="section-header-with-actions">
-            <h2>
-                <span>{{ t('thumbnails.saved_title') }}</span>
-                <span class="thumbnail-count-badge" id="thumbnailCountBadge">0</span>
-            </h2>
-            <div class="section-actions">
-                <button class="btn btn-secondary btn-small" id="downloadAllBtn" onclick="VideoDetail.downloadAllThumbnails()" style="display: none;">
-                    &#128230; {{ t('thumbnails.download_all') }}
-                </button>
-            </div>
-        </div>
-        <div class="existing-thumbnails-wrapper" id="existingThumbnailsWrapper">
-            <div class="existing-thumbnails-container" id="existingThumbnailsContainer">
-                <div class="existing-thumbnails-grid" id="existingThumbnailsGrid">
-                    <div class="loading">{{ t('thumbnails.loading') }}</div>
-                </div>
-            </div>
-        </div>
-        <div class="no-thumbnails-message" id="noThumbnailsMessage" style="display: none;">
-            <div class="empty-state">
-                <span class="empty-icon">🖼️</span>
-                <p>{{ t('empty_state.no_thumbnails') }}</p>
-                <small>{{ t('empty_state.thumbnails_hint') }}</small>
-            </div>
-        </div>
-    </section>
 </div>
 {% endblock %}
 

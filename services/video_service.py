@@ -4,10 +4,11 @@ Video Service
 Business logic for video management operations.
 """
 
+import asyncio
+import os
 from pathlib import Path
 from typing import Optional, List
 import aiosqlite
-import asyncio
 
 
 class VideoService:
@@ -61,103 +62,6 @@ class VideoService:
                 columns = [description[0] for description in cursor.description]
                 return dict(zip(columns, row))
             return None
-
-    async def scan_videos_directory(self) -> dict:
-        """Scan videos directory and register new videos."""
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from config import VIDEOS_DIR, VIDEO_EXTENSIONS, EXCLUDE_FOLDERS, OUTPUT_DIR
-        from utils import find_videos, get_video_info, sanitize_filename, extract_first_frame
-
-        videos = find_videos(Path(VIDEOS_DIR), VIDEO_EXTENSIONS, EXCLUDE_FOLDERS)
-
-        new_count = 0
-        existing_count = 0
-
-        for video_path in videos:
-            # Check if already registered
-            query = "SELECT id FROM videos WHERE filepath = ?"
-            async with self.db.execute(query, [str(video_path)]) as cursor:
-                existing = await cursor.fetchone()
-
-            if existing:
-                existing_count += 1
-                continue
-
-            # Get video info
-            info = get_video_info(video_path)
-
-            # Insert new video
-            insert_query = """
-                INSERT INTO videos (filename, filepath, duration_seconds, status)
-                VALUES (?, ?, ?, 'pending')
-            """
-            await self.db.execute(insert_query, [
-                video_path.name,
-                str(video_path),
-                info.get('duration', 0)
-            ])
-            new_count += 1
-
-            # Extract first frame for preview (run in thread to avoid blocking)
-            video_name = video_path.stem
-            safe_name = sanitize_filename(video_name)
-            preview_path = Path(OUTPUT_DIR) / safe_name / "preview.jpg"
-            await asyncio.to_thread(extract_first_frame, video_path, preview_path)
-
-        await self.db.commit()
-
-        return {
-            "scanned": len(videos),
-            "new": new_count,
-            "existing": existing_count
-        }
-
-    async def upload_video(self, file) -> dict:
-        """Handle video file upload."""
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from config import VIDEOS_DIR, OUTPUT_DIR
-        from utils import get_video_info, sanitize_filename, extract_first_frame
-        import aiofiles
-
-        # Security: sanitize filename to prevent path traversal
-        safe_filename = sanitize_filename(file.filename)
-        if not safe_filename:
-            safe_filename = "uploaded_video"
-
-        # Save file with sanitized filename
-        dest_path = Path(VIDEOS_DIR) / safe_filename
-        async with aiofiles.open(dest_path, 'wb') as f:
-            content = await file.read()
-            await f.write(content)
-
-        # Get video info
-        info = get_video_info(dest_path)
-
-        # Insert into database
-        query = """
-            INSERT INTO videos (filename, filepath, duration_seconds, status)
-            VALUES (?, ?, ?, 'pending')
-        """
-        cursor = await self.db.execute(query, [
-            safe_filename,
-            str(dest_path),
-            info.get('duration', 0)
-        ])
-        await self.db.commit()
-
-        # Extract first frame for preview (run in thread to avoid blocking)
-        video_name = dest_path.stem
-        safe_name = sanitize_filename(video_name)
-        preview_path = Path(OUTPUT_DIR) / safe_name / "preview.jpg"
-        await asyncio.to_thread(extract_first_frame, dest_path, preview_path)
-
-        return {
-            "id": cursor.lastrowid,
-            "filename": file.filename,
-            "status": "pending"
-        }
 
     async def delete_video(self, video_id: int) -> bool:
         """Delete a video and all associated data."""
@@ -267,53 +171,61 @@ class VideoService:
         return True
 
     async def get_video_thumbnail(self, video_id: int) -> Optional[str]:
-        """Get a thumbnail preview for a video."""
+        """
+        Get a thumbnail preview for a video.
+
+        The search runs in a thread: it may read the video from a slow network
+        share, and on the event loop that would hold up every other request.
+        """
         video = await self.get_video(video_id)
         if not video:
             return None
 
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from config import OUTPUT_DIR
-        from utils import sanitize_filename
+        return await asyncio.to_thread(_find_video_preview, video['filepath'])
 
-        # Check if we have a cached thumbnail
-        video_name = Path(video['filepath']).stem
-        safe_name = sanitize_filename(video_name)
-        output_dir = Path(OUTPUT_DIR) / safe_name
 
-        # Try to find a representative frame from clusters first
-        clusters_dir = output_dir / "clusters"
-        if clusters_dir.exists():
-            # Look for cluster_0 representative (main person)
-            cluster_0 = clusters_dir / "cluster_0"
-            if cluster_0.exists():
-                rep_frame = cluster_0 / "representative.jpg"
-                if rep_frame.exists():
-                    return str(rep_frame)
-                # Fallback to any frame in cluster
-                frames = list(cluster_0.glob("*.jpg"))
-                if frames:
-                    return str(frames[0])
+def _find_video_preview(filepath: str) -> Optional[str]:
+    """Path of a preview frame of the video, extracting its first frame if there is none."""
+    from config import OUTPUT_DIR
+    from utils import extract_first_frame, sanitize_filename
 
-        # Try regular frames
-        frames_dir = output_dir / "frames"
-        if frames_dir.exists():
-            frames = list(frames_dir.glob("*.jpg"))
-            if frames:
-                return str(frames[0])
+    # Check if we have a cached thumbnail
+    video_name = Path(filepath).stem
+    safe_name = sanitize_filename(video_name)
+    output_dir = Path(OUTPUT_DIR) / safe_name
 
-        # Try preview frame (first frame extracted on registration)
-        preview_path = output_dir / "preview.jpg"
-        if preview_path.exists():
-            return str(preview_path)
+    # Try to find a representative frame from clusters first
+    clusters_dir = output_dir / "clusters"
+    if clusters_dir.exists():
+        # Look for cluster_0 representative (main person)
+        cluster_0 = clusters_dir / "cluster_0"
+        if cluster_0.exists():
+            rep_frame = cluster_0 / "representative.jpg"
+            if rep_frame.exists():
+                return str(rep_frame)
+            # Fallback to any frame in cluster
+            frame = next(cluster_0.glob("*.jpg"), None)
+            if frame:
+                return str(frame)
 
-        # Generate preview on-demand if it doesn't exist
-        from utils import extract_first_frame
-        video_path = Path(video['filepath'])
-        if video_path.exists():
-            result = extract_first_frame(video_path, preview_path)
-            if result:
-                return str(result)
+    # Try regular frames (any one: a video has thousands)
+    frames_dir = output_dir / "frames"
+    if frames_dir.exists():
+        frame = next(frames_dir.glob("*.jpg"), None)
+        if frame:
+            return str(frame)
 
-        return None
+    # Try preview frame (first frame extracted on registration)
+    preview_path = output_dir / "preview.jpg"
+    if preview_path.exists():
+        return str(preview_path)
+
+    # Generate preview on-demand if it doesn't exist. os.path.isfile, unlike
+    # Path.exists, answers False for a network share that is not answering here.
+    video_path = Path(filepath)
+    if os.path.isfile(video_path):
+        result = extract_first_frame(video_path, preview_path)
+        if result:
+            return str(result)
+
+    return None

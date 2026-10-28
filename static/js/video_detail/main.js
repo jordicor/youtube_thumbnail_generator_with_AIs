@@ -1,55 +1,147 @@
 /**
  * Video Detail Page - Main Entry Point
  * =====================================
- * Initializes all modules and exposes functions for inline event handlers.
+ * Initializes all modules and binds the page-level controls.
  */
 
 import { initState, state } from './state.js';
 import * as AiConfig from './ai-config.js';
+import * as Defaults from './defaults.js';
 import * as Clusters from './clusters.js';
 import * as Titles from './titles.js';
 import * as Descriptions from './descriptions.js';
 import * as Thumbnails from './thumbnails.js';
+import * as Lightbox from './lightbox.js';
 import * as Generation from './generation.js';
 import * as QueueIndicator from './queue-indicator.js';
+import * as People from './people.js';
+import * as References from './references.js';
+
+// =========================================================================
+// TABS
+// =========================================================================
+
+const TABS = ['generate', 'people', 'thumbnails', 'texts', 'transcript'];
+const DEFAULT_TAB = 'generate';
+
+/**
+ * Show one workspace tab and remember it in the URL hash.
+ * @param {string} tab - One of TABS
+ */
+function switchTab(tab) {
+    if (!TABS.includes(tab)) {
+        throw new Error(`Unknown tab: ${tab}`);
+    }
+    // Without an analysis there is nothing to see in the other tabs
+    if (document.getElementById(`tab-${tab}`).disabled) {
+        tab = DEFAULT_TAB;
+    }
+
+    document.getElementById('videoDetailApp').dataset.tab = tab;
+    for (const name of TABS) {
+        const active = name === tab;
+        const button = document.getElementById(`tab-${name}`);
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+        button.tabIndex = active ? 0 : -1;
+        document.getElementById(`panel-${name}`).hidden = !active;
+    }
+    history.replaceState(null, '', `#${tab}`);
+    document.dispatchEvent(new CustomEvent('help:context'));
+}
+
+function setupTabs() {
+    document.querySelectorAll('.workspace-tab').forEach(button => {
+        button.addEventListener('click', () => switchTab(button.dataset.tab));
+    });
+
+    // Arrow keys move between tabs (WAI-ARIA tabs pattern)
+    document.querySelector('.workspace-tabs').addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        const visible = [...document.querySelectorAll('.workspace-tab:not(.hidden)')];
+        const current = visible.indexOf(document.activeElement);
+        if (current < 0) return;
+        const next = visible[(current + (e.key === 'ArrowRight' ? 1 : visible.length - 1)) % visible.length];
+        switchTab(next.dataset.tab);
+        next.focus();
+    });
+
+    // Any element can jump to a tab with data-goto-tab="name"
+    document.addEventListener('click', (e) => {
+        const link = e.target.closest('[data-goto-tab]');
+        if (link) {
+            e.preventDefault();
+            switchTab(link.dataset.gotoTab);
+        }
+    });
+
+    document.getElementById('viewAllThumbnailsBtn').addEventListener('click', () => switchTab('thumbnails'));
+
+    // The hash comes from the URL: an unknown one just opens the default tab
+    const fromHash = location.hash.slice(1);
+    switchTab(TABS.includes(fromHash) ? fromHash : DEFAULT_TAB);
+}
 
 // =========================================================================
 // PAGE-LEVEL FUNCTIONS
 // =========================================================================
 
 /**
- * Load video information and display it.
+ * Load video information and display it in the page header.
  */
 async function loadVideoInfo() {
-    try {
-        const response = await fetch(`/api/videos/${state.videoId}`);
-        // H7: Check response before parsing
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const video = await response.json();
+    const response = await fetch(`/api/videos/${state.videoId}`);
+    // H7: Check response before parsing
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const video = await response.json();
 
-        document.getElementById('videoTitle').textContent = video.filename;
+    const name = ThumbnailApp.formatVideoName(video.filename);
+    const title = document.getElementById('videoTitle');
+    title.textContent = name;
+    title.title = video.filepath;
+    document.title = `${name} - ${t('common.app_name')}`;
+    ThumbnailApp.setVideoBreadcrumb(video.filename);
 
-        const infoDiv = document.getElementById('videoInfo');
-        const duration = video.duration_seconds
-            ? `${Math.floor(video.duration_seconds / 60)}:${String(Math.floor(video.duration_seconds % 60)).padStart(2, '0')}`
-            : t('common.na');
+    const view = ThumbnailApp.getVideoStatusView(video.status);
+    const pill = document.getElementById('videoStatusPill');
+    pill.className = `status-pill tone-${view.tone}`;
+    pill.textContent = t(view.label);
 
-        infoDiv.innerHTML = `
-            <p><strong>${t('video_detail.info.filename')}:</strong> ${escapeHtml(video.filename)}</p>
-            <p><strong>${t('video_detail.info.duration')}:</strong> ${escapeHtml(duration)}</p>
-            <p><strong>${t('video_detail.info.title')}:</strong> ${escapeHtml(video.status)}</p>
-        `;
-    } catch (error) {
-        document.getElementById('videoInfo').innerHTML =
-            `<div class="error">${t('errors.load_video')}: ${escapeHtml(error.message)}</div>`;
-    }
+    const duration = document.getElementById('videoMetaDuration');
+    duration.classList.toggle('hidden', !video.duration_seconds);
+    duration.querySelector('span').textContent = ThumbnailApp.formatDuration(video.duration_seconds);
+
+    setAnalyzed(view.kind === 'ready', video);
 }
 
 /**
- * Load and display video transcription.
+ * Show the workspace of an analyzed video, or what analyzing does for one
+ * that has no analysis yet (the other tabs stay off until then).
+ * @param {boolean} analyzed - Whether the video is analyzed
+ * @param {Object} video - Video from the API
+ */
+function setAnalyzed(analyzed, video) {
+    const app = document.getElementById('videoDetailApp');
+    app.classList.toggle('is-not-analyzed', !analyzed);
+    document.getElementById('notAnalyzedState').classList.toggle('hidden', analyzed);
+    const error = document.getElementById('notAnalyzedError');
+    const failed = !analyzed && video.status === 'error' && video.error_message;
+    error.classList.toggle('hidden', !failed);
+    error.textContent = failed ? t('video_detail.analysis_failed', { error: video.error_message }) : '';
+    document.getElementById('videoMoreBtn').classList.toggle('hidden', !analyzed);
+
+    document.querySelectorAll('.workspace-tab').forEach(button => {
+        if (button.dataset.tab !== DEFAULT_TAB) button.disabled = !analyzed;
+    });
+    if (!analyzed) switchTab(DEFAULT_TAB);
+    document.dispatchEvent(new CustomEvent('help:context'));
+}
+
+/**
+ * Load and display video transcription. The Transcript tab only shows when there is one.
  */
 async function loadTranscription() {
-    const section = document.getElementById('transcriptionSection');
+    const tab = document.getElementById('tab-transcript');
     const textDiv = document.getElementById('transcriptionText');
 
     try {
@@ -58,16 +150,90 @@ async function loadTranscription() {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
 
-        if (data.exists && data.text) {
-            section.style.display = 'block';
+        const exists = Boolean(data.exists && data.text);
+        tab.classList.toggle('hidden', !exists);
+        if (exists) {
             textDiv.innerHTML = formatTranscriptionWithColors(data.text);
-        } else {
-            section.style.display = 'none';
         }
     } catch (error) {
         console.error('Error loading transcription:', error);
-        section.style.display = 'none';
+        tab.classList.add('hidden');
     }
+
+    if (tab.classList.contains('hidden') && document.getElementById('videoDetailApp').dataset.tab === 'transcript') {
+        switchTab(DEFAULT_TAB);
+    }
+}
+
+/**
+ * Start the first analysis of a video that has none.
+ */
+async function analyzeVideo() {
+    const button = document.getElementById('analyzeVideoBtn');
+    button.disabled = true;
+    try {
+        const response = await fetch(`/api/analysis/${state.videoId}/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        await loadVideoInfo();
+        // TaskQueue events show the analysis overlay and reload the page content
+    } catch (error) {
+        ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + error.message, 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+/**
+ * Reset the analysis and analyze the video again (the server queues it).
+ */
+async function reanalyzeVideo() {
+    const confirmed = await ThumbnailApp.showModal({
+        title: t('analysis.reanalyze_title'),
+        htmlMessage: t('analysis.reanalyze_message'),
+        type: 'danger',
+        confirmText: t('index.card.reanalyze'),
+        cancelText: t('common.cancel')
+    });
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch(`/api/videos/${state.videoId}/reanalyze`, { method: 'POST' });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        ThumbnailApp.showToast(t('analysis.reanalyze_started'), 'success');
+        reloadPageContent();
+    } catch (error) {
+        ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + error.message, 'error');
+    }
+}
+
+function setupHeaderActions() {
+    document.getElementById('analyzeVideoBtn').addEventListener('click', analyzeVideo);
+    document.querySelectorAll('[data-close-modal]').forEach(button => {
+        button.addEventListener('click', () => closeModal(button.dataset.closeModal));
+    });
+    document.getElementById('contentTabs').addEventListener('click', (e) => {
+        const button = e.target.closest('[data-content-tab]');
+        if (button) switchContentTab(button.dataset.contentTab);
+    });
+    switchContentTab('titles');
+
+    const moreBtn = document.getElementById('videoMoreBtn');
+    moreBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        ThumbnailApp.showMenu(moreBtn, [
+            { label: t('index.card.reanalyze'), icon: 'rotate', danger: true, onSelect: reanalyzeVideo }
+        ]);
+    });
 }
 
 /**
@@ -87,14 +253,14 @@ function formatTranscriptionWithColors(text) {
             const speaker = match[2];
             const content = escapeHtml(match[3]);
 
-            const speakerNum = speaker.match(/speaker_(\d+)/);
-            const speakerClass = speakerNum && parseInt(speakerNum[1]) <= 5
-                ? `transcript-speaker-${speakerNum[1]}`
+            const speakerNum = parseInt(speaker.match(/speaker_(\d+)/)[1], 10);
+            const speakerClass = speakerNum <= 5
+                ? `transcript-speaker-${speakerNum}`
                 : 'transcript-speaker-unknown';
 
             return `<div class="transcription-line">` +
                 `<span class="transcript-timestamp">[${timestamp}]</span> ` +
-                `<span class="${speakerClass}">${escapeHtml(speaker)}:</span> ` +
+                `<span class="${speakerClass}">${escapeHtml(t('transcription.speaker', {n: speakerNum + 1}))}:</span> ` +
                 `<span class="transcript-text">${content}</span>` +
                 `</div>`;
         } else {
@@ -220,7 +386,9 @@ async function cancelAnalysis() {
  * Reload all page content after analysis completes.
  */
 function reloadPageContent() {
-    loadVideoInfo();
+    loadVideoInfo().catch(error => {
+        ThumbnailApp.showToast(`${t('errors.load_video')}: ${error.message}`, 'error');
+    });
     loadTranscription();
     Clusters.load();
     Thumbnails.loadExisting();
@@ -368,23 +536,6 @@ function setupGenerationTaskSubscription() {
 // =========================================================================
 
 /**
- * Toggle collapsible section visibility.
- * @param {string} sectionId - Section element ID
- */
-function toggleSection(sectionId) {
-    const content = document.getElementById(sectionId);
-    const icon = document.getElementById(sectionId + 'Icon');
-
-    if (content.classList.contains('collapsed')) {
-        content.classList.remove('collapsed');
-        icon.classList.remove('collapsed');
-    } else {
-        content.classList.add('collapsed');
-        icon.classList.add('collapsed');
-    }
-}
-
-/**
  * Close a modal by ID.
  * @param {string} modalId - Modal element ID
  */
@@ -393,27 +544,24 @@ function closeModal(modalId) {
 }
 
 /**
- * Switch content tab (titles/descriptions).
- * @param {string} tabName - Tab name ('titles' or 'descriptions')
+ * Switch the Titles & description tab between titles and descriptions.
+ * @param {string} tabName - 'titles' or 'descriptions'
  */
 function switchContentTab(tabName) {
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-
-    if (tabName === 'titles') {
-        document.getElementById('tabTitles').classList.add('active');
-        document.getElementById('tabContentTitles').classList.add('active');
-    } else if (tabName === 'descriptions') {
-        document.getElementById('tabDescriptions').classList.add('active');
-        document.getElementById('tabContentDescriptions').classList.add('active');
-    }
+    document.querySelectorAll('#contentTabs [data-content-tab]').forEach(button => {
+        const active = button.dataset.contentTab === tabName;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+    });
+    document.getElementById('tabContentTitles').classList.toggle('hidden', tabName !== 'titles');
+    document.getElementById('tabContentDescriptions').classList.toggle('hidden', tabName !== 'descriptions');
 }
 
 // =========================================================================
 // INITIALIZATION
 // =========================================================================
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     const container = document.getElementById('videoDetailApp');
     if (!container) {
         console.error('Video detail container not found');
@@ -427,21 +575,42 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     initState(videoId);
+    state.faceSwapMissing = container.dataset.faceSwapMissing;
+    setupTabs();
+    setupHeaderActions();
+
+    // The Generate form starts with the app settings (settings.js says if they fail to load)
+    await AppSettings.ready;
+    Defaults.apply(AppSettings.get().generation);
+    AiConfig.init();
+    document.addEventListener('settings:changed', (e) => {
+        Defaults.apply(e.detail.settings.generation, e.detail.previous.generation);
+        AiConfig.updateRefMax();
+        AiConfig.updateSummaries();
+    });
+    People.init({ setView: Clusters.setViewType });
+    References.init();
+    document.addEventListener('people:changed', Clusters.updatePeopleBadges);
 
     // Load all data
-    loadVideoInfo();
+    loadVideoInfo().catch(error => {
+        ThumbnailApp.showToast(`${t('errors.load_video')}: ${error.message}`, 'error');
+    });
     loadTranscription();
-    Clusters.load();
+    Clusters.setupControls();
+    Thumbnails.setupControls();
+    Thumbnails.initSort();
     Thumbnails.loadExisting();
+    Titles.setupControls();
     Titles.loadSaved();
+    Descriptions.setupControls();
     Descriptions.loadSaved();
 
     // Setup
     Generation.setupForm();
     Thumbnails.setupLazyLoading();
+    Lightbox.init();
     AiConfig.checkGranSabioStatus();
-    AiConfig.loadModelsFromAPI();
-    AiConfig.init();
 
     // Restore generation state if returning to page with active job
     Generation.restoreGenerationState();
@@ -455,60 +624,3 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize queue indicator (Phase 4 - Task Queue UX)
     QueueIndicator.init();
 });
-
-// =========================================================================
-// GLOBAL EXPORTS (for inline event handlers in HTML)
-// =========================================================================
-
-window.VideoDetail = {
-    // UI helpers
-    toggleSection,
-    closeModal,
-    switchContentTab,
-
-    // AI Config
-    toggleAiPopover: AiConfig.togglePopover,
-    closeAiPopover: AiConfig.closePopover,
-    closeAllAiPopovers: AiConfig.closeAllPopovers,
-    updateTextAiModelOptions: AiConfig.updateTextModelOptions,
-    toggleTextAiThinkingLevel: AiConfig.toggleThinkingLevel,
-    updateImageAiModelOptions: AiConfig.updateImageModelOptions,
-    updateImageAiOpenaiWarning: AiConfig.updateOpenaiWarning,
-    updateImageAiRefMax: AiConfig.updateRefMax,
-
-    // Clusters
-    toggleClusterSelection: Clusters.toggleSelection,
-    toggleSelectAllClusters: Clusters.toggleSelectAll,
-    setClusterAsReference: Clusters.setAsReference,
-    showDeleteModal: Clusters.showDeleteModal,
-    showDeleteSelectedModal: Clusters.showDeleteSelectedModal,
-    confirmDeleteCluster: Clusters.confirmDelete,
-    showMergeModal: Clusters.showMergeModal,
-    confirmMergeClusters: Clusters.confirmMerge,
-    changeClusterViewType: Clusters.changeViewType,
-
-    // Titles
-    generateTitles: Titles.generate,
-    toggleTitleSelection: Titles.toggleSelection,
-    toggleSelectAllTitles: Titles.toggleSelectAll,
-    deleteTitle: Titles.deleteOne,
-    deleteSelectedTitles: Titles.deleteSelected,
-    copyTitle: Titles.copy,
-    copyAllTitles: Titles.copyAll,
-    updateTitleStyleUI: Titles.updateStyleUI,
-
-    // Descriptions
-    generateDescriptions: Descriptions.generate,
-    deleteDescription: Descriptions.deleteOne,
-    deleteAllDescriptions: Descriptions.deleteAll,
-    copyDescription: Descriptions.copy,
-    copyAllDescriptions: Descriptions.copyAll,
-    updateDescStyleUI: Descriptions.updateStyleUI,
-
-    // Thumbnails
-    deleteThumbnail: Thumbnails.deleteOne,
-    downloadAllThumbnails: Thumbnails.downloadAll,
-
-    // Generation
-    clearReferenceImage: Generation.clearReferenceImage,
-};

@@ -5,20 +5,16 @@
  */
 
 import { state, resetGenerationState, saveGenerationJobState, clearGenerationJobState } from './state.js';
-import { getTextConfig, getImageConfig, getCurrentModelMaxRefs, getCurrentModelName } from './ai-config.js';
-import { getSelectedArray as getSelectedTitles } from './titles.js';
+import { getIdeasConfig, getImageRequestFields, getFacePhotosSetting, ensureGranSabioAvailable } from './ai-config.js';
+import * as References from './references.js';
+import * as Defaults from './defaults.js';
+import { getSelectedArray as getSelectedTitles, toggleSelection as toggleTitleSelection } from './titles.js';
 // C2: Import addNewToGallery from thumbnails module
-import { addNewToGallery } from './thumbnails.js';
+import { addNewToGallery, createResultTile, updateResultsPanel } from './thumbnails.js';
+import { getSelectedIds as getSelectedPeopleIds, roleLabel } from './people.js';
 
-// Store reference image data
-let referenceImageData = null;
-
-// Store submit button state for restoration
+// Submit button, kept while a generation runs
 let submitBtn = null;
-let originalBtnText = null;
-
-// Store conflict resolution promise
-let conflictResolve = null;
 
 /**
  * Wait for TaskQueue to be ready.
@@ -34,13 +30,39 @@ async function waitForTaskQueue(maxWait = 3000) {
 }
 
 /**
+ * Number of thumbnails chosen in step 2.
+ * @returns {number} Thumbnails to generate
+ */
+function thumbnailCount() {
+    return parseInt(document.getElementById('numImages').value, 10) || 1;
+}
+
+/**
+ * Label of the generate button: "Generate 5 thumbnails".
+ * @returns {string} Label
+ */
+function generateButtonLabel() {
+    return t('generate_form.generate_button', { count: thumbnailCount() });
+}
+
+/**
+ * Write the label of the generate button unless a generation is running.
+ */
+function renderGenerateButton() {
+    const btn = document.getElementById('generateBtn');
+    if (!btn.classList.contains('generating')) {
+        btn.textContent = generateButtonLabel();
+    }
+}
+
+/**
  * Restore the submit button to its original state.
  */
 function restoreSubmitButton() {
     if (submitBtn) {
         submitBtn.disabled = false;
-        submitBtn.textContent = originalBtnText;
         submitBtn.classList.remove('generating');
+        submitBtn.textContent = generateButtonLabel();
     }
     hideCancelButton();
 }
@@ -53,8 +75,8 @@ export function restoreSubmitButtonIfNeeded() {
     const btn = document.getElementById('generateBtn');
     if (btn && btn.classList.contains('generating')) {
         btn.disabled = false;
-        btn.textContent = t('generate_form.button');
         btn.classList.remove('generating');
+        btn.textContent = generateButtonLabel();
         hideCancelButton();
     }
 }
@@ -80,156 +102,36 @@ function hideCancelButton() {
 }
 
 // =========================================================================
-// REFERENCE CONFLICT HANDLING
-// =========================================================================
-
-/**
- * Check if adding the style reference would exceed the model's limit.
- * Reference images are always used when present (simplified UX).
- * @returns {Promise<{proceed: boolean, adjustedNumRefs?: number, skipStyleRef?: boolean}>}
- */
-async function checkReferenceConflict() {
-    // No reference image = no conflict possible
-    if (!referenceImageData) {
-        return { proceed: true };
-    }
-
-    const imageConfig = getImageConfig();
-    const numClusterRefs = imageConfig.num_reference_images || 0;
-    const modelMax = getCurrentModelMaxRefs();
-    const totalWithStyle = numClusterRefs + 1;
-
-    if (totalWithStyle <= modelMax) {
-        // No conflict, everything fits
-        return { proceed: true };
-    }
-
-    // Conflict! Show modal and wait for user decision
-    const modelName = getCurrentModelName();
-
-    // Update modal message
-    const messageEl = document.getElementById('refConflictMessage');
-    messageEl.textContent = t('generate_form.ref_conflict_message', {
-        model: modelName,
-        max: modelMax,
-        cluster: numClusterRefs,
-        total: totalWithStyle
-    });
-
-    // Update button text with the count
-    const reduceBtn = document.getElementById('refConflictReduceCluster');
-    reduceBtn.textContent = t('generate_form.ref_conflict_reduce_cluster', {
-        count: modelMax - 1
-    });
-
-    // Show modal
-    document.getElementById('refConflictModal').classList.add('visible');
-
-    // Return a promise that resolves when user makes a choice
-    return new Promise((resolve) => {
-        conflictResolve = resolve;
-        const modal = document.getElementById('refConflictModal');
-
-        // H9: Cleanup function to close modal and remove listeners
-        const closeAndResolve = (result) => {
-            modal.classList.remove('visible');
-            document.removeEventListener('keydown', escapeHandler);
-            modal.removeEventListener('click', backdropHandler);
-            conflictResolve = null;
-            resolve(result);
-        };
-
-        // H9: Escape key handler
-        const escapeHandler = (e) => {
-            if (e.key === 'Escape') {
-                closeAndResolve({ proceed: false });
-            }
-        };
-
-        // H9: Backdrop click handler
-        const backdropHandler = (e) => {
-            if (e.target === modal) {
-                closeAndResolve({ proceed: false });
-            }
-        };
-
-        document.addEventListener('keydown', escapeHandler);
-        modal.addEventListener('click', backdropHandler);
-
-        // Setup button handlers
-        reduceBtn.onclick = () => {
-            // Update the num refs input to model_max - 1
-            document.getElementById('imageAiNumRefs').value = modelMax - 1;
-            closeAndResolve({ proceed: true, adjustedNumRefs: modelMax - 1 });
-        };
-
-        document.getElementById('refConflictRemoveStyle').onclick = () => {
-            // User chose to not include the style reference
-            closeAndResolve({ proceed: true, skipStyleRef: true });
-        };
-    });
-}
-
-/**
- * Setup modal close handler to cancel generation if modal is closed.
- * Note: Escape and backdrop are handled per-open in checkReferenceConflict (H9).
- * This only handles the explicit cancel button.
- */
-function setupRefConflictModalClose() {
-    const modal = document.getElementById('refConflictModal');
-    const cancelBtn = modal.querySelector('.btn-cancel');
-
-    cancelBtn.onclick = () => {
-        modal.classList.remove('visible');
-        if (conflictResolve) {
-            conflictResolve({ proceed: false });
-            conflictResolve = null;
-        }
-    };
-}
-
-// =========================================================================
 // GENERATION REQUEST
 // =========================================================================
 
 /**
  * Build the generation request object from form inputs.
- * @param {Object} options - Options from conflict resolution
- * @param {boolean} options.skipStyleRef - If true, don't include style ref in image generation
  * @returns {Object} Generation request payload
  */
-export function getRequest(options = {}) {
-    const imageAiConfig = getImageConfig();
-    const textAiConfig = getTextConfig();
+export function getRequest() {
+    const ideasConfig = getIdeasConfig();
 
+    // Multi-cluster: send the ordered people chosen by the user. Position in
+    // the array maps to person_01, person_02, etc.
     const request = {
-        cluster_index: parseInt(document.getElementById('clusterSelect').value),
-        num_images: parseInt(document.getElementById('numImages').value),
+        cluster_ids: getSelectedPeopleIds(),
+        num_images: thumbnailCount(),
         preferred_expression: document.getElementById('expression').value || null,
 
-        // Image AI settings
-        image_provider: imageAiConfig.provider,
-        num_reference_images: imageAiConfig.num_reference_images
+        // Image AI: provider, its model, face photos and fallback
+        ...getImageRequestFields()
     };
 
-    // Add model based on image provider
-    if (imageAiConfig.gemini_model) {
-        request.gemini_model = imageAiConfig.gemini_model;
-    } else if (imageAiConfig.poe_model) {
-        request.poe_model = imageAiConfig.poe_model;
-    } else if (imageAiConfig.openai_model) {
-        request.openai_model = imageAiConfig.openai_model;
+    // AI that writes the thumbnail ideas
+    request.prompt_provider = ideasConfig.provider;
+    if (ideasConfig.model) {
+        request.prompt_model = ideasConfig.model;
     }
 
-    // Prompt generation AI settings
-    request.prompt_provider = textAiConfig.provider;
-    if (textAiConfig.model) {
-        request.prompt_model = textAiConfig.model;
-    }
-
-    request.prompt_thinking_enabled = textAiConfig.thinking_enabled;
-    if (textAiConfig.thinking_enabled) {
-        request.prompt_thinking_level = textAiConfig.thinking_level;
+    request.prompt_thinking_enabled = ideasConfig.thinking_enabled;
+    if (ideasConfig.thinking_enabled) {
+        request.prompt_thinking_level = ideasConfig.thinking_level;
     }
 
     const customInstructions = document.getElementById('promptCustomInstructions').value.trim();
@@ -239,19 +141,25 @@ export function getRequest(options = {}) {
 
     request.prompt_include_history = document.getElementById('promptIncludeHistory').checked;
 
-    // Include selected titles to guide image generation
+    // Face swap post-processing; a disabled checkbox (models missing) is unchecked
+    request.apply_face_swap = document.getElementById('applyFaceSwap').checked;
+    const restoration = document.getElementById('applyFaceRestoration');
+    request.restore_faces = request.apply_face_swap && !restoration.disabled && restoration.checked;
+
+    // Step 2: the photos of the setting, or a setting the AI imagines
+    request.include_scene_reference = References.includeBackground();
+
+    // Include starred titles to guide image generation
     const selectedTitles = getSelectedTitles();
     if (selectedTitles.length > 0) {
         request.selected_titles = selectedTitles;
     }
 
-    // Include reference image if provided (always used for prompts, optionally for image gen)
-    if (referenceImageData) {
-        request.reference_image_base64 = referenceImageData.base64;
-        // Always send to prompt LLM for analysis
+    // The style image reaches both models and is one of the images the image model gets
+    if (state.styleImage) {
+        request.reference_image_base64 = state.styleImage.base64;
         request.reference_image_use_for_prompts = true;
-        // Include in image generation unless user chose to skip (conflict resolution)
-        request.reference_image_include_in_refs = !options.skipStyleRef;
+        request.reference_image_include_in_refs = true;
     }
 
     return request;
@@ -295,44 +203,166 @@ function setupCancelButton() {
 }
 
 /**
+ * Typed thumbnail counts out of range snap back when leaving the field.
+ */
+function setupCountField() {
+    document.getElementById('numImages').addEventListener('change', (e) => {
+        const input = e.target;
+        const value = parseInt(input.value, 10);
+        input.value = Number.isInteger(value)
+            ? Math.min(Math.max(value, 1), parseInt(input.max, 10))
+            : AppSettings.get().generation.num_images;
+        renderSummaries();
+    });
+}
+
+/**
+ * Summary above the generate button: "5 thumbnails with Laura (lead) and Leo".
+ */
+function renderSubmitSummary() {
+    const summary = document.getElementById('generateSummary');
+    if (state.selectedPeople.length === 0) {
+        summary.textContent = t('generate_form.no_people');
+        return;
+    }
+    const names = state.selectedPeople.map((person, index) => {
+        const name = ThumbnailApp.getClusterDisplayName(person);
+        return index === 0 ? t('generate_form.summary_lead', { name, role: roleLabel(0) }) : name;
+    });
+    const people = names.length === 1
+        ? names[0]
+        : t('generate_form.summary_and', { list: names.slice(0, -1).join(', '), last: names[names.length - 1] });
+    const thumbnails = t('generate_form.summary_thumbnails', { count: thumbnailCount() });
+    summary.innerHTML = t('generate_form.summary', {
+        thumbnails: `<strong>${escapeHtml(thumbnails)}</strong>`,
+        people: escapeHtml(people)
+    });
+}
+
+/**
+ * A value of the settings' generation defaults as the step summaries write it.
+ * @param {string} key - expression, face_swap, avoid_repeat, face_photos or provider_fallback
+ * @param {*} value - Value as the settings store it
+ * @returns {string} Text
+ */
+function summaryText(key, value) {
+    if (key === 'expression') {
+        return document.querySelector(`#expression option[value="${value ?? ''}"]`).textContent;
+    }
+    if (key === 'face_photos') {
+        return t('generate_form.summary_face_photos', { count: value });
+    }
+    return t(value ? 'generate_form.summary_on' : 'generate_form.summary_off');
+}
+
+/**
+ * Values of the folded steps, shown on their headers while closed. Values
+ * changed for this video stand out and say what the settings have.
+ */
+function renderStepSummaries() {
+    document.getElementById('summaryExpression').textContent =
+        summaryText('expression', document.getElementById('expression').value);
+    document.getElementById('summaryStyle').textContent = state.styleImage
+        ? state.styleImage.filename
+        : t('generate_form.summary_no_image');
+    const starred = getSelectedTitles().length;
+    document.getElementById('summaryTitles').textContent = starred > 0
+        ? t('generate_form.summary_titles', { count: starred })
+        : t('generate_form.summary_no_titles');
+    const instructions = document.getElementById('promptCustomInstructions').value.trim();
+    document.getElementById('summaryInstructions').textContent = instructions || t('generate_form.summary_no_instructions');
+
+    const faceSwap = document.getElementById('applyFaceSwap');
+    document.getElementById('summaryFaceSwap').textContent = faceSwap.disabled
+        ? t('generate_form.summary_unavailable')
+        : summaryText('face_swap', faceSwap.checked);
+    const restoration = document.getElementById('applyFaceRestoration');
+    const showRestoration = faceSwap.checked && !faceSwap.disabled;
+    document.getElementById('faceRestorationOption').classList.toggle('hidden', !showRestoration);
+    document.querySelector('[data-default="face_restoration"]').classList.toggle('hidden', !showRestoration);
+    document.getElementById('summaryFaceRestoration').textContent = restoration.disabled
+        ? t('generate_form.summary_unavailable')
+        : summaryText('face_restoration', restoration.checked);
+    document.getElementById('summaryAvoidRepeat').textContent =
+        summaryText('avoid_repeat', document.getElementById('promptIncludeHistory').checked);
+    document.getElementById('summaryFacePhotos').textContent = summaryText('face_photos', getFacePhotosSetting());
+    document.getElementById('summaryFallback').textContent =
+        summaryText('provider_fallback', document.getElementById('imageAiProviderFallback').checked);
+
+    const defaults = AppSettings.get().generation;
+    document.querySelectorAll('.step-summary-row[data-default]').forEach(row => {
+        const key = row.dataset.default;
+        const changed = Defaults.isChanged(key);
+        row.classList.toggle('is-changed', changed);
+        row.title = changed ? t('generate_form.changed_here', { value: summaryText(key, defaults[key]) }) : '';
+    });
+    document.querySelectorAll('[data-reset-step]').forEach(button => {
+        button.classList.toggle('hidden', !Defaults.stepChanged(button.dataset.resetStep));
+    });
+}
+
+function renderSummaries() {
+    renderGenerateButton();
+    renderSubmitSummary();
+    renderStepSummaries();
+}
+
+/**
  * Setup generation form event handlers.
  */
 export function setupForm() {
-    // Setup reference image handler
     setupReferenceImageHandler();
-
-    // Setup conflict modal close handler
-    setupRefConflictModalClose();
-
-    // Setup cancel button handler
     setupCancelButton();
+    setupCountField();
 
-    // Listen for image config changes to update warning
-    document.addEventListener('imageConfigChanged', updateStyleRefWarning);
+    // Every control of the form shows its value in a summary
+    const form = document.getElementById('generateForm');
+    form.addEventListener('input', renderSummaries);
+    form.addEventListener('change', renderSummaries);
+    document.addEventListener('people:changed', renderSubmitSummary);
+    document.addEventListener('imageConfigChanged', () => {
+        renderStepSummaries();
+        updateStyleImageHint();
+    });
+    // New settings may change what differs from them here
+    document.addEventListener('settings:changed', renderSummaries);
+    form.addEventListener('click', (e) => {
+        const button = e.target.closest('[data-reset-step]');
+        if (button) Defaults.reset(button.dataset.resetStep);
+    });
 
-    document.getElementById('generateForm').addEventListener('submit', async (e) => {
+    // Step 3 mirrors the titles of the Texts tab and their stars
+    document.addEventListener('titles:changed', () => {
+        renderGuidingTitles();
+        renderStepSummaries();
+    });
+    document.getElementById('guidingTitles').addEventListener('change', (e) => {
+        if (e.target.matches('input[type="checkbox"]')) {
+            toggleTitleSelection(parseInt(e.target.dataset.index));
+        }
+    });
+    renderGuidingTitles();
+    renderSummaries();
+
+    form.addEventListener('submit', async (e) => {
         e.preventDefault();
 
-        const clusterIndex = document.getElementById('clusterSelect').value;
-        if (!clusterIndex) {
-            ThumbnailApp.showToast(t('generate_form.no_cluster_selected'), 'error');
+        if (!ensureGranSabioAvailable()) return;
+
+        if (state.selectedPeople.length === 0) {
+            ThumbnailApp.showToast(t('generate_form.no_people'), 'error');
             return;
         }
 
-        // H14: Disable submit button BEFORE the conflict check to prevent double-click race
+        // The photos do not fit the model, or someone has no face photo
+        if (References.getBlockReason()) {
+            ThumbnailApp.showToast(References.getBlockReason(), 'error');
+            return;
+        }
+
+        // H14: Disable submit button before anything async to prevent double-click races
         submitBtn = document.getElementById('generateBtn');
-        originalBtnText = submitBtn.textContent;
         submitBtn.disabled = true;
-
-        // Check for reference limit conflict before proceeding
-        const conflictResult = await checkReferenceConflict();
-        if (!conflictResult.proceed) {
-            // User cancelled - restore button
-            submitBtn.disabled = false;
-            return;
-        }
-
-        // Change text during generation
         submitBtn.textContent = t('generation.generating');
         submitBtn.classList.add('generating');
         showCancelButton();
@@ -341,12 +371,11 @@ export function setupForm() {
         document.getElementById('progressFill').style.width = '0%';
         document.getElementById('progressText').textContent = t('generate_form.progress_starting');
         document.getElementById('thumbnailsGrid').innerHTML = '';
-        document.getElementById('resultsSection').classList.add('hidden');
 
         // Close any existing SSE connection
         resetGenerationState();
 
-        const request = getRequest({ skipStyleRef: conflictResult.skipStyleRef });
+        const request = getRequest();
 
         try {
             const response = await fetch(`/api/generation/${state.videoId}/start`, {
@@ -357,7 +386,7 @@ export function setupForm() {
 
             if (!response.ok) {
                 const error = await response.json();
-                throw new Error(error.detail || t('errors.generation_failed'));
+                throw new Error(typeof error.detail === 'string' ? error.detail : t('errors.generation_failed'));
             }
 
             const data = await response.json();
@@ -365,12 +394,41 @@ export function setupForm() {
             saveGenerationJobState();  // Persist job ID for page navigation
 
             document.getElementById('generationStatus').classList.remove('hidden');
+            document.getElementById('resultsTitle').textContent = t('generate_form.results_generating');
+            updateResultsPanel();
             pollStatus();
         } catch (error) {
             ThumbnailApp.showToast(t('errors.generic') + ': ' + error.message, 'error');
             restoreSubmitButton();
+            updateResultsPanel();
         }
     });
+}
+
+/**
+ * Render the saved titles as checkboxes: the checked (starred) ones guide the thumbnails.
+ */
+function renderGuidingTitles() {
+    const container = document.getElementById('guidingTitles');
+    const titles = state.titles
+        .map((title, index) => ({ title, index }))
+        .filter(({ title }) => title !== null);
+
+    if (titles.length === 0) {
+        container.innerHTML = `
+            <p class="step-empty">${escapeHtml(t('generate_form.no_titles'))}
+                <button type="button" class="link-btn" data-goto-tab="texts">${escapeHtml(t('generate_form.go_to_titles'))}</button>
+            </p>
+        `;
+        return;
+    }
+
+    container.innerHTML = titles.map(({ title, index }) => `
+        <label class="guiding-title">
+            <input type="checkbox" data-index="${index}" ${state.selectedTitles.has(index) ? 'checked' : ''}>
+            <span>${escapeHtml(typeof title === 'string' ? title : title.text)}</span>
+        </label>
+    `).join('');
 }
 
 // =========================================================================
@@ -402,22 +460,29 @@ export function startSSE() {
             complete: (data) => {
                 document.getElementById('progressFill').style.width = '100%';
                 document.getElementById('progressText').textContent = t('generation.complete');
+                document.getElementById('resultsTitle').textContent = t('generate_form.results_last');
                 ThumbnailApp.showToast(t('generation.complete'), 'success');
                 clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
                 loadResults();
             },
             error: (data) => {
-                document.getElementById('progressText').textContent = t('common.error');
-                ThumbnailApp.showToast(t('errors.generic') + ': ' + (data.error_message || data.error), 'error');
+                const reason = data.error_message || data.error;
+                // The toast fades; the reason stays next to the progress bar
+                document.getElementById('progressText').textContent = `${t('common.error')}: ${reason}`;
+                document.getElementById('resultsTitle').textContent = t('generate_form.results_last');
+                ThumbnailApp.showToast(t('errors.generic') + ': ' + reason, 'error');
                 clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
+                updateResultsPanel();
             },
             cancelled: (data) => {
-                document.getElementById('progressText').textContent = t('common.cancel');
-                ThumbnailApp.showToast(t('common.cancel'), 'info');
+                document.getElementById('progressText').textContent = t('task_queue.cancelled');
+                document.getElementById('resultsTitle').textContent = t('generate_form.results_last');
+                ThumbnailApp.showToast(t('task_queue.cancelled'), 'info');
                 clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
+                updateResultsPanel();
             }
         }
     );
@@ -462,7 +527,9 @@ export async function pollStatus() {
                 clearGenerationJobState();
                 restoreSubmitButton();
                 if (data.status === 'error') {
-                    ThumbnailApp.showToast(t('errors.generation_failed') + ': ' + (data.error_message || t('errors.generic')), 'error');
+                    const reason = data.error_message || t('errors.generic');
+                    document.getElementById('progressText').textContent = `${t('common.error')}: ${reason}`;
+                    ThumbnailApp.showToast(t('errors.generation_failed') + ': ' + reason, 'error');
                 }
             }
         } catch (error) {
@@ -483,22 +550,14 @@ export async function pollStatus() {
  * @param {Object} thumb - Thumbnail data from SSE event
  */
 export function appendThumbnail(thumb) {
-    const section = document.getElementById('resultsSection');
     const grid = document.getElementById('thumbnailsGrid');
-
-    section.classList.remove('hidden');
-
-    const card = document.createElement('div');
-    card.className = 'thumbnail-card';
-    card.innerHTML = `
-        <img src="/api/thumbnails/${thumb.thumbnail_id}" alt="Thumbnail">
-        <div class="thumbnail-info">
-            <p><strong>${escapeHtml(thumb.suggested_title) || t('common.loading')}</strong></p>
-            <p>${escapeHtml(thumb.text_overlay) || ''}</p>
-            <a href="/api/thumbnails/${thumb.thumbnail_id}" download class="btn btn-small">${t('results.thumbnails.download')}</a>
-        </div>
-    `;
-    grid.appendChild(card);
+    // The stream sends every thumbnail of the job again on each (re)connection
+    if (grid.querySelector(`[data-thumbnail-id="${thumb.thumbnail_id}"]`)) return;
+    grid.appendChild(createResultTile({
+        id: thumb.thumbnail_id,
+        suggested_title: thumb.suggested_title
+    }));
+    updateResultsPanel();
 }
 
 /**
@@ -507,32 +566,17 @@ export function appendThumbnail(thumb) {
 export async function loadResults() {
     if (!state.currentJobId) return;
 
-    const section = document.getElementById('resultsSection');
     const grid = document.getElementById('thumbnailsGrid');
 
     try {
         const response = await fetch(`/api/generation/jobs/${state.currentJobId}/thumbnails`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const thumbnails = await response.json();
-
-        section.classList.remove('hidden');
-        grid.innerHTML = '';
-
-        for (const thumb of thumbnails) {
-            const card = document.createElement('div');
-            card.className = 'thumbnail-card';
-            card.innerHTML = `
-                <img src="/api/thumbnails/${thumb.id}" alt="Thumbnail">
-                <div class="thumbnail-info">
-                    <p><strong>${escapeHtml(thumb.suggested_title) || t('empty_state.no_thumbnails')}</strong></p>
-                    <p>${escapeHtml(thumb.text_overlay) || ''}</p>
-                    <a href="/api/thumbnails/${thumb.id}" download class="btn btn-small">${t('results.thumbnails.download')}</a>
-                </div>
-            `;
-            grid.appendChild(card);
-        }
+        grid.replaceChildren(...thumbnails.map(createResultTile));
     } catch (error) {
         grid.innerHTML = `<div class="error">${t('errors.load_thumbnails')}: ${escapeHtml(error.message)}</div>`;
     }
+    updateResultsPanel();
 }
 
 // =========================================================================
@@ -540,15 +584,13 @@ export async function loadResults() {
 // =========================================================================
 
 /**
- * Check if a thumbnail is already displayed in the gallery.
+ * Check if the gallery already has a thumbnail. A job's thumbnails are among
+ * the newest, which the gallery loads whatever its order.
  * @param {number} thumbnailId - The thumbnail database ID
  * @returns {boolean} True if thumbnail is in gallery
  */
 function isThumbnailInGallery(thumbnailId) {
-    const card = document.querySelector(
-        `.thumbnail-card[data-thumbnail-id="${thumbnailId}"]`
-    );
-    return !!card;
+    return state.newestThumbnails.some(thumb => thumb.id === thumbnailId);
 }
 
 /**
@@ -564,6 +606,10 @@ async function loadJobThumbnails(jobId) {
 
         const thumbnails = await response.json();
         let loadedCount = 0;
+
+        // The results panel shows the running job's thumbnails
+        document.getElementById('thumbnailsGrid').replaceChildren(...thumbnails.map(createResultTile));
+        updateResultsPanel();
 
         for (const thumb of thumbnails) {
             // Check if already in gallery to avoid duplicates
@@ -586,132 +632,117 @@ async function loadJobThumbnails(jobId) {
 }
 
 // =========================================================================
-// REFERENCE IMAGE HANDLING
+// STYLE IMAGE
 // =========================================================================
 
 /**
- * Update the placeholder text for custom instructions based on reference image state.
- * @param {boolean} hasReferenceImage - Whether a reference image is selected
+ * Update the placeholder text for custom instructions based on the style image.
+ * @param {boolean} hasStyleImage - Whether a style image is chosen
  */
-function updateInstructionsPlaceholder(hasReferenceImage) {
-    const textarea = document.getElementById('promptCustomInstructions');
-    if (textarea) {
-        textarea.placeholder = hasReferenceImage
-            ? t('generate_form.instructions_placeholder_with_ref')
-            : t('generate_form.instructions_placeholder');
-    }
+function updateInstructionsPlaceholder(hasStyleImage) {
+    document.getElementById('promptCustomInstructions').placeholder = hasStyleImage
+        ? t('generate_form.instructions_placeholder_with_ref')
+        : t('generate_form.instructions_placeholder');
 }
 
+const MAX_STYLE_IMAGE_MB = 10;
+
 /**
- * Setup reference image input handler.
+ * Setup the style image: click the drop zone to pick a file, or drop one on it.
  */
 function setupReferenceImageHandler() {
     const input = document.getElementById('referenceImageInput');
-    if (!input) return;
+    const dropZone = document.getElementById('referenceDropZone');
 
-    input.addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-
-        // Validate file size (max 10MB)
-        if (file.size > 10 * 1024 * 1024) {
-            ThumbnailApp.showToast(t('errors.generic'), 'error');
-            input.value = '';
-            return;
-        }
-
-        // Validate file type
-        if (!file.type.startsWith('image/')) {
-            ThumbnailApp.showToast(t('errors.generic'), 'error');
-            input.value = '';
-            return;
-        }
-
-        // Read as base64
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const dataUrl = e.target.result;
-            // Remove data:image/...;base64, prefix
-            const base64 = dataUrl.split(',')[1];
-
-            referenceImageData = {
-                base64: base64,
-                filename: file.name
-            };
-
-            // Update UI
-            document.getElementById('referenceImageName').textContent = file.name;
-            document.getElementById('referenceImageImg').src = dataUrl;
-            document.getElementById('referenceImagePreview').style.display = 'block';
-            document.getElementById('referenceImageOptions').style.display = 'block';
-
-            // Update placeholder to show reference-related examples
-            updateInstructionsPlaceholder(true);
-
-            // Check for conflicts
-            updateStyleRefWarning();
-        };
-
-        reader.onerror = () => {
-            ThumbnailApp.showToast(t('errors.generic'), 'error');
-        };
-
-        reader.readAsDataURL(file);
+    dropZone.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => {
+        const file = input.files[0];
+        input.value = '';
+        if (file) loadReferenceFile(file);
     });
+
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        const file = e.dataTransfer.files[0];
+        if (file) loadReferenceFile(file);
+    });
+
+    document.getElementById('clearReferenceImage').addEventListener('click', clearReferenceImage);
+    updateStyleImageHint();
 }
 
 /**
- * Update the warning message for style reference conflicts.
- * Called when reference image is added or num refs/model changes.
- * Shows warning if adding the style ref would exceed model limits.
+ * Validate and read the style image.
+ * @param {File} file - Picked or dropped file
  */
-export function updateStyleRefWarning() {
-    const warningEl = document.getElementById('styleRefWarning');
-    if (!warningEl) return;
-
-    // No warning if no reference image
-    if (!referenceImageData) {
-        warningEl.style.display = 'none';
+function loadReferenceFile(file) {
+    if (!file.type.startsWith('image/')) {
+        ThumbnailApp.showToast(t('generate_form.style_not_image'), 'error');
+        return;
+    }
+    if (file.size > MAX_STYLE_IMAGE_MB * 1024 * 1024) {
+        ThumbnailApp.showToast(t('generate_form.style_too_large', {max: MAX_STYLE_IMAGE_MB}), 'error');
         return;
     }
 
-    const imageConfig = getImageConfig();
-    const numClusterRefs = imageConfig.num_reference_images || 0;
-    const modelMax = getCurrentModelMaxRefs();
-    const totalWithStyle = numClusterRefs + 1;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const dataUrl = e.target.result;
+        state.styleImage = {
+            // Without the data:image/...;base64, prefix
+            base64: dataUrl.split(',')[1],
+            filename: file.name
+        };
 
-    if (totalWithStyle > modelMax) {
-        warningEl.textContent = t('generate_form.ref_conflict_warning', { max: modelMax });
-        warningEl.style.display = 'block';
-    } else {
-        warningEl.style.display = 'none';
-    }
+        document.getElementById('referenceImageImg').src = dataUrl;
+        document.getElementById('referenceImagePreview').classList.remove('hidden');
+        document.getElementById('referenceDropZone').classList.add('hidden');
+        updateInstructionsPlaceholder(true);
+        styleImageChanged();
+    };
+
+    reader.onerror = () => {
+        ThumbnailApp.showToast(t('errors.generic'), 'error');
+    };
+
+    reader.readAsDataURL(file);
 }
 
 /**
- * Clear the selected reference image.
+ * Say under the style image what it is for or, once chosen, that the image
+ * model gets it too.
+ */
+function updateStyleImageHint() {
+    document.getElementById('styleImageHint').textContent =
+        t(state.styleImage ? 'generate_form.style_counts' : 'generate_form.style_hint');
+}
+
+/**
+ * The style image is one more image the image model gets: tell the count.
+ */
+function styleImageChanged() {
+    updateStyleImageHint();
+    renderStepSummaries();
+    document.dispatchEvent(new CustomEvent('imageConfigChanged'));
+}
+
+/**
+ * Clear the chosen style image.
  */
 export function clearReferenceImage() {
-    referenceImageData = null;
-
-    const input = document.getElementById('referenceImageInput');
-    if (input) input.value = '';
-
-    const nameEl = document.getElementById('referenceImageName');
-    if (nameEl) nameEl.textContent = t('generate_form.no_image_selected');
-
-    const previewEl = document.getElementById('referenceImagePreview');
-    if (previewEl) previewEl.style.display = 'none';
-
-    const optionsEl = document.getElementById('referenceImageOptions');
-    if (optionsEl) optionsEl.style.display = 'none';
-
-    // Hide warning if visible
-    const warningEl = document.getElementById('styleRefWarning');
-    if (warningEl) warningEl.style.display = 'none';
-
-    // Restore default placeholder
+    state.styleImage = null;
+    document.getElementById('referenceImageInput').value = '';
+    document.getElementById('referenceImageImg').removeAttribute('src');
+    document.getElementById('referenceImagePreview').classList.add('hidden');
+    document.getElementById('referenceDropZone').classList.remove('hidden');
     updateInstructionsPlaceholder(false);
+    styleImageChanged();
 }
 
 // =========================================================================
@@ -724,18 +755,16 @@ export function clearReferenceImage() {
  * @param {Object} jobData - Optional job status data from API
  */
 function showGeneratingUI(jobData = null) {
-    // Cache button reference
     submitBtn = document.getElementById('generateBtn');
-    if (submitBtn) {
-        originalBtnText = submitBtn.textContent;
-        submitBtn.disabled = true;
-        submitBtn.textContent = t('generation.generating');
-        submitBtn.classList.add('generating');
-    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = t('generation.generating');
+    submitBtn.classList.add('generating');
     showCancelButton();
 
     // Show progress section
     document.getElementById('generationStatus').classList.remove('hidden');
+    document.getElementById('resultsTitle').textContent = t('generate_form.results_generating');
+    updateResultsPanel();
 
     // Update progress if we have data
     if (jobData) {
@@ -768,12 +797,21 @@ function checkTaskQueueForActiveJob() {
     return false;
 }
 
+let restoring = null;
+
 /**
  * Restore generation UI state after page load.
  * Checks if there's an active job for this video and reconnects to it.
- * Call this after initState() during page initialization.
+ * Call this after initState() during page initialization. Page init and the
+ * task queue's first events can both ask for it at once: they share one run.
+ * @returns {Promise<void>}
  */
-export async function restoreGenerationState() {
+export function restoreGenerationState() {
+    restoring ??= restoreActiveJob().finally(() => { restoring = null; });
+    return restoring;
+}
+
+async function restoreActiveJob() {
     // Wait for TaskQueue to be ready before checking for active jobs
     const ready = await waitForTaskQueue();
 

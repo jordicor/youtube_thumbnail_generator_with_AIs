@@ -11,12 +11,39 @@ import aiosqlite
 from fastapi import HTTPException
 import pytest
 
+from i18n.i18n import translate as t
 from services.generation_service import (
     GenerationCancelledError,
     GenerationNotReadyError,
     GenerationService,
 )
 from services.task_service import TaskService
+
+
+@pytest.mark.parametrize('name,raw_name', [('model_timestamp_c0_v1.png', 'model_raw_timestamp_c0_v1.png'),
+                                         ('thumbnail.png', 'raw_thumbnail.png')])
+async def test_cancel_cleanup_removes_original_raw_thumbnail(test_db, generating_job, name, raw_name):
+    import config
+
+    job_id = generating_job['id']
+    await test_db.execute("UPDATE videos SET status='generating' WHERE id=?", [generating_job['video_id']])
+    relative = f'analyzed_video/thumbnails/{name}'
+    image = config.OUTPUT_DIR / relative
+    raw = image.parent / 'raw' / raw_name
+    raw.parent.mkdir(parents=True)
+    image.write_bytes(b'synthetic resized image')
+    raw.write_bytes(b'synthetic original image')
+    unrelated = raw.parent / 'other_raw_image.png'
+    unrelated.write_bytes(b'another job')
+    await test_db.execute('INSERT INTO thumbnails (job_id, image_index, filepath) VALUES (?, 1, ?)',
+                          [job_id, relative])
+    await test_db.commit()
+
+    result = await GenerationService(test_db).cleanup_partial_generation(job_id)
+
+    assert result['cleaned_db_records'] == 1
+    assert not image.exists() and not raw.exists()
+    assert unrelated.read_bytes() == b'another job'
 
 
 @pytest.fixture
@@ -28,8 +55,11 @@ async def generation_db(test_db):
     await test_db.execute(
         "INSERT INTO clusters "
         "(id, video_id, cluster_index, num_frames, representative_frame, view_mode, cluster_type) "
-        "VALUES (1, 1, 0, 1, '/fake/frame.png', 'person', 'person')"
+        "VALUES (1, 1, 0, 1, 'fixture/frames/frame.png', 'person', 'person')"
     )
+    from tests.conftest import provision_uploaded_face
+    for cluster_id in [1]:
+        await provision_uploaded_face(test_db, cluster_id)
     await test_db.commit()
     return test_db
 
@@ -55,7 +85,7 @@ async def test_invalid_cluster_never_claims_video(generation_db, monkeypatch):
     enqueue = AsyncMock()
     monkeypatch.setattr(generation, 'enqueue_generation', enqueue)
     with pytest.raises(HTTPException) as error:
-        await generation.start_generation(1, generation.GenerationRequest(cluster_index=999))
+        await generation.start_generation(1, generation.GenerationRequest(cluster_ids=[999]))
     assert error.value.status_code == 404
     assert await video_status(generation_db) == 'analyzed'
     enqueue.assert_not_called()
@@ -71,7 +101,7 @@ async def test_enqueue_failure_releases_video(generation_db, monkeypatch, failur
     monkeypatch.setattr(generation, 'enqueue_generation', enqueue)
     expected = HTTPException if failure is None else type(failure)
     with pytest.raises(expected):
-        await generation.start_generation(1, generation.GenerationRequest(cluster_index=0))
+        await generation.start_generation(1, generation.GenerationRequest(cluster_ids=[1]))
     assert await video_status(generation_db) == 'analyzed'
     job = await GenerationService(generation_db).get_job(1)
     assert job['status'] == 'error'
@@ -97,7 +127,7 @@ async def test_cancellation_during_connection_exit_releases_committed_claim(gene
     enqueue = AsyncMock()
     monkeypatch.setattr(generation, 'enqueue_generation', enqueue)
     with pytest.raises(asyncio.CancelledError):
-        await generation.start_generation(1, generation.GenerationRequest(cluster_index=0))
+        await generation.start_generation(1, generation.GenerationRequest(cluster_ids=[1]))
     enqueue.assert_not_called()
     assert (await GenerationService(generation_db).get_job(1))['status'] == 'error'
     assert await video_status(generation_db) == 'analyzed'
@@ -107,9 +137,11 @@ async def test_cancellation_during_connection_exit_releases_committed_claim(gene
 async def test_failed_job_insert_rolls_back_claim(generation_db):
     service = GenerationService(generation_db)
     with pytest.raises(sqlite3.IntegrityError):
-        await service.create_generation_job(1, 999)
+        await service.create_generation_job(1, [999])
     assert await video_status(generation_db) == 'analyzed'
     assert not generation_db.in_transaction
+    async with generation_db.execute('SELECT COUNT(*) FROM generation_jobs') as cursor:
+        assert (await cursor.fetchone())[0] == 0
 
 
 @pytest.mark.asyncio
@@ -127,7 +159,7 @@ async def test_cancellation_after_commit_compensates_persisted_job(generation_db
 
     monkeypatch.setattr(generation_db, 'commit', commit_then_cancel)
     with pytest.raises(asyncio.CancelledError):
-        await service.create_generation_job(1, 1)
+        await service.create_generation_job(1, [1])
     assert (await service.get_job(1))['status'] == 'error'
     assert await video_status(generation_db) == 'analyzed'
 
@@ -148,13 +180,15 @@ async def test_concurrent_requests_only_create_one_job(generation_db, tmp_path, 
     monkeypatch.setattr(generation, 'enqueue_generation', enqueue)
 
     results = await asyncio.gather(
-        generation.start_generation(1, generation.GenerationRequest(cluster_index=0)),
-        generation.start_generation(1, generation.GenerationRequest(cluster_index=0)),
+        generation.start_generation(1, generation.GenerationRequest(cluster_ids=[1])),
+        generation.start_generation(1, generation.GenerationRequest(cluster_ids=[1])),
         return_exceptions=True,
     )
     assert sum(isinstance(result, dict) for result in results) == 1, repr(results)
     failures = [result for result in results if isinstance(result, HTTPException)]
-    assert len(failures) == 1 and failures[0].status_code == 400, repr(results)
+    # The loser is told the video is already generating
+    assert len(failures) == 1 and failures[0].status_code == 409, repr(results)
+    assert failures[0].detail == t('api.errors.generation_in_progress')
     enqueue.assert_awaited_once()
     async with database_module.get_db() as db:
         async with db.execute('SELECT COUNT(*) FROM generation_jobs') as cursor:
@@ -166,7 +200,7 @@ async def test_concurrent_requests_only_create_one_job(generation_db, tmp_path, 
 @pytest.mark.parametrize('terminal', ['error', 'cancelled', 'completed'])
 async def test_terminal_transition_releases_video(generation_db, terminal):
     service = GenerationService(generation_db)
-    job = await service.create_generation_job(1, 1)
+    job = await service.create_generation_job(1, [1])
     assert await service.update_job_status(job['id'], terminal, 100)
     assert await video_status(generation_db) == ('completed' if terminal == 'completed' else 'analyzed')
 
@@ -174,9 +208,9 @@ async def test_terminal_transition_releases_video(generation_db, terminal):
 @pytest.mark.asyncio
 async def test_cancelled_regeneration_preserves_completed_video(generation_db):
     service = GenerationService(generation_db)
-    first = await service.create_generation_job(1, 1)
+    first = await service.create_generation_job(1, [1])
     await service.update_job_status(first['id'], 'completed', 100)
-    second = await service.create_generation_job(1, 1)
+    second = await service.create_generation_job(1, [1])
     assert await TaskService(generation_db).cancel_task('generation', second['id'])
     assert await video_status(generation_db) == 'completed'
 
@@ -184,13 +218,13 @@ async def test_cancelled_regeneration_preserves_completed_video(generation_db):
 @pytest.mark.asyncio
 async def test_active_cancellation_keeps_claim_until_worker_acknowledges(generation_db):
     service = GenerationService(generation_db)
-    job = await service.create_generation_job(1, 1)
+    job = await service.create_generation_job(1, [1])
     await service.update_job_status(job['id'], 'prompting', 30)
     assert await TaskService(generation_db).cancel_task('generation', job['id'])
     assert (await service.get_job(job['id']))['status'] == 'cancelled'
     assert await video_status(generation_db) == 'generating'
     with pytest.raises(GenerationNotReadyError):
-        await service.create_generation_job(1, 1)
+        await service.create_generation_job(1, [1])
     await service.update_job_status(job['id'], 'cancelled')
     assert await video_status(generation_db) == 'analyzed'
 
@@ -208,7 +242,7 @@ async def test_ambiguous_enqueue_failure_keeps_running_worker_claim(generation_d
 
     monkeypatch.setattr(generation, 'enqueue_generation', accepted_then_timeout)
     with pytest.raises(TimeoutError):
-        await generation.start_generation(1, generation.GenerationRequest(cluster_index=0))
+        await generation.start_generation(1, generation.GenerationRequest(cluster_ids=[1]))
     assert (await service.get_job(1))['status'] == 'cancelled'
     assert await video_status(generation_db) == 'generating'
 
@@ -216,9 +250,9 @@ async def test_ambiguous_enqueue_failure_keeps_running_worker_claim(generation_d
 @pytest.mark.asyncio
 async def test_stale_worker_cannot_complete_or_release_newer_job(generation_db):
     service = GenerationService(generation_db)
-    old = await service.create_generation_job(1, 1)
+    old = await service.create_generation_job(1, [1])
     assert await service.cancel_job(old['id'])
-    current = await service.create_generation_job(1, 1)
+    current = await service.create_generation_job(1, [1])
     assert not await service.update_job_status(old['id'], 'completed', 100)
     assert not await service.update_job_status(old['id'], 'error')
     with pytest.raises(GenerationCancelledError):
@@ -231,9 +265,9 @@ async def test_stale_worker_cannot_complete_or_release_newer_job(generation_db):
 @pytest.mark.asyncio
 async def test_old_active_job_does_not_release_newer_owner(generation_db):
     service = GenerationService(generation_db)
-    old = await service.create_generation_job(1, 1)
+    old = await service.create_generation_job(1, [1])
     await generation_db.execute(
-        "INSERT INTO generation_jobs (video_id, cluster_id, status) VALUES (1, 1, 'pending')"
+        "INSERT INTO generation_jobs (video_id, status) VALUES (1, 'pending')"
     )
     await generation_db.commit()
     await service.update_job_status(old['id'], 'error')
@@ -246,7 +280,7 @@ async def test_worker_failure_releases_video(generation_db, monkeypatch, failure
     from workers import tasks
 
     service = GenerationService(generation_db)
-    job = await service.create_generation_job(1, 1)
+    job = await service.create_generation_job(1, [1])
     inject_database(monkeypatch, tasks, generation_db)
     for name in ('publish_progress', 'publish_event', 'publish_task_event'):
         monkeypatch.setattr(tasks, name, AsyncMock())
@@ -264,7 +298,7 @@ async def test_worker_cancellation_waits_for_executor_before_releasing(generatio
     from workers import tasks
 
     service = GenerationService(generation_db)
-    job = await service.create_generation_job(1, 1)
+    job = await service.create_generation_job(1, [1])
     inject_database(monkeypatch, tasks, generation_db)
     for name in ('publish_progress', 'publish_event', 'publish_task_event'):
         monkeypatch.setattr(tasks, name, AsyncMock())
@@ -296,7 +330,7 @@ async def test_worker_cancellation_waits_for_executor_before_releasing(generatio
         assert not running.done()
         assert await video_status(generation_db) == 'generating'
         with pytest.raises(GenerationNotReadyError):
-            await service.create_generation_job(1, 1)
+            await service.create_generation_job(1, [1])
     finally:
         allow_finish.set()
         with pytest.raises(RuntimeError if executor_fails else asyncio.CancelledError):
@@ -323,7 +357,9 @@ def test_callback_closes_connection_and_respects_cancellation(tmp_path, monkeypa
         return conn
 
     monkeypatch.setattr(module.sqlite3, 'connect', tracked_connect)
-    info = {'path': Path('/fake/thumbnail.png'), 'image_index': 1}
+    import config
+
+    info = {'path': Path(config.OUTPUT_DIR) / 'fixture' / 'thumbnails' / 'thumbnail.png', 'image_index': 1}
     if status == 'cancelled':
         with pytest.raises(GenerationCancelledError):
             GenerationService.save_generation_progress(database_path, 1, 70, info)
@@ -332,8 +368,10 @@ def test_callback_closes_connection_and_respects_cancellation(tmp_path, monkeypa
     with pytest.raises(sqlite3.ProgrammingError):
         opened[0].execute('SELECT 1')
     with original_connect(database_path) as check:
-        assert check.execute('SELECT COUNT(*) FROM thumbnails').fetchone()[0] == (1 if status == 'generating' else 0)
+        stored = [row[0] for row in check.execute('SELECT filepath FROM thumbnails')]
     check.close()
+    # Thumbnails are stored relative to OUTPUT_DIR
+    assert stored == (['fixture/thumbnails/thumbnail.png'] if status == 'generating' else [])
 
 
 @pytest.mark.asyncio

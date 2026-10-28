@@ -4,6 +4,8 @@ Test Configuration and Fixtures
 Shared fixtures for all tests in the project.
 """
 
+import sys
+
 import pytest
 import aiosqlite
 from pathlib import Path
@@ -13,6 +15,28 @@ from httpx import AsyncClient, ASGITransport
 # Project paths
 ROOT_DIR = Path(__file__).parent.parent
 SCHEMA_PATH = ROOT_DIR / "database" / "schema.sql"
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime_paths(monkeypatch, tmp_path):
+    """Point every test at temporary output and database locations.
+
+    Tests must never read or write the owner's output folder or database,
+    including through modules that copied these settings at import time.
+    """
+    import config
+
+    paths = {
+        "OUTPUT_DIR": tmp_path / "isolated_output",
+        "DATABASE_PATH": tmp_path / "isolated_database" / "thumbnails.db",
+    }
+    project_dir = str(ROOT_DIR)
+    for module in list(sys.modules.values()):
+        if module is not config and not (getattr(module, "__file__", None) or "").startswith(project_dir):
+            continue
+        for name, value in paths.items():
+            if name in vars(module):
+                monkeypatch.setattr(module, name, value)
 
 
 # =============================================================================
@@ -128,7 +152,7 @@ async def sample_cluster(test_db: aiosqlite.Connection, analyzed_video: dict) ->
         INSERT INTO clusters (video_id, cluster_index, num_frames, representative_frame, cluster_type, view_mode)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (analyzed_video["id"], 0, 10, "/tmp/frame_001.jpg", "person", "person")
+        (analyzed_video["id"], 0, 10, "analyzed_video/frames/frame_001.jpg", "person", "person")
     )
     await test_db.commit()
     cluster_id = cursor.lastrowid
@@ -138,7 +162,7 @@ async def sample_cluster(test_db: aiosqlite.Connection, analyzed_video: dict) ->
         "video_id": analyzed_video["id"],
         "cluster_index": 0,
         "num_frames": 10,
-        "representative_frame": "/tmp/frame_001.jpg"
+        "representative_frame": "analyzed_video/frames/frame_001.jpg"
     }
 
 
@@ -150,20 +174,14 @@ async def sample_generation_job(test_db: aiosqlite.Connection, analyzed_video: d
     Returns:
         dict: Generation job record
     """
-    cursor = await test_db.execute(
-        """
-        INSERT INTO generation_jobs (video_id, cluster_id, num_images, status, progress)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (analyzed_video["id"], sample_cluster["id"], 5, "pending", 0)
+    job_id = await insert_job(
+        test_db, analyzed_video["id"], sample_cluster["id"], "pending", progress=0
     )
-    await test_db.commit()
-    job_id = cursor.lastrowid
 
     return {
         "id": job_id,
         "video_id": analyzed_video["id"],
-        "cluster_id": sample_cluster["id"],
+        "cluster_ids": [sample_cluster["id"]],
         "num_images": 5,
         "status": "pending",
         "progress": 0
@@ -178,20 +196,14 @@ async def generating_job(test_db: aiosqlite.Connection, analyzed_video: dict, sa
     Returns:
         dict: Generation job record with generating status
     """
-    cursor = await test_db.execute(
-        """
-        INSERT INTO generation_jobs (video_id, cluster_id, num_images, status, progress)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (analyzed_video["id"], sample_cluster["id"], 5, "generating", 40)
+    job_id = await insert_job(
+        test_db, analyzed_video["id"], sample_cluster["id"], "generating", progress=40
     )
-    await test_db.commit()
-    job_id = cursor.lastrowid
 
     return {
         "id": job_id,
         "video_id": analyzed_video["id"],
-        "cluster_id": sample_cluster["id"],
+        "cluster_ids": [sample_cluster["id"]],
         "num_images": 5,
         "status": "generating",
         "progress": 40
@@ -212,7 +224,7 @@ async def app(test_db: aiosqlite.Connection):
     from unittest.mock import patch, AsyncMock
     from contextlib import asynccontextmanager, ExitStack
     from api.main import app as fastapi_app
-    from api.routes import videos, analysis, generation, thumbnails, events, directories, titles, tasks
+    from api.routes import videos, analysis, generation, thumbnails, events, directories, titles, tasks, people, settings
 
     # Create a mock for get_db that returns our test_db
     @asynccontextmanager
@@ -222,7 +234,7 @@ async def app(test_db: aiosqlite.Connection):
     # Patch route imports explicitly; imports may be cached between test cases.
     with ExitStack() as stack:
         stack.enter_context(patch('database.db.get_db', mock_get_db))
-        for module in (videos, analysis, generation, thumbnails, events, directories, titles, tasks):
+        for module in (videos, analysis, generation, thumbnails, events, directories, titles, tasks, people, settings):
             stack.enter_context(patch.object(module, 'get_db', mock_get_db))
         stack.enter_context(patch('api.main.init_db', new_callable=AsyncMock))
         stack.enter_context(patch('api.main.close_db', new_callable=AsyncMock))
@@ -242,7 +254,7 @@ async def client(app) -> AsyncGenerator[AsyncClient, None]:
         AsyncClient: httpx client configured for the test app
     """
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(transport=transport, base_url="http://localhost") as ac:
         yield ac
 
 
@@ -306,7 +318,7 @@ async def insert_job(
     progress: int = 0
 ) -> int:
     """
-    Helper to insert a generation job.
+    Helper to insert a generation job linked to one cluster as person_01.
 
     Args:
         db: Database connection
@@ -320,13 +332,21 @@ async def insert_job(
     """
     cursor = await db.execute(
         """
-        INSERT INTO generation_jobs (video_id, cluster_id, num_images, status, progress)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO generation_jobs (video_id, num_images, status, progress)
+        VALUES (?, ?, ?, ?)
         """,
-        (video_id, cluster_id, 5, status, progress)
+        (video_id, 5, status, progress)
+    )
+    job_id = cursor.lastrowid
+    await db.execute(
+        """
+        INSERT INTO generation_job_clusters (job_id, cluster_id, person_id, cluster_order)
+        VALUES (?, ?, 'person_01', 0)
+        """,
+        (job_id, cluster_id)
     )
     await db.commit()
-    return cursor.lastrowid
+    return job_id
 
 
 async def insert_cluster(db: aiosqlite.Connection, video_id: int, cluster_index: int = 0) -> int:
@@ -346,7 +366,63 @@ async def insert_cluster(db: aiosqlite.Connection, video_id: int, cluster_index:
         INSERT INTO clusters (video_id, cluster_index, num_frames, representative_frame, cluster_type, view_mode)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (video_id, cluster_index, 10, f"/tmp/frame_{cluster_index}.jpg", "person", "person")
+        (video_id, cluster_index, 10, f"video_{video_id}/frames/frame_{cluster_index}.jpg", "person", "person")
     )
     await db.commit()
     return cursor.lastrowid
+
+
+async def provision_uploaded_face(db, cluster_id):
+    """A real synthetic original for tests whose subject is queue/job behavior."""
+    import base64
+    import io
+    from PIL import Image
+    from services.reference_service import ReferenceService, VisualReference
+
+    async with db.execute("SELECT video_id FROM clusters WHERE id=?", [cluster_id]) as cursor:
+        video_id = (await cursor.fetchone())[0]
+    data = io.BytesIO()
+    Image.new("RGB", (64, 64), (60, 100, 150)).save(data, "PNG")
+    service = ReferenceService(db)
+    asset = await service.upload(video_id, "synthetic-face.png", base64.b64encode(data.getvalue()).decode())
+    await service.insert(video_id, [VisualReference(
+        role="face", person_id=cluster_id, source_type="upload", source=asset["source"],
+        primary=True, crop=(0, 0, 64, 64), identity_confirmed=True,
+    ).model_dump()])
+    await db.commit()
+
+
+# Every blendshape the MediaPipe face landmarker reports
+BLENDSHAPES = (
+    "browDownLeft", "browDownRight", "browInnerUp", "browOuterUpLeft", "browOuterUpRight", "cheekPuff",
+    "cheekSquintLeft", "cheekSquintRight", "eyeBlinkLeft", "eyeBlinkRight", "eyeLookDownLeft",
+    "eyeLookDownRight", "eyeLookInLeft", "eyeLookInRight", "eyeLookOutLeft", "eyeLookOutRight",
+    "eyeLookUpLeft", "eyeLookUpRight", "eyeSquintLeft", "eyeSquintRight", "eyeWideLeft", "eyeWideRight",
+    "jawForward", "jawLeft", "jawOpen", "jawRight", "mouthClose", "mouthDimpleLeft", "mouthDimpleRight",
+    "mouthFrownLeft", "mouthFrownRight", "mouthFunnel", "mouthLeft", "mouthLowerDownLeft",
+    "mouthLowerDownRight", "mouthPressLeft", "mouthPressRight", "mouthPucker", "mouthRight", "mouthRollLower",
+    "mouthRollUpper", "mouthShrugLower", "mouthShrugUpper", "mouthSmileLeft", "mouthSmileRight",
+    "mouthStretchLeft", "mouthStretchRight", "mouthUpperUpLeft", "mouthUpperUpRight", "noseSneerLeft",
+    "noseSneerRight",
+)
+
+
+def portrait(score=80.0, lip_gap=0.02, look=None, **changes):
+    """Portrait measurements of a clear, frontal, closed-mouth face in colour (faces.json form).
+
+    Blendshapes are given by name (e.g. jawOpen=0.4) among the other changes.
+    """
+    from services.portrait_quality import VERSION
+
+    shapes = {name: 0.0 for name in BLENDSHAPES}
+    shapes.update({name: changes.pop(name) for name in list(changes) if name in shapes})
+    result = {
+        "eye_openness": 0.3, "sharpness": 120.0, "brightness": 120.0, "occlusion": 0.0,
+        "mouth_openness": 0.05, "mouth_asymmetry": 0.0, "score": score, "issues": [],
+        "reference_version": VERSION, "temporal_change": 0.05,
+        "expression_details": {"lip_gap": lip_gap, "blendshapes": shapes, "motion": [lip_gap, 0, 0, 0, 0, 0]},
+        "look": look or {"hair": [120.0, 140.0, 150.0], "skin": [190.0, 140.0, 150.0],
+                         "clothes": [80.0, 128.0, 128.0], "hair_share": 0.2},
+    }
+    result.update(changes)
+    return result

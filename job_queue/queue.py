@@ -52,7 +52,9 @@ async def enqueue_analysis(
     force_clustering: bool = False,
     force_transcription: bool = False,
     clustering_eps: float = 0.5,
-    clustering_min_samples: int = 3
+    clustering_min_samples: int = 3,
+    refresh_references: bool = False,
+    expected_reference_revision: Optional[int] = None,
 ) -> Optional[str]:
     """
     Enqueue a video analysis job.
@@ -78,6 +80,8 @@ async def enqueue_analysis(
             force_transcription=force_transcription,
             clustering_eps=clustering_eps,
             clustering_min_samples=clustering_min_samples,
+            refresh_references=refresh_references,
+            expected_reference_revision=expected_reference_revision,
             _job_timeout=WorkerSettings.JOB_TIMEOUT_ANALYSIS,
         )
 
@@ -101,6 +105,9 @@ async def enqueue_generation(
     gemini_model: Optional[str] = None,
     openai_model: Optional[str] = None,
     poe_model: Optional[str] = None,
+    comfyui_workflow: Optional[str] = None,
+    comfyui_config: Optional[dict] = None,
+    comfyui_profile: Optional[dict] = None,
     num_reference_images: Optional[int] = None,
     # Prompt generation AI settings
     prompt_provider: Optional[str] = None,
@@ -114,7 +121,14 @@ async def enqueue_generation(
     # External reference image
     reference_image_base64: Optional[str] = None,
     reference_image_use_for_prompts: bool = False,
-    reference_image_include_in_refs: bool = False
+    reference_image_include_in_refs: bool = False,
+    # Face swap post-processing
+    apply_face_swap: bool = False,
+    restore_faces: bool = False,
+    # Try other image providers when the chosen one fails
+    allow_provider_fallback: bool = False,
+    # With several people, also send a frame of them together
+    include_scene_reference: bool = True
 ) -> Optional[str]:
     """
     Enqueue a thumbnail generation job.
@@ -136,6 +150,10 @@ async def enqueue_generation(
         reference_image_base64: External reference image as base64
         reference_image_use_for_prompts: Use reference image for prompt analysis
         reference_image_include_in_refs: Include reference image in generation refs
+        apply_face_swap: Run the face swap pass after generation
+        restore_faces: Run optional facial restoration after swapping (off by default)
+        allow_provider_fallback: Try other image providers when the chosen one fails
+        include_scene_reference: Send the first selected person's full environment frame
 
     Returns:
         arq Job ID if enqueued successfully, None otherwise
@@ -152,6 +170,9 @@ async def enqueue_generation(
             gemini_model=gemini_model,
             openai_model=openai_model,
             poe_model=poe_model,
+            comfyui_workflow=comfyui_workflow,
+            comfyui_config=comfyui_config,
+            comfyui_profile=comfyui_profile,
             num_reference_images=num_reference_images,
             prompt_provider=prompt_provider,
             prompt_model=prompt_model,
@@ -163,7 +184,10 @@ async def enqueue_generation(
             reference_image_base64=reference_image_base64,
             reference_image_use_for_prompts=reference_image_use_for_prompts,
             reference_image_include_in_refs=reference_image_include_in_refs,
-            _job_timeout=WorkerSettings.JOB_TIMEOUT_GENERATION,
+            apply_face_swap=apply_face_swap,
+            restore_faces=restore_faces,
+            allow_provider_fallback=allow_provider_fallback,
+            include_scene_reference=include_scene_reference,
         )
 
         if arq_job:

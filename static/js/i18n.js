@@ -17,7 +17,6 @@
 
 // Supported languages
 const SUPPORTED_LANGUAGES = ['es', 'en'];
-const DEFAULT_LANGUAGE = 'es';
 
 // Cookie name for language preference
 const LANG_COOKIE_NAME = 'lang';
@@ -25,27 +24,17 @@ const LANG_COOKIE_NAME = 'lang';
 // Cache for loaded translations
 let translationsCache = {};
 
-// Current language
-let currentLanguage = DEFAULT_LANGUAGE;
+// Current language. The server resolves it from the "lang" cookie (or its
+// default), renders <html lang> with it and inlines that language's
+// translations, so the rendered page is the single source of truth.
+let currentLanguage = document.documentElement.lang;
+if (!SUPPORTED_LANGUAGES.includes(currentLanguage)) {
+    throw new Error(`Unsupported page language: ${currentLanguage}`);
+}
 
 // Process inline cache immediately (before any async code runs)
-if (window.__I18N_CACHE__) {
-    const detectedLang = (function() {
-        const cookieLang = document.cookie.split('; ').find(c => c.startsWith('lang='));
-        if (cookieLang) {
-            const lang = cookieLang.split('=')[1];
-            if (SUPPORTED_LANGUAGES.includes(lang)) return lang;
-        }
-        const storedLang = localStorage.getItem('lang');
-        if (storedLang && SUPPORTED_LANGUAGES.includes(storedLang)) return storedLang;
-        const browserLang = navigator.language.split('-')[0];
-        if (SUPPORTED_LANGUAGES.includes(browserLang)) return browserLang;
-        return DEFAULT_LANGUAGE;
-    })();
-    translationsCache[detectedLang] = window.__I18N_CACHE__;
-    currentLanguage = detectedLang;
-    delete window.__I18N_CACHE__;
-}
+translationsCache[currentLanguage] = window.__I18N_CACHE__;
+delete window.__I18N_CACHE__;
 
 // Flag to track if i18n is initialized
 let isInitialized = false;
@@ -54,49 +43,11 @@ let isInitialized = false;
 const languageChangeCallbacks = [];
 
 /**
- * Get a cookie value by name.
- */
-function getCookie(name) {
-    const value = `; ${document.cookie}`;
-    const parts = value.split(`; ${name}=`);
-    if (parts.length === 2) {
-        return parts.pop().split(';').shift();
-    }
-    return null;
-}
-
-/**
  * Set a cookie value.
  */
 function setCookie(name, value, days = 365) {
     const expires = new Date(Date.now() + days * 864e5).toUTCString();
     document.cookie = `${name}=${value}; expires=${expires}; path=/; SameSite=Lax`;
-}
-
-/**
- * Detect initial language from cookie, localStorage, or browser.
- */
-function detectLanguage() {
-    // 1. Check cookie
-    const cookieLang = getCookie(LANG_COOKIE_NAME);
-    if (cookieLang && SUPPORTED_LANGUAGES.includes(cookieLang)) {
-        return cookieLang;
-    }
-
-    // 2. Check localStorage
-    const storedLang = localStorage.getItem(LANG_COOKIE_NAME);
-    if (storedLang && SUPPORTED_LANGUAGES.includes(storedLang)) {
-        return storedLang;
-    }
-
-    // 3. Check browser language
-    const browserLang = navigator.language.split('-')[0];
-    if (SUPPORTED_LANGUAGES.includes(browserLang)) {
-        return browserLang;
-    }
-
-    // 4. Default
-    return DEFAULT_LANGUAGE;
 }
 
 /**
@@ -191,7 +142,6 @@ async function setLanguage(lang) {
 
     // Persist preference
     setCookie(LANG_COOKIE_NAME, lang);
-    localStorage.setItem(LANG_COOKIE_NAME, lang);
 
     // Notify server (fire and forget)
     fetch('/api/lang', {
@@ -301,9 +251,6 @@ async function initI18n() {
     if (isInitialized) {
         return;
     }
-
-    // Detect and set language
-    currentLanguage = detectLanguage();
 
     // Load translations for current language (and English as fallback)
     await Promise.all([

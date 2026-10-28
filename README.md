@@ -1,428 +1,282 @@
 # YouTube Thumbnail Generator
 
-### AI-Powered Thumbnails, Titles & Descriptions with Face Identity Preservation
+### Thumbnails for the videos you already have, with the people in them looking the way they did back then.
 
-> **From 100 videos uploaded in 3 years... to batch-processing 178 videos in days.**
->
-> *First version shipped in one week with Claude Code during my "vacation" from entrepreneurship.*
+<p align="center">
+  <img src="assets/readme/hero.jpg" alt="A frame from the video next to the thumbnail generated from it" width="900">
+</p>
 
----
+Point it at a folder of videos. It finds who appears in each one, picks their best frames, reads what the video is about and proposes thumbnails, titles and descriptions. Run it with cloud models, with local models on your own GPU, or with a mix of both.
 
-## The Story Behind This Tool
+<table>
+<tr>
+<td><img src="assets/readme/thumb-mel-alert.jpg" width="270" alt="Generated thumbnail of Mel"></td>
+<td><img src="assets/readme/thumb-mel-emojis.jpg" width="270" alt="Generated thumbnail of Mel"></td>
+<td><img src="assets/readme/thumb-jhenny-stress.jpg" width="270" alt="Generated thumbnail of Jhenny"></td>
+</tr>
+<tr>
+<td><img src="assets/readme/thumb-mel-youtube.jpg" width="270" alt="Generated thumbnail of Mel"></td>
+<td><img src="assets/readme/thumb-mel-stop.jpg" width="270" alt="Generated thumbnail of Mel"></td>
+<td><img src="assets/readme/thumb-jhenny-calm.jpg" width="270" alt="Generated thumbnail of Jhenny"></td>
+</tr>
+</table>
 
-Back in 2015-2016, I was the manager of **FocusingsVlogs** (Mel Dominguez), a Spanish YouTuber who had built an audience of 240,000+ subscribers. Life happened, and she deleted her channel for personal reasons before the pandemic.
-
-I had a backup of almost all her videos—but not the thumbnails.
-
-Fast forward to 2023. I reached out to Mel with an idea: let's re-upload her old videos as a digital memory archive. She agreed, as long as I handled everything so she could stay off the radar.
-
-**The problem?** Creating thumbnails for 278 videos when:
-- The original thumbnails were gone
-- The videos were 720p with camera noise and low sharpness
-- Mel had changed her appearance significantly since 2012-2016
-- Each thumbnail required: watching the video, finding good frames, upscaling, retouching, designing in Canva
-- AI image generation existed but couldn't reliably maintain her face
-
-After 3 years of manual work (2023-2025), I had only uploaded 100 videos. **178 still waiting.**
-
-Then came the AI revolution of late 2025. Models could finally:
-- Generate high-quality images with text
-- Preserve facial identity from reference photos
-- Understand complex creative prompts
-
-**So I shipped the first working version in 8 days during the holidays** (December 27, 2025 - January 4, 2026) using Claude Code. Not even consecutive days—New Year's happened in the middle. And yet here we are: complete web interface, face detection pipeline, multi-provider AI integration. I'm genuinely amazed at how fast we can ship full applications now.
-
-It automates what used to take me hours per video into a streamlined, AI-powered pipeline.
+<p align="center"><sub>Real results: Mel in videos from her old channel, and Jhenny in her productivity videos. Every face comes from the frames of its own video.</sub></p>
 
 ---
 
-## What This Tool Does
+## Why it's useful
 
-```
-VIDEO FILE → Scene Detection → Face Extraction → Face Clustering → Transcription
-                                                                        ↓
-THUMBNAILS ← Image Generation ← Creative Prompts ← LLM Analysis ← Content Understanding
-```
-
-**One click** transforms any video into multiple AI-generated thumbnail options, each preserving the exact facial identity of the person you select.
-
----
-
-## Key Features
-
-### Identity Cloning Technology
-The system uses **strict identity preservation prompts** that prevent AI models from "averaging" or "beautifying" faces. Your reference person appears in thumbnails looking exactly like themselves—not a similar-looking AI interpretation.
-
-```
-"A friend of this person should INSTANTLY recognize them in the generated image."
-```
-
-### Multi-Provider AI Support
-Switch between image generation providers based on your needs:
-
-| Provider | Best Models | Max References | Strengths |
-|----------|-------------|----------------|-----------|
-| **Google Gemini** | gemini-3-pro-image-preview | 14 images | Best identity preservation |
-| **OpenAI** | gpt-image-2 | 16 images | Multilingual text, native reasoning |
-| **Poe** | nanobananapro, flux2pro | 14 images | Fast, reliable |
-| **Replicate** | FLUX 1.1 Pro | 1 image | Open-source option |
-
-### Automatic Face Clustering
-No manual face labeling needed. The system:
-1. Detects all faces in the video using InsightFace
-2. Creates 512-dimensional embeddings for each face
-3. Clusters faces by identity using DBSCAN
-4. Separates clusters by scene (handles costumes/disguises)
-
-### Smart Frame Selection
-Not all frames are equal. The system scores each face by:
-- **Quality**: Sharpness, brightness, contrast
-- **Pose**: Front-facing preferred over profiles
-- **Expression**: Balanced selection (smiling, neutral, mouth closed)
-- **Size**: Larger faces score higher
-
-### Creative Prompt Generation
-Uses LLMs (Claude, GPT-4, Gemini) to analyze video transcripts and generate:
-- Multiple creative concepts per video
-- Suggested clickable titles
-- Color palettes and mood descriptions
-- Text overlay suggestions
-
-### AI Title & Description Generation
-Beyond thumbnails, the tool generates YouTube-ready metadata:
-- **Titles**: Multiple options in different styles (neutral, SEO-optimized, clickbait)
-- **Descriptions**: With optional timestamps, hashtags, and calls-to-action
-- **Title-aware thumbnails**: When you select a title, the image generation takes it into account to create visually coherent thumbnails that complement your chosen title
-
-### Real-Time Progress Tracking
-Server-Sent Events (SSE) provide instant feedback:
-- Watch scene detection progress
-- See faces being extracted live
-- Track thumbnail generation in real-time
+- **The face from the video, not today's.** The reference photos come from the video itself, so a video recorded years ago gets a thumbnail of the person as they looked then. Different haircut, beard or age? No photo shoot needed.
+- **Everyone who appears, sorted out for you.** It detects the people in each video on its own. The same person with a wig or a costume becomes a separate character, and faces that never move (paintings, posters) are flagged. Put one person or several in a thumbnail, rename them, merge them or create one from any frames.
+- **Ideas from what the video actually says.** It transcribes the video and writes thumbnail concepts from its content: scene, pose, expression, props and text. Add your own instructions, a style image or a title for the thumbnails to follow.
+- **Titles and descriptions too.** Several title styles (neutral, SEO, clickbait or your own), descriptions with chapter timestamps and hashtags, in the video's language or another one.
+- **Cloud, local, or both.** Draw with Gemini, OpenAI, Poe or Replicate, or with ComfyUI on your own GPU. Write ideas and texts with Claude, GPT, Gemini, Grok, OpenRouter, or with Ollama and llama.cpp locally. Transcribe with Whisper on your machine or with ElevenLabs. With everything local, nothing leaves your computer and nothing is paid per image.
+- **Made for whole channels.** A library of folders, analysis in the background, a task queue you can cancel, and a command line for batches.
 
 ---
 
-## Quick Start
+## How it works
 
-### Prerequisites
+### 1. Add a folder and analyze it
 
-- **Python 3.10+** (3.11 recommended)
-- **FFmpeg** installed and in PATH
-  ```bash
-  # Windows (PowerShell as admin)
-  winget install FFmpeg
+<p align="center">
+  <img src="assets/readme/library.jpg" alt="Library of analyzed videos" width="850">
+</p>
 
-  # Linux
-  sudo apt install ffmpeg
+Add the folder where your videos are and analyze them. The analysis runs on your machine: it splits the video into scenes, finds every face, groups the faces into people and transcribes the audio.
 
-  # Mac
-  brew install ffmpeg
-  ```
-- **Redis** (required for Web UI, not needed for CLI)
-  ```bash
-  # Windows: Use Laragon (recommended), Docker, or WSL
-  # https://laragon.org/ - includes Redis out of the box
+### 2. Check who's who
 
-  # Linux
-  sudo apt install redis-server
+<p align="center">
+  <img src="assets/readme/people.jpg" alt="Detected people, including the same person with two different looks" width="850">
+  <br><sub>The same person with two hairstyles in one video becomes two people, so you choose which look goes in the thumbnail.</sub>
+</p>
 
-  # Mac
-  brew install redis
-  ```
-- **NVIDIA GPU** recommended (works on CPU, 5-10x slower)
-- API keys for at least one provider (Gemini, OpenAI, or Poe)
+For each person, the app picks the face photos the image model will get: the clearest frontal face of their usual look first, then others that add a head turn or another expression. It prefers open eyes, a relaxed mouth, sharp frames and faces nothing covers. The person editor shows every frame where they appear, with how much each one looks like them, and exactly what the AI will see. Change any photo, crop it, add a body photo or upload your own.
 
-### Installation
+<p align="center">
+  <img src="assets/readme/person-editor.jpg" alt="Person editor with the frames of the person and the photos the AI gets" width="850">
+</p>
+
+### 3. Generate
+
+<p align="center">
+  <img src="assets/readme/generate.jpg" alt="Generate tab: who is in the thumbnail, where it happens and how many" width="850">
+</p>
+
+Choose who should be in the thumbnail, in order, and where it happens: let the AI imagine a place, or recreate the one in the video (or in a photo you upload). Then choose how many thumbnails you want. Each one is a different idea: another scene, pose and text. Optional settings let you pick the expression, a style image, the titles to follow, your own instructions, or keep new ideas different from earlier ones.
+
+### 4. Pick, polish and publish
+
+<p align="center">
+  <img src="assets/readme/thumbnails.jpg" alt="Gallery of generated thumbnails" width="850">
+</p>
+
+Browse the thumbnails, open them full size, download the ones you like or all of them. Every thumbnail is scored on how much its faces look like the real people, and the gallery can sort by it. If a face still needs help, the optional face swap puts the real face back. Hands, food or glasses in front of the face stay in front.
+
+<p align="center">
+  <img src="assets/readme/titles.jpg" alt="Titles written from the transcript" width="850">
+</p>
+
+Titles and descriptions are written from the transcript. Star the titles you like and the next thumbnails will be designed around them.
+
+---
+
+## What people use it for
+
+- **Archive and re-upload channels:** old videos whose thumbnails were lost, like the story below.
+- **Creators whose look has changed:** keep each video's thumbnail true to the video.
+- **Interviews, podcasts and duos:** several people in one thumbnail, each with their own photos.
+- **Sketch and character channels:** costumes and wigs become characters you can pick.
+- **People who manage several channels:** one library for many folders, also shared between computers.
+- **Anyone who forgot to take the thumbnail photo.**
+- **Only titles and descriptions:** for videos that already have a thumbnail.
+- **Private material:** run everything locally when videos should not leave your computer.
+
+---
+
+## Choose your engines
+
+Each job has its own engine, chosen in **Settings**:
+
+| Job | Cloud | Local |
+|-----|-------|-------|
+| Thumbnail ideas (needs a model that sees images) | Claude, GPT, Gemini, Grok, OpenRouter | Ollama, llama.cpp, any OpenAI-compatible server |
+| Drawing the thumbnail | Gemini (Nano Banana Pro, Nano Banana 2.1), OpenAI GPT Image, Poe (FLUX, Nano Banana, Ideogram...), Replicate | ComfyUI with Qwen Image 2.1, or your own workflow |
+| Titles and descriptions | Claude, GPT, Gemini, Grok, OpenRouter | Ollama, llama.cpp, any OpenAI-compatible server |
+| Transcription | ElevenLabs (tells the speakers apart) | Whisper |
+
+<p align="center">
+  <img src="assets/readme/settings.jpg" alt="Settings with local engines: Ollama for ideas and ComfyUI for images" width="480">
+  <br><sub>Ideas with a local model in Ollama, drawing with Qwen Image 2.1 in ComfyUI.</sub>
+</p>
+
+Text models are reached through [Gran Sabio LLM](https://github.com/jordicor/GranSabio_LLM), so API keys and local servers are configured once there. When text and images share one GPU, Gran Sabio takes turns between them, and Settings can free a model's memory without stopping anything. Details in [ENGINES.md](ENGINES.md); ComfyUI setup and workflow profiles in [COMFYUI.md](COMFYUI.md).
+
+The video analysis always runs locally. A cloud engine only receives what its job needs: the ideas model gets the transcript and the chosen photos, the image model gets the idea and the chosen photos, and the titles model gets the transcript.
+
+---
+
+## What runs on your machine
+
+- **PySceneDetect** splits each video into scenes and keeps their frames.
+- **InsightFace** finds the faces and tells people apart.
+- **MediaPipe** judges each face (eyes, mouth, gaze, head turn) and reads hair, skin and clothes, to choose the best photos and spot wigs and disguises.
+- **MediaPipe Pose and Mask R-CNN** find body photos where the person is clearly visible.
+- **Whisper** transcribes, if you choose local transcription.
+- **InSwapper, GFPGAN and XSeg** do the optional face swap and keep whatever covers the face in front.
+
+Videos, frames, faces, thumbnails and the database stay in your `output/` folder and your SQLite file.
+
+---
+
+## Honest notes
+
+- **Likeness depends on the image model and the photos it gets.** Some results look exactly like the person, others are only close. The app scores every thumbnail so you can see the weak ones first; check the face before you publish.
+- **It stops instead of guessing.** A person without a face photo, or more photos than the model accepts, stops the job before anything is paid for; nothing is trimmed silently. If a provider refuses an image, the job stops there and shows the provider's reason. Falling back to another provider is an option you turn on.
+- **Face swap is off by default.** It helps a weak face but can change the expression. The original thumbnail is always kept.
+- **Model licenses are their own.** InsightFace's pretrained models, including InSwapper, are released for non-commercial research use. Check the license of every model you download.
+
+---
+
+## The story behind it
+
+> **From 100 videos uploaded in 3 years... to batch-processing the remaining 178.**
+
+In 2015-2016 I managed **FocusingsVlogs** (Mel Dominguez), a Spanish YouTuber with more than 240,000 subscribers. She later deleted her channel for personal reasons. I had a backup of almost all her videos, but not of the thumbnails.
+
+In 2023 I suggested re-uploading them as a digital archive. She agreed, as long as I handled everything. The problem was making thumbnails for 278 videos:
+
+- The original thumbnails were gone.
+- The videos were 720p, with camera noise and little sharpness.
+- Mel's appearance had changed a lot since she recorded them.
+- Each thumbnail meant watching the video, finding good frames, upscaling, retouching and designing it in Canva.
+- Image AI existed, but could not keep her face.
+
+After three years of manual work, only 100 videos were up. When image models learned to keep a face from reference photos, I built the first version of this tool with Claude Code in 8 days (December 27, 2025 to January 4, 2026). It has kept growing since, around the same goal: thumbnails that look like the real person, for videos that already exist.
+
+---
+
+## Quick start
+
+### Requirements
+
+- **Python 3.11** and **FFmpeg** on your PATH (`winget install FFmpeg`, `sudo apt install ffmpeg` or `brew install ffmpeg`).
+- **Redis** for the web interface's job queue (on Windows, Laragon, Docker or WSL).
+- **[Gran Sabio LLM](https://github.com/jordicor/GranSabio_LLM)** for the thumbnail ideas, titles and descriptions, with your cloud API keys or your local model servers.
+- **An image engine:** an API key for a cloud provider, or a ComfyUI server registered as a GPU resource in Gran Sabio ([COMFYUI.md](COMFYUI.md), [ENGINES.md](ENGINES.md)).
+- **An NVIDIA GPU** is recommended. Everything works on CPU, only much slower. Local image generation needs a GPU with enough memory for the model you choose.
+
+Windows 10/11 is the main target; Linux and macOS should work.
+
+### Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/jordicor/youtube_thumbnail_generator_with_AIs.git
 cd youtube_thumbnail_generator_with_AIs
 
-# Create virtual environment
 python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate            # Windows
+# source venv/bin/activate       # Linux/macOS
 
-# Install dependencies
 pip install -r requirements.txt
 
-# Copy environment template
-copy .env.example .env  # Windows
-# cp .env.example .env  # Linux/Mac
+# Local models for choosing face and body photos
+python scripts/download_portrait_model.py
+python scripts/download_body_model.py
+# Optional: face swap models (about 1 GB)
+python scripts/download_face_swap_models.py
+
+copy .env.example .env           # Windows
+# cp .env.example .env           # Linux/macOS
 ```
 
-### Configuration
+InsightFace and Whisper download their own models the first time they run.
 
-Edit `.env` with your settings:
+### Configure
+
+Edit `.env`. The essentials:
 
 ```bash
-# Required: At least one image provider
-GEMINI_API_KEY=your-gemini-key
-# OPENAI_API_KEY=your-openai-key
-# POE_API_KEY=your-poe-key
+# Gran Sabio LLM (ideas, titles and descriptions)
+GRANSABIO_CLIENT_PATH=C:/path/to/GranSabio_LLM/client
+GRANSABIO_LLM_URL=http://localhost:8000
 
-# Required: At least one LLM for prompts
-ANTHROPIC_API_KEY=your-anthropic-key
-# OPENAI_API_KEY=your-openai-key
-
-# Directories
-VIDEOS_DIR=C:/path/to/your/videos
-OUTPUT_DIR=./output
-
-# Image generation settings
+# Default image engine: gemini, openai, poe, replicate or comfyui
 IMAGE_PROVIDER=gemini
-GEMINI_IMAGE_MODEL=gemini-3-pro-image-preview
+GEMINI_API_KEY=your-key            # only for the cloud engines you use
+# COMFYUI_URL=http://127.0.0.1:8188
 
-# Transcription (local Whisper is free)
+# Transcription: local Whisper, or ElevenLabs with ELEVENLABS_API_KEY
 USE_LOCAL_WHISPER=true
 WHISPER_MODEL=turbo
 TRANSCRIPTION_LANGUAGE=en
 ```
 
-### Gran Sabio LLM Setup (Required)
+`.env.example` lists every option. Everything else, including the models of each engine, is chosen in **Settings** inside the app.
 
-The web interface uses [**Gran Sabio LLM**](https://github.com/jordicor/GranSabio_LLM) for intelligent prompt generation. This is a multi-provider AI orchestration engine that handles all LLM calls with unified API key management.
+### Run
 
-**1. Clone Gran Sabio LLM:**
-```bash
-git clone https://github.com/jordicor/GranSabio_LLM.git
-cd GranSabio_LLM
-pip install -r requirements.txt
-```
-
-**2. Configure Gran Sabio (add your API keys):**
-```bash
-cp .env.template .env
-# Edit .env with your API keys (OpenAI, Anthropic, Google, etc.)
-```
-
-**3. Start Gran Sabio server:**
-```bash
-python main.py
-# Server starts at http://localhost:8000
-```
-
-> **Note:** This project defaults to port 8057 to avoid conflicts with Gran Sabio (which uses 8000).
-
-**4. Configure this project to use Gran Sabio:**
-
-Add to your `.env`:
-```bash
-GRANSABIO_CLIENT_PATH=C:/path/to/GranSabio_LLM/client
-GRANSABIO_LLM_URL=http://localhost:8000
-```
-
-> **Why Gran Sabio?** Instead of duplicating API integration code, Gran Sabio provides a unified interface to multiple AI providers (OpenAI, Anthropic, Google, xAI, OpenRouter) with features like multi-model QA, thinking modes, and automatic retries. Your API keys are configured once in Gran Sabio and shared across projects.
-
-### Two Ways to Run
-
-| Mode | Requirements | Best For |
-|------|--------------|----------|
-| **Web UI** | Redis + Gran Sabio | Interactive use, face cluster selection, real-time progress |
-| **CLI** | None (just Python deps) | Batch processing, automation, simpler setup |
-
-The CLI processes videos synchronously without a job queue, so Redis and Gran Sabio are not needed. However, you lose the ability to manually select face clusters and monitor progress in real-time.
-
-### Run the Web UI
-
-Make sure Redis and Gran Sabio are running first, then:
+Start Redis and Gran Sabio, then the web server and the worker, each in its own terminal:
 
 ```bash
-python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8057
-```
-
-Open http://localhost:8057 in your browser.
-
-Start the job worker in a second terminal, using the same virtual environment:
-
-```bash
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8057
 arq workers.main.WorkerSettings
 ```
 
-The web server accepts requests; the worker processes analysis and generation jobs.
+Open http://localhost:8057, add your video folder, and analyze. The interface is in English and Spanish.
 
-### Run the CLI (No Redis/Gran Sabio needed)
+---
+
+## Command line and AI agents
+
+The same pipeline runs without the web interface or Redis (Gran Sabio is still needed for the ideas):
 
 ```bash
-# Process all videos in configured VIDEOS_DIR
-python main.py
-
-# Process a single video
-python main.py --single "path/to/video.mp4"
-
-# Preview what would be processed
-python main.py --dry-run
+python main.py                                   # every video in VIDEOS_DIR
+python main.py --single "path/to/video.mp4"      # one video
+python main.py --dry-run                         # see what would be processed
+python main.py --num-images 5 --image-provider comfyui
 ```
 
----
-
-## Usage Guide
-
-### Step 1: Add Your Videos
-
-1. Click the directory dropdown
-2. Add a new directory pointing to your video folder
-3. Click "Scan" to detect videos
-
-### Step 2: Analyze Videos
-
-1. Select videos (or use "Select All")
-2. Click "Analyze"
-3. Wait for the pipeline to complete:
-   - Scene detection (~30s per 10min video)
-   - Face extraction (~2min per 1000 frames)
-   - Face clustering (~5s)
-   - Transcription (~1min per 10min audio)
-
-### Step 3: Configure Generation
-
-1. Click on an analyzed video
-2. Generate titles and descriptions using the AI tabs (optional but recommended)
-3. Review detected face clusters
-4. **Star** the cluster representing the person for thumbnails
-5. Select your preferred title—the AI will design thumbnails that complement it
-6. Optionally:
-   - Add custom instructions
-   - Upload a style reference image
-   - Adjust concepts and variations count
-
-### Step 4: Generate Thumbnails
-
-1. Click "Generate Thumbnails"
-2. Watch as AI creates your options
-3. Download favorites or the full ZIP
-
----
-
-## Advanced Features
-
-### Person + Scene Clustering
-
-Videos with costumes, disguises, or location changes can confuse simple face clustering. The **"View by Person + Scene"** mode subdivides each person into scene-specific clusters:
-
-- Person 1 - Scene 1 (regular outfit)
-- Person 1 - Scene 5 (pirate costume)
-- Person 1 - Scene 12 (different location)
-
-### Manual Reference Selection
-
-Auto-selected frames not ideal? The Reference Frame Manager lets you:
-- Browse all extracted frames
-- Filter by scene
-- Drag to reorder priority
-- Add/remove from AI references
-
-### External Style Reference
-
-Upload an image for style inspiration:
-- The AI analyzes composition, colors, lighting
-- Your style reference influences the output
-- Identity preservation remains priority #1
-
-### CLI Batch Processing
-
-For power users processing many videos:
+Inspection and generation commands print JSON with absolute file paths, so an AI agent can look at the frames and thumbnails itself:
 
 ```bash
-# Process all videos in directory
-python main.py
-
-# Single video
-python main.py --single "my_video.mp4"
-
-# Custom generation settings
-python main.py --num-images 5 --image-provider poe
-
-# Force regeneration
-python main.py --force-thumbnails
+python main.py list-videos --json
+python main.py inspect --video 12 --json
+python main.py list-clusters --video 12 --json
+python main.py generate --video 12 --clusters 0,1 --num-images 3 --json
+python main.py score-thumbnails --video 12 --json
 ```
-
----
-
-## Architecture
-
-```
-youtube_thumbnail_generator/
-├── api/                    # FastAPI web server
-│   ├── main.py             # App initialization
-│   └── routes/             # REST endpoints
-├── services/               # Business logic
-│   ├── analysis_service.py # Analysis pipeline (1600+ lines)
-│   └── generation_service.py # Generation pipeline
-├── templates/              # Jinja2 HTML (dark theme UI)
-├── static/                 # CSS + JavaScript
-├── database/               # SQLite with async access (auto-created on first run)
-└── output/                 # Generated files per video
-```
-
-The web server queues work through `job_queue/`; `workers/` runs the analysis and
-generation services. Configure paths and providers using `.env.example`.
 
 ### Tests
-
-Use Python 3.11 or later for the test suite, install `requirements.txt`, and make
-Node.js available on `PATH` for the modal regression tests. Node.js is only a test
-dependency; the application does not require a Node.js server.
 
 ```bash
 python -m pytest tests
 ```
 
-The tests use synthetic fixtures and mocked external services. Do not supply
-personal videos or production API credentials as test data.
+The tests use synthetic data and mocked services; Node.js on the PATH is needed only for the interface tests. Never use personal videos or production API keys as test data.
 
 ---
 
-## Requirements
+## Other projects
 
-### Hardware
-- **Minimum**: 8GB RAM, any modern CPU
-- **Recommended**: 16GB RAM, NVIDIA GPU with 4GB+ VRAM
-
-### Software
-- Python 3.10-3.11
-- FFmpeg (for audio extraction)
-- Windows 10/11 (primary target), Linux/Mac should work
-
-### API Costs (Approximate)
-- **Gemini**: Free tier available, ~$0.01-0.05 per thumbnail
-- **OpenAI GPT Image**: ~$0.02-0.08 per thumbnail
-- **Poe**: Subscription-based, varies by model
-- **Whisper Local**: Free (uses your GPU/CPU)
-
----
-
-## Who Is This For?
-
-- **YouTubers re-uploading old content** without original thumbnails
-- **Channel managers** handling multiple videos
-- **Content creators** who forgot to shoot thumbnail photos
-- **Anyone** who wants AI-generated thumbnails that actually look like them
-
----
-
-### Other Projects
-- [**Acerting Art**](https://www.youtube.com/@AcertingArt): 430K+ subscribers, relaxation/meditation music
-- [**GranSabio LLM**](https://github.com/jordicor/GranSabio_LLM): Multi-layer QA system for LLM content generation
-- [**VR Relaxation Space Room**](https://jordicor.itch.io/acerting-art-vr-relaxation-space-room): VR meditation app (Unity/Maya)
-- [**Neo Atlantis**](https://github.com/jordicor/neo-atlantis): RPG game with 200+ 3D models (1999)
-- [**Security Research Archive**](https://github.com/jordicor/security-research-archive): 6 vulnerabilities, 2 CVEs (2004-2006)
-
----
+- [**Acerting Art**](https://www.youtube.com/@AcertingArt): 430K+ subscribers, relaxation and meditation music.
+- [**GranSabio LLM**](https://github.com/jordicor/GranSabio_LLM): multi-provider LLM engine with multi-layer quality checks.
+- [**VR Relaxation Space Room**](https://jordicor.itch.io/acerting-art-vr-relaxation-space-room): VR meditation app (Unity/Maya).
+- [**Neo Atlantis**](https://github.com/jordicor/neo-atlantis): RPG game with 200+ 3D models (1999).
+- [**Security Research Archive**](https://github.com/jordicor/security-research-archive): 6 vulnerabilities, 2 CVEs (2004-2006).
 
 ## License
 
-MIT License - Use freely, attribution appreciated.
-
----
+MIT License. Use it freely; attribution is appreciated. The models it downloads keep their own licenses.
 
 ## Acknowledgments
 
-- **Mel (FocusingsVlogs)** for trusting me with her content archive
-- **Claude Code** for making the initial week-long dev sprint possible
-- **ElevenLabs** for their excellent speech-to-text API with speaker diarization
-- The open-source community behind InsightFace, PySceneDetect, and Whisper
+- **Mel (FocusingsVlogs)** for trusting me with her archive, and **Jhenny** for letting her videos appear here.
+- **Claude Code**, which made the first version possible in a week.
+- The open-source projects behind InsightFace, MediaPipe, PySceneDetect, Whisper, ComfyUI, Qwen Image, GFPGAN and FaceFusion's occluder models, and **ElevenLabs** for its speech-to-text API.
 
 ---
 
@@ -431,7 +285,7 @@ MIT License - Use freely, attribution appreciated.
 </p>
 
 <p align="center">
-  <a href="https://github.com/jordicor">GitHub</a> •
-  <a href="https://jordicor.com">Website</a> •
+  <a href="https://github.com/jordicor">GitHub</a> ·
+  <a href="https://jordicor.com">Website</a> ·
   <a href="https://www.youtube.com/@AcertingArt">YouTube</a>
 </p>

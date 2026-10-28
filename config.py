@@ -14,28 +14,50 @@ import os
 from dotenv import load_dotenv
 
 # Find the project directory
-PROJECT_DIR = Path(__file__).parent
+PROJECT_DIR = Path(__file__).resolve().parent
 
-# Load .env file if it exists
+# Load .env file. When running from a git worktree
+# (<main_repo>/.claude/worktrees/<branch>/), the .env normally lives in the
+# main repo, not in the worktree — fall back to the main repo's .env so API
+# keys and Gran Sabio config keep working across worktrees.
 env_path = PROJECT_DIR / ".env"
 if env_path.exists():
     load_dotenv(env_path)
+else:
+    _parts = PROJECT_DIR.parts
+    if ".claude" in _parts:
+        _idx = _parts.index(".claude")
+        _main_repo = Path(*_parts[:_idx])
+        _fallback_env = _main_repo / ".env"
+        if _fallback_env.exists():
+            load_dotenv(_fallback_env)
 
 # =============================================================================
 # DIRECTORIES
 # =============================================================================
 
+
+def _project_path(value: str) -> Path:
+    """Resolve a configured path; relative values are relative to the project."""
+    path = Path(value)
+    return path if path.is_absolute() else PROJECT_DIR / path
+
+
 # Input/Output directories
-VIDEOS_DIR = Path(os.getenv("VIDEOS_DIR", "./videos"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(PROJECT_DIR / "output")))
+VIDEOS_DIR = _project_path(os.getenv("VIDEOS_DIR", "videos"))
+OUTPUT_DIR = _project_path(os.getenv("OUTPUT_DIR", "output"))
 
 # DEPRECATED: reference_face.jpg is no longer needed.
 # The system now uses automatic clustering to group faces by person.
 # Users select which person/character to use from the detected clusters.
 # REFERENCE_FACE_PATH = PROJECT_DIR / "reference_face.jpg"  # REMOVED
 
+# Native ComfyUI (no paid fallback). The UI can override this connection.
+COMFYUI_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
+COMFYUI_WORKFLOW = os.getenv("COMFYUI_WORKFLOW", "qwen-image-2.1")
+
 # Database path
-DATABASE_PATH = Path(os.getenv("DATABASE_PATH", str(PROJECT_DIR / "database" / "thumbnails.db")))
+DATABASE_PATH = _project_path(os.getenv("DATABASE_PATH", "database/thumbnails.db"))
 
 # =============================================================================
 # API KEYS (loaded from .env - no defaults for security)
@@ -67,6 +89,12 @@ GRANSABIO_LLM_URL = os.getenv("GRANSABIO_LLM_URL", "http://localhost:8000")
 # Path to Gran Sabio LLM client directory (required for web interface)
 # Should point to the 'client' folder inside your Gran Sabio LLM installation
 GRANSABIO_CLIENT_PATH = os.getenv("GRANSABIO_CLIENT_PATH", "")
+
+# Optional administrator-registered endpoint identities; URLs stay in Gran Sabio.
+GRANSABIO_LOCAL_ENDPOINT_IDS = {
+    provider: os.getenv(f"GRANSABIO_{provider.upper()}_ENDPOINT_ID", "").strip()
+    for provider in ("ollama", "llamacpp", "openai_compatible")
+}
 
 # Gran Sabio Vision Settings (for sending reference images to LLM)
 GRANSABIO_USERNAME = os.getenv("GRANSABIO_USERNAME", "thumbnail_generator")
@@ -196,42 +224,26 @@ NUM_IMAGE_VARIATIONS = 1
 # Useful for preserving high-resolution originals (e.g., 2K/4K from Gemini 3 Pro)
 KEEP_RAW_THUMBNAILS = os.getenv("KEEP_RAW_THUMBNAILS", "true").lower() == "true"
 
-# =============================================================================
-# PROMPT SYSTEM VERSION (JSON Structured Prompts)
-# =============================================================================
-
-# V3 prompt system: Optimized JSON structure (~1,000 chars)
-# - Clear face_groups/characters/scene separation
-# - physical_description for facial features
-# - identify_in_references for cross-references
-# - character_directions only for ACTIVE characters in scene
-# - No redundancies (single source of truth for identity)
-#
-# V1 (legacy fallback): ~3,500 chars text with 22+ negations
-# Used when V3 is disabled or when structured fields are not available
-#
-# Set to "false" to use V1 legacy prompts
-USE_PROMPT_SYSTEM_V3 = os.getenv("USE_PROMPT_SYSTEM_V3", "true").lower() == "true"
-
-# Image provider: "gemini", "openai", "replicate", "poe"
+# Image provider: "gemini", "openai", "replicate", "poe", "comfyui"
 IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "gemini")
 
 # Gemini settings
-GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
+GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image")
 
-# Gemini 3+ output resolution (for gemini-3-pro and gemini-3.1-flash models)
-# Options: "1K" (1376x768), "2K" (2752x1536), "4K" (5504x3072) for 16:9
-# Note: gemini-2.5-flash-image does NOT support this parameter
+# Output resolution of the Gemini image models, for 16:9:
+# "1K" (1376x768), "2K" (2752x1536) or "4K" (5504x3072)
 GEMINI_PRO_OUTPUT_RESOLUTION = os.getenv("GEMINI_PRO_OUTPUT_RESOLUTION", "2K")
 
 # OpenAI GPT Image settings
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
-OPENAI_IMAGE_SIZE = "1536x1024"     # "1024x1024", "1536x1024" (landscape), "1024x1536" (portrait)
+OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2.5-sunburst")
+# gpt-image-2 and later accept any WIDTHxHEIGHT in multiples of 16: an exact 16:9
+OPENAI_IMAGE_SIZE = "1536x864"
 OPENAI_IMAGE_FORMAT = "png"         # "png", "jpeg", "webp"
-OPENAI_IMAGE_QUALITY = "high"       # "high", "medium", "low"
+OPENAI_IMAGE_QUALITY = "high"       # "low", "medium", "high"; gpt-image-2.5 adds "xhigh", "max"
 
 # Poe API Image settings (FLUX models support reference images)
-# Bot names verified on poe.com 2025-12-28: flux2pro, flux2flex, fluxkontextpro, seedream40, nanobananapro, Ideogram-v3
+# Bot names verified on poe.com 2025-12-28: flux2pro, flux2flex, fluxkontextpro, seedream40, Ideogram-v3.
+# Nano Banana bots as listed by api.poe.com/v1/models on 2026-10-24.
 POE_IMAGE_MODEL = os.getenv("POE_IMAGE_MODEL", "flux2pro")
 POE_IMAGE_QUALITY = "high"
 POE_IMAGE_ASPECT = "16:9"
@@ -240,20 +252,17 @@ POE_IMAGE_ASPECT = "16:9"
 # MODEL CATALOGS (for CLI and Web interface)
 # =============================================================================
 
-# Gemini models for image generation
+# Gemini models for image generation (checked against the Gemini API on 2026-10-24)
 GEMINI_MODELS = {
-    "gemini-2.5-flash-image": "Fast, good quality",
-    "gemini-3-pro-image-preview": "Best quality, 4K (Nano Banana Pro)",
-    "gemini-3.1-flash-image-preview": "Fast, 4K, 14 refs (Nano Banana 2)",
+    "gemini-3-pro-image": "Best quality, 4K (Nano Banana Pro)",
+    "gemini-nano-banana-2.1": "Fast, 4K, cheaper (Nano Banana 2.1, 2026-10-06)",
 }
 
-# OpenAI models for image generation
+# OpenAI models for image generation (checked against the OpenAI API on 2026-10-24)
 OPENAI_MODELS = {
-    "gpt-image-2": "Latest, multilingual text, native reasoning (2026-04-21)",
-    "gpt-image-1.5": "High quality",
-    "gpt-image-1": "Standard",
-    "gpt-image-1-mini": "Faster, lower cost",
-    "dall-e-3": "Legacy (deprecated)",
+    "gpt-image-2.5-sunburst": "Most capable, precise editing (2026-09-08)",
+    "gpt-image-2.5-flare": "Fast, high quality (2026-09-08)",
+    "gpt-image-2": "Previous generation (2026-04-21)",
 }
 
 # Poe models for image generation (CORRECT bot names - no hyphens in flux models)
@@ -262,7 +271,8 @@ POE_MODELS = {
     "flux2flex": "High resolution (14MP)",
     "fluxkontextpro": "Best prompt following (editing model)",
     "seedream40": "Good for combining references",
-    "nanobananapro": "Gemini 3 Pro via Poe - up to 14 refs, 5 faces",
+    "nano-banana-pro": "Gemini 3 Pro Image via Poe - up to 14 refs",
+    "nano-banana-2.1": "Nano Banana 2.1 via Poe - up to 14 refs",
     "Ideogram-v3": "Best for text/logos",
 }
 
@@ -270,16 +280,16 @@ POE_MODELS = {
 # GLOBAL REFERENCE LIMITS
 # =============================================================================
 
-# Maximum reference images the UI allows selecting (highest among all models)
-# Change this value to adjust the limit across the entire application
-MAX_REFERENCE_FRAMES = 14
+# Automatic facial references per person. This is not a manual or model limit.
+DEFAULT_FACE_REFERENCE_COUNT = 3
 
 # Maximum reference images per POE model
-# nanobananapro: 14 refs, 5 simultaneous faces, 2K native
+# nano-banana-pro / nano-banana-2.1: 14 refs, like the Gemini models they run
 # fluxkontextpro: 1 image (editing model, not generation)
 # Ideogram-v3: 3 style references
 POE_MODEL_MAX_REFS = {
-    "nanobananapro": 14,
+    "nano-banana-pro": 14,
+    "nano-banana-2.1": 14,
     "flux2pro": 8,
     "flux2flex": 8,
     "fluxkontextpro": 1,
@@ -287,26 +297,21 @@ POE_MODEL_MAX_REFS = {
     "Ideogram-v3": 3,
 }
 
-# Maximum reference images per GEMINI model
-# gemini-3-pro-image-preview: 14 refs (up to 6 objects + 5 humans)
-# gemini-3.1-flash-image-preview: 14 refs, 5 characters (Nano Banana 2)
-# gemini-2.5-flash-image: 3 refs (recommended for best results per Google docs)
+# Maximum reference images per GEMINI model: up to 14 mixed references
+# gemini-3-pro-image: up to 6 objects + 5 people
+# gemini-nano-banana-2.1: up to 10 objects + 4 people
 GEMINI_MODEL_MAX_REFS = {
-    "gemini-3-pro-image-preview": 14,
-    "gemini-3.1-flash-image-preview": 14,
-    "gemini-2.5-flash-image": 3,
+    "gemini-3-pro-image": 14,
+    "gemini-nano-banana-2.1": 14,
 }
 
 # Maximum reference images per OPENAI model
 # gpt-image-2: up to 16 images, always processed at high fidelity (input_fidelity param not supported)
-# gpt-image-1.5/1/mini: up to 16 images for editing/reference
-# dall-e-3: does not support reference images
+# gpt-image-2.5: OpenAI documents no limit of its own; the GPT Image limit of 16 is assumed
 OPENAI_MODEL_MAX_REFS = {
+    "gpt-image-2.5-sunburst": 16,
+    "gpt-image-2.5-flare": 16,
     "gpt-image-2": 16,
-    "gpt-image-1.5": 16,
-    "gpt-image-1": 16,
-    "gpt-image-1-mini": 16,
-    "dall-e-3": 0,
 }
 
 # Maximum reference images per REPLICATE model
@@ -322,7 +327,7 @@ MODELS_WITH_REFERENCE_SUPPORT = {
     "gemini": True,
     "poe": True,
     "replicate": True,
-    "openai": True,  # Supports up to 16 images (except dall-e-3)
+    "openai": True,  # Up to 16 images
 }
 
 THUMBNAIL_STYLE = """
@@ -367,6 +372,33 @@ IDENTITY_PRESERVATION = {
         "do not alter facial hair if present",
     ],
 }
+
+# =============================================================================
+# FACE SWAP THRESHOLDS (Phase 3 — adaptive matching)
+# =============================================================================
+
+# Cosine similarity bands for the face_swap post-processing decision.
+#   sim >= FACE_SWAP_THRESHOLD_SWAP   → swap (high confidence match)
+#   sim >= FACE_SWAP_THRESHOLD_WARN   → no swap, log a warning (medium confidence)
+#   sim <  FACE_SWAP_THRESHOLD_WARN   → no swap, recorded as low-similarity skip
+#
+# Adaptive behaviour: when the generation job has exactly ONE cluster and the
+# generated thumbnail contains exactly ONE detected face, the assignment is
+# unambiguous and these thresholds are BYPASSED — the swap is always applied.
+# That covers the most common case (single-creator channel) without ever
+# leaving a bad face in place "to be safe".
+FACE_SWAP_THRESHOLD_SWAP = float(os.getenv("FACE_SWAP_THRESHOLD_SWAP", "0.55"))
+FACE_SWAP_THRESHOLD_WARN = float(os.getenv("FACE_SWAP_THRESHOLD_WARN", "0.40"))
+
+# Face match of generated thumbnails: cosine similarity between each person and
+# the face drawn for them, scored before any face swap. With buffalo_l, faces
+# of the right person score about 0.55-0.85 and those of a stranger about 0.
+#   sim >= FACE_MATCH_GOOD_THRESHOLD  → same person
+#   sim >= FACE_MATCH_BAD_THRESHOLD   → doubtful
+#   sim <  FACE_MATCH_BAD_THRESHOLD   → another person (a failure: the gallery
+#                                       can show these last)
+FACE_MATCH_GOOD_THRESHOLD = float(os.getenv("FACE_MATCH_GOOD_THRESHOLD", "0.45"))
+FACE_MATCH_BAD_THRESHOLD = float(os.getenv("FACE_MATCH_BAD_THRESHOLD", "0.25"))
 
 CLOTHING_PRESERVATION = {
     "enabled": True,
@@ -436,3 +468,20 @@ ALLOWED_IP_RANGES = [
 
 # Set to False to disable IP filtering (not recommended if exposed to internet)
 ENABLE_IP_FILTERING = os.getenv("ENABLE_IP_FILTERING", "true").lower() == "true"
+
+# Browser origins (other than the app's own pages) allowed to call the API:
+# CORS reads them, and only they may send requests that change data
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:8057",
+    "http://127.0.0.1:8057",
+]
+# Pages served from private network addresses (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+CORS_ORIGIN_REGEX = r"^https?://(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$"
+
+# Host names the app answers to besides IP addresses, localhost and this
+# machine's own name (comma-separated, e.g. "mypc.home,thumbs.lan"). Any other
+# Host is refused, so a website cannot reach the app by pointing its domain at
+# a LAN address (DNS rebinding).
+ALLOWED_HOSTS = [host.strip().lower() for host in os.getenv("ALLOWED_HOSTS", "").split(",") if host.strip()]

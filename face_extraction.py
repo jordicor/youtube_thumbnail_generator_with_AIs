@@ -14,7 +14,7 @@ import orjson
 import numpy as np
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, fields
 import math
 
 from config import (
@@ -24,9 +24,11 @@ from config import (
     EXPRESSION_DETECTION,
     EXPRESSION_THRESHOLDS,
 )
-from utils import setup_logger, VideoOutput
+from utils import setup_logger, VideoOutput, read_image, resolve_output_path, to_output_relative
 
 logger = setup_logger(__name__)
+
+FACE_ANALYSIS_VERSION = 2
 
 # =============================================================================
 # LANDMARK CONSTANTS FOR EXPRESSION DETECTION
@@ -61,6 +63,7 @@ class FaceInfo:
     pose: list  # [pitch, yaw, roll] if available
     expression: str = "neutral"  # "mouth_closed", "smiling", "neutral", "mouth_open"
     expression_scores: dict = None  # {"mar": float, "smile_ratio": float, "corner_angle": float}
+    portrait_quality: dict | None = None  # Visibility and natural-expression measurements
     embedding: Optional[list] = None  # 512D face embedding for clustering
     # DEPRECATED: These fields are kept for backwards compatibility with existing data
     # Clustering now replaces the need for reference-based matching
@@ -72,8 +75,12 @@ class FaceInfo:
             self.expression_scores = {}
 
     def to_dict(self, include_embedding: bool = True) -> dict:
-        """Convert to dictionary, optionally excluding embedding to save space."""
-        result = asdict(self)
+        """Convert to dictionary, optionally excluding embedding to save space.
+
+        Shallow: the lists and dicts are shared with the face. dataclasses.asdict
+        would deep-copy every float of the embedding, about 0.4 ms per face.
+        """
+        result = {field.name: getattr(self, field.name) for field in fields(self)}
         if not include_embedding:
             result.pop('embedding', None)
         return result
@@ -112,13 +119,18 @@ def get_face_app():
     if _face_app is None:
         with _face_app_lock:
             if _face_app is None:  # Double-check after acquiring lock
+                import torch  # noqa: F401 - load cuDNN before ONNX CUDA sessions
                 from insightface.app import FaceAnalysis
 
                 logger.info(f"Initializing InsightFace with model: {FACE_DETECTOR_MODEL}")
 
+                # Only the models whose output is read: boxes, embeddings and
+                # the 3D landmarks that give pose and expression. The 2D
+                # landmarks and gender/age would run on every face for nothing.
                 app = FaceAnalysis(
                     name=FACE_DETECTOR_MODEL,
-                    providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+                    providers=['CUDAExecutionProvider', 'CPUExecutionProvider'],
+                    allowed_modules=['detection', 'recognition', 'landmark_3d_68']
                 )
                 app.prepare(ctx_id=0, det_size=(640, 640))
 
@@ -202,8 +214,7 @@ def compute_face_quality(face, frame: np.ndarray) -> float:
         score += brightness_score
 
     except Exception as e:
-        logger.warning(f"Error computing face quality: {e}")
-        return 50.0  # Default middle score
+        raise ValueError(f"Cannot compute face quality: {e}") from e
 
     return float(min(100.0, max(0.0, score)))
 
@@ -330,6 +341,79 @@ def classify_expression(landmarks_68: np.ndarray) -> tuple[str, dict]:
     return expression, scores
 
 
+def assess_portrait(face, frame: np.ndarray, quality: float, covered: float) -> dict:
+    """Measure visible, complete, natural portraits using existing landmarks.
+
+    These are selection signals, not emotion labels. A speaking mouth can be
+    usable; closed eyes, severe distortion and covered faces cannot be primary.
+    """
+    landmarks = np.asarray(face.landmark_3d_68, dtype=float)[:, :2]
+    pose = np.asarray(face.pose, dtype=float)
+    box = np.asarray(face.bbox, dtype=float)
+    if (landmarks.shape != (68, 2) or pose.shape != (3,) or box.shape != (4,)
+            or not np.isfinite(np.r_[landmarks.ravel(), pose, box, covered, quality]).all()):
+        raise ValueError("Portrait assessment requires finite face landmarks, pose and visibility.")
+    width, height = box[2:] - box[:2]
+    if min(width, height) <= 0 or not 0 <= covered <= 1:
+        raise ValueError("Invalid face bounds or occlusion measurement.")
+
+    def eye_openness(points):
+        width = np.linalg.norm(points[0] - points[3])
+        if width <= 0:
+            raise ValueError("Degenerate eye landmarks.")
+        return float((np.linalg.norm(points[1] - points[5])
+                      + np.linalg.norm(points[2] - points[4])) / (2 * width))
+
+    eyes = [eye_openness(landmarks[36:42]), eye_openness(landmarks[42:48])]
+    # A profile hides one eye; assess the visible eye rather than a collapsed projection.
+    openness = min(eyes) if abs(pose[1]) <= 35 else max(eyes)
+    mouth = compute_mouth_aspect_ratio(landmarks)
+    eye_axis = landmarks[45] - landmarks[36]
+    if np.linalg.norm(eye_axis) <= 0:
+        raise ValueError("Degenerate facial landmarks.")
+    vertical = np.array([-eye_axis[1], eye_axis[0]]) / np.linalg.norm(eye_axis)
+    mouth_width = np.linalg.norm(landmarks[54] - landmarks[48])
+    if mouth_width <= 0:
+        raise ValueError("Degenerate mouth landmarks.")
+    asymmetry = float(abs((landmarks[54] - landmarks[48]) @ vertical) / mouth_width)
+
+    image_h, image_w = frame.shape[:2]
+    x1, y1 = np.maximum(box[:2].astype(int), 0)
+    x2, y2 = np.minimum(box[2:].astype(int), [image_w, image_h])
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Face bounds do not intersect the image.")
+    gray = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    brightness = float(gray.mean())
+    issues = []
+    if sharpness < 15:
+        issues.append("blurred")
+    if brightness < 35 or brightness > 230:
+        issues.append("poor_exposure")
+    if covered > 0.15:
+        issues.append("occluded")
+    if (box[0] < width * 0.03 or box[2] > image_w - width * 0.03
+            or box[1] < height * 0.12 or box[3] > image_h - height * 0.03):
+        issues.append("cropped")
+    if min(width, height) < 48 or quality < 45:
+        issues.append("low_quality")
+    if abs(pose[0]) > 35 or abs(pose[1]) > 75 or abs(pose[2]) > 30:
+        issues.append("extreme_pose")
+    if openness < 0.16:
+        issues.append("closed_eyes")
+    if mouth > 0.45 or (abs(pose[1]) <= 35 and asymmetry > 0.25):
+        issues.append("extreme_expression")
+    # Keep natural smiles; penalize pronounced speaking shapes and skewed mouths.
+    penalty = 25 * max(0, mouth - 0.10) / 0.35
+    if abs(pose[1]) <= 35:
+        penalty += 15 * max(0, asymmetry - 0.05) / 0.20
+    penalty += 15 * covered
+    return {"occlusion": round(covered, 4), "sharpness": round(sharpness, 2),
+            "brightness": round(brightness, 2), "eye_openness": round(openness, 4),
+            "mouth_openness": round(mouth, 4), "mouth_asymmetry": round(asymmetry, 4),
+            "score": round(max(0.0, quality - penalty), 4), "issues": issues}
+
+
 def analyze_frame(frame_path: Path) -> list[FaceInfo]:
     """
     Analyze a single frame for faces, including expression detection.
@@ -339,14 +423,11 @@ def analyze_frame(frame_path: Path) -> list[FaceInfo]:
     """
 
     faces_info = []
+    # A frame that cannot be read fails the analysis instead of counting as one without faces
+    frame = read_image(frame_path)
 
     try:
         app = get_face_app()
-        frame = cv2.imread(str(frame_path))
-
-        if frame is None:
-            logger.warning(f"Could not read frame: {frame_path}")
-            return []
 
         # Use InsightFace
         faces = app.get(frame)
@@ -373,22 +454,19 @@ def analyze_frame(frame_path: Path) -> list[FaceInfo]:
             if EXPRESSION_DETECTION.get("enabled", True):
                 landmarks = None
 
-                # Try to get 3D 68-point landmarks (preferred - has x, y, z)
+                # 3D 68-point landmarks (x, y, z)
                 if hasattr(face, 'landmark_3d_68') and face.landmark_3d_68 is not None:
                     landmarks = face.landmark_3d_68[:, :2]  # Use only x, y coordinates
-                # Fallback to 2D 106-point landmarks if available
-                elif hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
-                    # For 106-point model, we need to map to equivalent mouth points
-                    # Points 84-95 are outer lip, 96-103 are inner lip in 106-point model
-                    # This is approximate - 68-point is more reliable
-                    logger.debug("Using 106-point landmarks (less accurate for expression)")
-                    pass  # Skip for now, 3d_68 should be available with buffalo_l
 
                 if landmarks is not None and len(landmarks) >= 68:
                     try:
                         expression, expression_scores = classify_expression(landmarks)
                     except Exception as e:
                         logger.debug(f"Expression detection failed: {e}")
+
+            from services.face_swap_service import FaceSwapService
+            visibility = FaceSwapService.get().occlusion(frame, face)
+            portrait_quality = assess_portrait(face, frame, quality, visibility.covered)
 
             # Get embedding for clustering (512D vector)
             embedding_list = None
@@ -403,13 +481,14 @@ def analyze_frame(frame_path: Path) -> list[FaceInfo]:
                 pose=pose,
                 expression=expression,
                 expression_scores=expression_scores,
+                portrait_quality=portrait_quality,
                 embedding=embedding_list
                 # similarity and is_match use defaults (1.0, True) - deprecated
             )
             faces_info.append(face_info)
 
     except Exception as e:
-        logger.warning(f"Error analyzing frame {frame_path.name}: {e}")
+        raise RuntimeError(f"Cannot analyze frame {frame_path.name}: {e}") from e
 
     return faces_info
 
@@ -429,7 +508,12 @@ def _validate_cache(data: dict, frame_paths: list[Path]) -> tuple[bool, str]:
     Returns:
         Tuple of (is_valid, reason_if_invalid)
     """
+    if data.get("analysis_version") != FACE_ANALYSIS_VERSION:
+        return False, "Face analysis changed; recompute portrait visibility and expression."
     all_faces = data.get('all_faces', [])
+    if any(face.get("portrait_quality") is None for face in all_faces):
+        return False, "Face cache has no portrait assessment."
+
 
     # Check if all referenced frames still exist
     missing_frames = []
@@ -500,6 +584,13 @@ def extract_faces(
         try:
             with open(output.faces_file, 'rb') as f:
                 cached_data = orjson.loads(f.read())
+            # Frame paths are stored relative to OUTPUT_DIR
+            for face in cached_data['all_faces']:
+                face['frame_path'] = str(resolve_output_path(face['frame_path']))
+            if 'processed_frames' in cached_data:
+                cached_data['processed_frames'] = [
+                    str(resolve_output_path(p)) for p in cached_data['processed_frames']
+                ]
 
             is_valid, reason = _validate_cache(cached_data, frame_paths)
 
@@ -513,11 +604,12 @@ def extract_faces(
                 )
             else:
                 logger.warning(f"{reason}")
-                if incremental and cached_data:
+                if (incremental and cached_data.get("analysis_version") == FACE_ANALYSIS_VERSION
+                        and all(face.get("portrait_quality") is not None for face in cached_data["all_faces"])):
                     # Keep valid cached faces for incremental processing
                     cached_faces = [
                         FaceInfo(**f) for f in cached_data['all_faces']
-                        if f.get('frame_path') and Path(f['frame_path']).exists()
+                        if f.get('portrait_quality') is not None and f.get('frame_path') and Path(f['frame_path']).exists()
                     ]
                     if cached_faces:
                         use_cache = True
@@ -571,8 +663,12 @@ def extract_faces(
 
     # Save results (embeddings included for clustering)
     # Include processed_frames to track ALL frames (even those without faces) for cache validation
+    # Frame paths are stored relative to OUTPUT_DIR so the cache survives moves
     save_data = result.to_dict()
-    save_data['processed_frames'] = [str(p) for p in frame_paths]
+    save_data['analysis_version'] = FACE_ANALYSIS_VERSION
+    for face in save_data['all_faces']:
+        face['frame_path'] = to_output_relative(face['frame_path'])
+    save_data['processed_frames'] = [to_output_relative(p) for p in frame_paths]
 
     # Atomic write: write to temp file first, then rename
     import tempfile

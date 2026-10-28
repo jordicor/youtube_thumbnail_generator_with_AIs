@@ -9,6 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import get_route_path
 from contextlib import asynccontextmanager
 from pathlib import Path
 from pydantic import BaseModel
@@ -18,10 +20,15 @@ import sys
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from api.routes import videos, analysis, generation, thumbnails, events, directories, titles, tasks
+from api.routes import videos, analysis, generation, thumbnails, events, directories, titles, tasks, people, settings
 from api.middleware.ip_filter import LANOnlyMiddleware
+from api.middleware.request_guard import RequestGuardMiddleware
 from database.db import init_db, close_db
-from config import MAX_REFERENCE_FRAMES, SERVER_HOST, SERVER_PORT, DEBUG_MODE
+from config import (
+    DEFAULT_FACE_REFERENCE_COUNT, SERVER_HOST, SERVER_PORT, DEBUG_MODE, CORS_ALLOWED_ORIGINS, CORS_ORIGIN_REGEX,
+    OUTPUT_DIR,
+)
+from services.face_swap_service import face_restoration_available, face_swap_available
 from job_queue.client import RedisManager
 from job_queue.queue import close_arq_pool
 from i18n.i18n import translate as t, set_language, get_language, get_all_translations, SUPPORTED_LANGUAGES, DEFAULT_LANGUAGE
@@ -66,33 +73,54 @@ app = FastAPI(
 app.add_middleware(LANOnlyMiddleware)
 
 # CORS - Restricted to localhost and common LAN access patterns
-ALLOWED_ORIGINS = [
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
-    "http://localhost:8057",
-    "http://127.0.0.1:8057",
-    # LAN access - browsers send Origin header with the IP they're connecting to
-    # These patterns cover common home network ranges
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"^https?://(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$",
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
+# Only this machine's names, and no cross-site requests that change data
+app.add_middleware(RequestGuardMiddleware)
+
+
 # Static files
+class ContainedStaticFiles(StaticFiles):
+    r"""Static files that never look outside their folder.
+
+    On Windows a URL path with a backslash or a colon ("\\host\share\file",
+    "C:/...") joins into an absolute path, and StaticFiles looks the file up
+    before seeing it is outside its folder: looking up a UNC path connects to
+    that host and hands it the Windows credentials. No file served here has
+    either character, so those paths are not found before any lookup.
+    """
+
+    def get_path(self, scope):
+        route_path = get_route_path(scope)
+        if '\\' in route_path or ':' in route_path:
+            raise StarletteHTTPException(status_code=404)
+        return super().get_path(scope)
+
+
+class RevalidatedStaticFiles(ContainedStaticFiles):
+    """Static files the browser revalidates on every use (a cheap 304 when
+    unchanged), so an updated script or stylesheet is never used stale."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers['Cache-Control'] = 'no-cache'
+        return response
+
+
 STATIC_DIR = ROOT_DIR / "static"
 STATIC_DIR.mkdir(exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount("/static", RevalidatedStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Also serve output directory for thumbnails/frames
-OUTPUT_DIR = ROOT_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
-app.mount("/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/output", ContainedStaticFiles(directory=str(OUTPUT_DIR)), name="output")
 
 # Templates
 TEMPLATES_DIR = ROOT_DIR / "templates"
@@ -125,6 +153,14 @@ async def i18n_middleware(request: Request, call_next):
 
     response = await call_next(request)
     return response
+
+
+@app.exception_handler(OverflowError)
+async def number_too_large_handler(request: Request, exc: OverflowError):
+    """An id beyond SQLite's 64-bit integers names nothing: a client error, not a crash."""
+    if 'too large to convert to SQLite INTEGER' not in str(exc):
+        raise exc
+    return JSONResponse(status_code=422, content={"detail": t('api.errors.number_too_large')})
 
 
 # ============================================================================
@@ -169,11 +205,13 @@ async def get_language_endpoint(request: Request):
 app.include_router(directories.router, prefix="/api/directories", tags=["directories"])
 app.include_router(videos.router, prefix="/api/videos", tags=["videos"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
+app.include_router(people.router, prefix="/api/people", tags=["people"])
 app.include_router(generation.router, prefix="/api/generation", tags=["generation"])
 app.include_router(thumbnails.router, prefix="/api/thumbnails", tags=["thumbnails"])
 app.include_router(events.router, prefix="/api/events", tags=["events"])
 app.include_router(titles.router, prefix="/api/titles", tags=["titles"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
+app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 
 
 # ============================================================================
@@ -189,47 +227,47 @@ async def index(request: Request):
 @app.get("/video/{video_id}", response_class=HTMLResponse)
 async def video_detail(request: Request, video_id: int):
     """Video detail page - clusters and generation."""
+    # Face swap controls are turned off, saying why, while its models are missing
+    _, face_swap_missing = face_swap_available()
+    _, face_restoration_missing = face_restoration_available()
     return templates.TemplateResponse(
         "video_detail.html",
-        {"request": request, "video_id": video_id}
+        {"request": request, "video_id": video_id, "face_swap_missing": face_swap_missing,
+         "face_restoration_missing": face_restoration_missing}
     )
 
 
-@app.get("/video/{video_id}/cluster/{cluster_index}/frames", response_class=HTMLResponse)
-async def cluster_frames(
+@app.get("/video/{video_id}/person/new", response_class=HTMLResponse)
+async def new_person(
     request: Request,
     video_id: int,
-    cluster_index: int,
     view_mode: str = Query(default="person", pattern="^(person|person_scene)$")
 ):
-    """Cluster frames management page."""
+    """Person editor, creating a person of a view."""
     return templates.TemplateResponse(
-        "cluster_frames.html",
+        "person_editor.html",
         {
             "request": request,
             "video_id": video_id,
-            "cluster_index": cluster_index,
-            "max_refs": MAX_REFERENCE_FRAMES,
-            "view_mode": view_mode
+            "person_id": None,
+            "view_mode": view_mode,
+            "automatic_face_count": DEFAULT_FACE_REFERENCE_COUNT
         }
     )
 
 
-@app.get("/video/{video_id}/cluster/create", response_class=HTMLResponse)
-async def create_cluster(request: Request, video_id: int):
-    """Create new cluster manually page."""
+@app.get("/video/{video_id}/person/{person_id}", response_class=HTMLResponse)
+async def edit_person(request: Request, video_id: int, person_id: int):
+    """Person editor: frames, references, name and notes of a person."""
     return templates.TemplateResponse(
-        "create_cluster.html",
-        {"request": request, "video_id": video_id, "max_refs": MAX_REFERENCE_FRAMES}
-    )
-
-
-@app.get("/results/{job_id}", response_class=HTMLResponse)
-async def results(request: Request, job_id: int):
-    """Results page - generated thumbnails."""
-    return templates.TemplateResponse(
-        "results.html",
-        {"request": request, "job_id": job_id}
+        "person_editor.html",
+        {
+            "request": request,
+            "video_id": video_id,
+            "person_id": person_id,
+            "view_mode": None,
+            "automatic_face_count": DEFAULT_FACE_REFERENCE_COUNT
+        }
     )
 
 

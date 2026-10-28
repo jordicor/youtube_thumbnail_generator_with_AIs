@@ -6,7 +6,7 @@
 
 import { CONFIG } from './constants.js';
 import { state, clearDescriptions } from './state.js';
-import { getTextConfig } from './ai-config.js';
+import { getTextConfig, ensureGranSabioAvailable } from './ai-config.js';
 
 // =========================================================================
 // DESCRIPTION LOADING
@@ -98,6 +98,8 @@ export async function saveToDb(descriptions, style, language, length, provider, 
  * Generate new descriptions using AI.
  */
 export async function generate() {
+    if (!ensureGranSabioAvailable()) return;
+
     const textAiConfig = getTextConfig();
     const style = document.getElementById('descStyle').value;
     const language = document.getElementById('descLanguage').value;
@@ -144,14 +146,14 @@ export async function generate() {
     }
 
     if (transcriptionExists) {
-        loadingMain.textContent = t('descriptions_form.generate_button');
+        loadingMain.textContent = t('descriptions.generating');
         loadingHint.textContent = '';
     } else {
         loadingMain.textContent = t('analysis.transcribing');
         loadingHint.textContent = t('generate_form.progress_starting');
 
         generatingTimeout = setTimeout(() => {
-            loadingMain.textContent = t('descriptions_form.generate_button');
+            loadingMain.textContent = t('descriptions.generating');
             loadingHint.textContent = '';
         }, CONFIG.TRANSCRIPTION_CHECK_TIMEOUT_MS);
     }
@@ -187,10 +189,6 @@ export async function generate() {
             throw new Error(data.detail || t('errors.generation_failed'));
         }
 
-        if (!data.success) {
-            throw new Error(data.error || t('errors.generation_failed'));
-        }
-
         const descriptionObjects = data.descriptions.map(text => ({ text, dbId: null }));
         display(descriptionObjects);
 
@@ -198,11 +196,7 @@ export async function generate() {
         await saveToDb(data.descriptions, style, language, length, data.provider, data.model,
                        includeTimestamps, includeHashtags, includeEmojis, includeSocialLinks);
 
-        if (data.transcription_generated) {
-            ThumbnailApp.showToast(t('descriptions.generating'), 'success');
-        } else {
-            ThumbnailApp.showToast(t('descriptions.generating'), 'success');
-        }
+        ThumbnailApp.showToast(t('descriptions_form.generated', {count: data.descriptions.length}), 'success');
 
     } catch (error) {
         if (generatingTimeout) clearTimeout(generatingTimeout);
@@ -243,12 +237,11 @@ export function display(descriptions, append = true) {
         item.innerHTML = `
             <div class="description-text">${escapeHtml(descText)}</div>
             <div class="description-actions">
-                <button class="description-copy-btn" onclick="VideoDetail.copyDescription(${index})" title="${t('descriptions_form.copy_all')}">
-                    &#128203; ${t('descriptions_form.copy_all')}
+                <button type="button" class="btn btn-secondary btn-small" data-action="copy">
+                    ${ThumbnailApp.icon('copy', 'icon-sm')}<span>${escapeHtml(t('descriptions_form.copy'))}</span>
                 </button>
-                <button class="description-delete-btn" onclick="VideoDetail.deleteDescription(${index})" title="${t('common.delete')}">
-                    &#128465;
-                </button>
+                <button type="button" class="icon-btn danger" data-action="delete"
+                        title="${escapeHtml(t('common.delete'))}" aria-label="${escapeHtml(t('common.delete'))}">${ThumbnailApp.icon('trash', 'icon-sm')}</button>
             </div>
         `;
         resultsList.appendChild(item);
@@ -263,10 +256,7 @@ export function display(descriptions, append = true) {
  */
 export function updateCount() {
     const validDescriptions = state.descriptions.filter(d => d !== null);
-    const countEl = document.getElementById('descriptionsCount');
-    if (countEl) {
-        countEl.textContent = validDescriptions.length > 0 ? `(${validDescriptions.length})` : '';
-    }
+    document.getElementById('descriptionsCount').textContent = validDescriptions.length > 0 ? validDescriptions.length : '';
 }
 
 // =========================================================================
@@ -281,16 +271,22 @@ export async function deleteOne(index) {
     const descObj = state.descriptions[index];
     if (!descObj) return;
 
+    const confirmed = await ThumbnailApp.showModal({
+        title: t('descriptions_form.delete_title'),
+        message: t('descriptions_form.delete_count_message', {count: 1}),
+        type: 'danger',
+        confirmText: t('common.delete'),
+        cancelText: t('common.cancel')
+    });
+    if (!confirmed) return;
+
     if (descObj.dbId) {
-        try {
-            const response = await fetch(`/api/titles/delete-description/${descObj.dbId}`, {
-                method: 'DELETE'
-            });
-            if (!response.ok) {
-                console.error('Error deleting description from database');
-            }
-        } catch (error) {
-            console.error('Error deleting description:', error);
+        const response = await fetch(`/api/titles/delete-description/${descObj.dbId}`, {
+            method: 'DELETE'
+        });
+        if (!response.ok) {
+            ThumbnailApp.showToast(t('errors.delete_failed'), 'error');
+            return;
         }
     }
 
@@ -310,7 +306,7 @@ export async function deleteOne(index) {
         }, CONFIG.ANIMATION_DURATION_MS);
     }
 
-    ThumbnailApp.showToast(t('common.success'), 'success');
+    ThumbnailApp.showToast(t('descriptions_form.deleted'), 'success');
 }
 
 /**
@@ -321,7 +317,14 @@ export async function deleteAll() {
     if (validDescriptions.length === 0) return;
 
     // M31: Confirm before bulk delete
-    if (!confirm(t('common.delete'))) return;
+    const confirmed = await ThumbnailApp.showModal({
+        title: t('descriptions_form.delete_title'),
+        message: t('descriptions_form.delete_count_message', {count: validDescriptions.length}),
+        type: 'danger',
+        confirmText: t('common.delete'),
+        cancelText: t('common.cancel')
+    });
+    if (!confirmed) return;
 
     const dbIds = validDescriptions
         .filter(d => d.dbId)
@@ -367,19 +370,6 @@ export async function copy(index) {
     try {
         await navigator.clipboard.writeText(descText);
 
-        const item = document.querySelector(`.description-item[data-description-index="${index}"]`);
-        const btn = item?.querySelector('.description-copy-btn');
-        if (btn) {
-            const originalHTML = btn.innerHTML;
-            btn.classList.add('copied');
-            btn.innerHTML = '&#10003; ' + t('descriptions_form.copy_all');
-
-            setTimeout(() => {
-                btn.classList.remove('copied');
-                btn.innerHTML = originalHTML;
-            }, CONFIG.COPY_FEEDBACK_DURATION_MS);
-        }
-
         ThumbnailApp.showToast(t('descriptions.copied'), 'success');
     } catch (error) {
         ThumbnailApp.showToast(t('errors.generic'), 'error');
@@ -418,7 +408,7 @@ export function updateStyleUI() {
     const customPromptTextarea = document.getElementById('descCustomPrompt');
 
     if (style === 'custom') {
-        customPromptGroup.style.display = 'block';
+        customPromptGroup.style.display = '';
         customInstructionsGroup.style.display = 'none';
 
         customPromptTextarea.classList.remove('attention');
@@ -428,7 +418,34 @@ export function updateStyleUI() {
         setTimeout(() => customPromptTextarea.focus(), 100);
     } else {
         customPromptGroup.style.display = 'none';
-        customInstructionsGroup.style.display = 'block';
+        customInstructionsGroup.style.display = '';
         customPromptTextarea.classList.remove('attention');
     }
+}
+
+/**
+ * Write the number of descriptions to generate in the button.
+ */
+export function updateGenerateLabel() {
+    const count = parseInt(document.getElementById('descQuantity').value, 10) || 1;
+    document.getElementById('generateDescLabel').textContent = t('descriptions_form.generate_button', { count });
+}
+
+/**
+ * Bind the form and the list of descriptions.
+ */
+export function setupControls() {
+    document.getElementById('descStyle').addEventListener('change', updateStyleUI);
+    document.getElementById('descQuantity').addEventListener('input', updateGenerateLabel);
+    document.getElementById('generateDescBtn').addEventListener('click', generate);
+    document.getElementById('copyAllDescriptionsBtn').addEventListener('click', copyAll);
+    document.getElementById('deleteAllDescriptionsBtn').addEventListener('click', deleteAll);
+    document.getElementById('descriptionsResultsList').addEventListener('click', (e) => {
+        const button = e.target.closest('button[data-action]');
+        if (!button) return;
+        const index = parseInt(button.closest('.description-item').dataset.descriptionIndex, 10);
+        if (button.dataset.action === 'copy') copy(index);
+        else if (button.dataset.action === 'delete') deleteOne(index);
+    });
+    updateGenerateLabel();
 }

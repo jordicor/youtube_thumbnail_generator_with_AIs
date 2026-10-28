@@ -18,8 +18,8 @@ from database.db import get_db
 from services.analysis_service import AnalysisService
 from services.generation_service import (
     GenerationService,
-    PromptGenerationError,
     ImageGenerationError,
+    create_sync_cancellation_check,
 )
 from job_queue.pubsub import (
     publish_progress,
@@ -35,40 +35,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # CANCELLATION CHECK HELPERS
 # =============================================================================
-
-def create_sync_cancellation_check(job_id: int):
-    """
-    Create a synchronous cancellation check function for use in sync code.
-
-    This is needed because generate_thumbnails_from_images is synchronous,
-    but we need to check the database for cancellation status.
-
-    Args:
-        job_id: The generation job ID to check
-
-    Returns:
-        A callable that returns True if the job has been cancelled
-    """
-    import sqlite3
-    from config import DATABASE_PATH
-
-    def check() -> bool:
-        conn = sqlite3.connect(str(DATABASE_PATH), timeout=5)
-        try:
-            cursor = conn.execute(
-                "SELECT status FROM generation_jobs WHERE id = ?",
-                [job_id]
-            )
-            row = cursor.fetchone()
-            return row and row[0] == 'cancelled'
-        except Exception as e:
-            logger.warning(f"Error in sync cancellation check for job {job_id}: {e}")
-            return False
-        finally:
-            conn.close()
-
-    return check
-
 
 def create_sync_analysis_cancellation_check(video_id: int):
     """
@@ -236,6 +202,8 @@ async def analyze_video(
     force_transcription: bool = False,
     clustering_eps: float = 0.5,
     clustering_min_samples: int = 3,
+    refresh_references: bool = False,
+    expected_reference_revision: Optional[int] = None,
     **kwargs  # Ignore arq internal params like _job_timeout
 ) -> dict:
     """
@@ -321,6 +289,8 @@ async def analyze_video(
                 force_transcription=force_transcription,
                 clustering_eps=clustering_eps,
                 clustering_min_samples=clustering_min_samples,
+                refresh_references=refresh_references,
+                expected_reference_revision=expected_reference_revision,
                 cancellation_check=cancellation_check
             )
 
@@ -341,12 +311,13 @@ async def analyze_video(
             final_status = video.get("status", "error") if video else "error"
             error_message = video.get("error_message") if video else None
 
-        if final_status == "analyzed":
+        # A reference refresh leaves a video with thumbnails completed
+        if final_status in ("analyzed", "completed"):
             # Notify completion (specific channel)
             await publish_event(
                 CHANNEL_ANALYSIS,
                 "complete",
-                {"status": "analyzed", "progress": 100},
+                {"status": final_status, "progress": 100},
                 video_id=video_id
             )
 
@@ -357,7 +328,7 @@ async def analyze_video(
                 task_id=video_id,
                 video_id=video_id,
                 video_name=video_name,
-                status="analyzed",
+                status=final_status,
                 progress=100
             )
 
@@ -440,6 +411,9 @@ async def run_generation(
     gemini_model: Optional[str] = None,
     openai_model: Optional[str] = None,
     poe_model: Optional[str] = None,
+    comfyui_workflow: Optional[str] = None,
+    comfyui_config: Optional[dict] = None,
+    comfyui_profile: Optional[dict] = None,
     num_reference_images: Optional[int] = None,
     # Prompt generation AI settings
     prompt_provider: Optional[str] = None,
@@ -454,7 +428,13 @@ async def run_generation(
     reference_image_base64: Optional[str] = None,
     reference_image_use_for_prompts: bool = False,
     reference_image_include_in_refs: bool = False,
-    **kwargs  # Ignore arq internal params like _job_timeout
+    # Face swap post-processing
+    apply_face_swap: bool = False,
+    restore_faces: bool = False,
+    # Try other image providers when the chosen one fails
+    allow_provider_fallback: bool = False,
+    # With several people, also send a frame of them together
+    include_scene_reference: bool = True
 ) -> dict:
     """
     Background task for thumbnail generation.
@@ -551,6 +531,9 @@ async def run_generation(
                 gemini_model=gemini_model,
                 openai_model=openai_model,
                 poe_model=poe_model,
+                comfyui_workflow=comfyui_workflow,
+                comfyui_config=comfyui_config,
+                comfyui_profile=comfyui_profile,
                 num_reference_images=num_reference_images,
                 prompt_provider=prompt_provider,
                 prompt_model=prompt_model,
@@ -562,6 +545,10 @@ async def run_generation(
                 reference_image_base64=reference_image_base64,
                 reference_image_use_for_prompts=reference_image_use_for_prompts,
                 reference_image_include_in_refs=reference_image_include_in_refs,
+                apply_face_swap=apply_face_swap,
+                restore_faces=restore_faces,
+                allow_provider_fallback=allow_provider_fallback,
+                include_scene_reference=include_scene_reference,
                 cancellation_check=cancellation_check
             )
 
@@ -648,7 +635,7 @@ async def run_generation(
             )
         raise
 
-    except (PromptGenerationError, ImageGenerationError) as e:
+    except ImageGenerationError as e:
         # These exceptions are raised AFTER the job status has been set to 'error' in the database.
         # We just need to notify via events and re-raise so arq counts this as j_failed (not j_complete).
         error_msg = str(e)

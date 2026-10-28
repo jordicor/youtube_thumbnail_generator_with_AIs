@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% from 'components/macros.html' import icon %}
+
+{% set page_name = t('person_editor.new_person') if person_id is none else t('common.loading') %}
+
+{% block title %}{{ t('person_editor.page_title', name=page_name) }}{% endblock %}
+{% block help_page %}person{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="breadcrumbs" aria-label="{{ t('nav.breadcrumbs') }}">
+    <a href="/">{{ t('nav.library') }}</a>
+    {{ icon('chevron-right') }}
+    <a href="/video/{{ video_id }}#people" data-breadcrumb-video>{{ t('common.loading') }}</a>
+    {{ icon('chevron-right') }}
+    <span aria-current="page" id="breadcrumbPerson">{{ page_name }}</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="person-editor" id="personEditor"
+     data-video-id="{{ video_id }}"
+     data-person-id="{{ person_id if person_id is not none else '' }}"
+     data-view-mode="{{ view_mode or '' }}"
+     data-face-count="{{ automatic_face_count }}">
+
+    <!-- Frames of the video -->
+    <section class="pe-browser" aria-label="{{ t('person_editor.frames_label') }}">
+        <div class="pe-toolbar">
+            <div class="segmented pe-scopes" id="peScopes" role="group" aria-label="{{ t('person_editor.scope_label') }}">
+                <button type="button" class="segmented-option" data-scope="members">
+                    <span>{{ t('person_editor.scope_members') }}</span><span class="chip-count" data-count="members">0</span>
+                </button>
+                <button type="button" class="segmented-option" data-scope="unassigned">
+                    <span>{{ t('person_editor.scope_unassigned') }}</span><span class="chip-count" data-count="unassigned">0</span>
+                </button>
+                <button type="button" class="segmented-option" data-scope="all">
+                    <span>{{ t('person_editor.scope_all') }}</span><span class="chip-count" data-count="all">0</span>
+                </button>
+            </div>
+
+            <div class="pe-toolbar-controls">
+                <label class="pe-select-all">
+                    <input type="checkbox" id="peSelectAll">
+                    <span>{{ t('person_editor.select_all') }}</span>
+                </label>
+                <label class="visually-hidden" for="peSort">{{ t('person_editor.sort_label') }}</label>
+                <!-- Options depend on whether there is a person to compare with (person_editor.js) -->
+                <select class="select select-sm" id="peSort"></select>
+                <button type="button" class="chip" id="peGroupScenes" aria-pressed="false">
+                    {{ icon('film', 'icon-sm') }}<span>{{ t('person_editor.group_scenes') }}</span>
+                </button>
+                <span class="toolbar-label" id="peViewLabel">{{ t('person_editor.view_label') }}</span>
+                <div class="segmented segmented-icons" id="peViewToggle" role="group" aria-labelledby="peViewLabel">
+                    <button type="button" class="segmented-option" data-view="faces">{{ icon('user') }}<span>{{ t('person_editor.view_faces') }}</span></button>
+                    <button type="button" class="segmented-option" data-view="frames">{{ icon('image') }}<span>{{ t('person_editor.view_frames') }}</span></button>
+                </div>
+            </div>
+        </div>
+
+        <p class="pe-scope-hint" id="peScopeHint"></p>
+
+        <div class="pe-grid" id="peGrid">
+            <div class="loading">{{ t('common.loading') }}</div>
+        </div>
+        <div class="empty-state hidden" id="peEmpty"></div>
+        <div class="pe-faceless hidden" id="peFaceless">
+            <button type="button" class="btn btn-ghost btn-small" id="peShowFaceless"></button>
+        </div>
+    </section>
+
+    <!-- The person: always in view, with its save button on top -->
+    <aside class="pe-panel" aria-label="{{ t('person_editor.panel_label') }}">
+        <div class="pe-panel-head">
+            <span class="pe-avatar" id="peAvatar">{{ icon('user') }}</span>
+            <div class="pe-panel-title">
+                <h1 id="pePersonName">{{ page_name }}</h1>
+                <p class="page-subtitle" id="pePersonMeta"></p>
+            </div>
+        </div>
+
+        <div class="pe-panel-actions">
+            <span class="pe-dirty hidden" id="peDirty">{{ t('person_editor.unsaved') }}</span>
+            <button type="button" class="btn btn-ghost btn-small hidden" id="peDiscard">{{ t('person_editor.discard') }}</button>
+            <button type="button" class="btn btn-primary" id="peSave" disabled>
+                {{ icon('check', 'icon-sm') }}<span>{{ t('person_editor.create') if person_id is none else t('person_editor.save') }}</span>
+            </button>
+            <p class="form-hint pe-save-reason hidden" id="peSaveReason"></p>
+        </div>
+
+        {% if person_id is none %}
+        <!-- Creating a person takes these steps, in this order -->
+        <ol class="pe-guide" id="peGuide">
+            {% for step in ['find', 'add', 'create'] %}
+            <li data-step="{{ step }}">
+                <span class="pe-guide-number">{{ loop.index }}</span>
+                <span>{{ t('person_editor.guide_' ~ step) }}</span>
+            </li>
+            {% endfor %}
+        </ol>
+        {% endif %}
+
+        <div class="pe-field">
+            <label for="peLabel">{{ t('person_editor.name_label') }}</label>
+            <input type="text" class="input" id="peLabel" maxlength="128" autocomplete="off">
+        </div>
+        <details class="pe-notes" id="peNotesBlock">
+            <summary>{{ t('person_editor.notes_label') }} <span class="pe-notes-preview" id="peNotesPreview"></span></summary>
+            <textarea class="input" id="peNotes" rows="3" maxlength="2000"
+                      placeholder="{{ t('person_editor.notes_placeholder') }}" aria-label="{{ t('person_editor.notes_label') }}"></textarea>
+            <small class="form-hint">{{ t('person_editor.notes_hint') }}</small>
+        </details>
+
+        <!-- The photos of the person the image model gets -->
+        <section class="pe-refs" aria-labelledby="peRefsTitle">
+            <div class="pe-refs-head">
+                <h2 id="peRefsTitle">{{ t('person_editor.refs_title') }}</h2>
+                <button type="button" class="link-btn" id="pePreview">{{ icon('eye', 'icon-sm') }}<span>{{ t('person_editor.preview_open') }}</span></button>
+            </div>
+            <p class="form-hint">{{ t('person_editor.refs_hint', count=automatic_face_count) }}</p>
+            <p class="form-hint pe-budget" id="peBudget"></p>
+
+            <div class="pe-slot-group">
+                <div class="pe-slot-head">
+                    <h3>{{ t('person_editor.faces_title') }}</h3>
+                    <button type="button" class="btn btn-ghost btn-small" id="peAutoFaces">{{ icon('refresh', 'icon-sm') }}<span>{{ t('person_editor.auto_choose') }}</span></button>
+                </div>
+                <ol class="pe-slots" id="peFaceSlots"></ol>
+                <p class="form-hint pe-slots-note hidden" id="peFacesNote"></p>
+            </div>
+
+            <div class="pe-slot-group">
+                <div class="pe-slot-head">
+                    <h3>{{ t('person_editor.body_title') }} <span class="pe-optional">{{ t('person_editor.optional') }}</span></h3>
+                    {% if person_id is not none %}
+                    <button type="button" class="btn btn-ghost btn-small" id="peAutoBody">{{ icon('refresh', 'icon-sm') }}<span>{{ t('person_editor.auto_choose') }}</span></button>
+                    {% endif %}
+                </div>
+                <ol class="pe-slots" id="peBodySlots"></ol>
+                <p class="form-hint">{{ t('person_editor.body_hint') }}</p>
+            </div>
+
+            <details class="pe-advanced">
+                <summary>{{ t('person_editor.advanced') }}</summary>
+                <label class="toggle-row">
+                    <input type="checkbox" id="peCollage">
+                    <span>
+                        <span class="toggle-label">{{ t('person_editor.collage_label') }}</span>
+                        <span class="form-hint">{{ t('person_editor.collage_hint') }}</span>
+                    </span>
+                </label>
+            </details>
+            <input type="file" id="peUploadInput" accept="image/jpeg,image/png,image/webp" hidden>
+        </section>
+    </aside>
+</div>
+
+<!-- Actions on the selected frames -->
+<div class="bulk-bar pe-selection-bar hidden" id="peSelectionBar" role="region" aria-label="{{ t('person_editor.selection_label') }}">
+    <span class="bulk-count" id="peSelectionCount"></span>
+    <span class="bulk-divider"></span>
+    <button type="button" class="btn btn-primary btn-small" id="peActAdd">{{ icon('plus', 'icon-sm') }}<span></span></button>
+    <button type="button" class="btn btn-secondary btn-small" id="peActFace">{{ icon('star', 'icon-sm') }}<span></span></button>
+    <button type="button" class="btn btn-secondary btn-small" id="peActBody">{{ icon('shirt', 'icon-sm') }}<span></span></button>
+    <button type="button" class="btn btn-secondary btn-small" id="peActMove" aria-haspopup="menu" aria-expanded="false">{{ icon('arrow-right', 'icon-sm') }}<span></span></button>
+    <button type="button" class="btn btn-secondary btn-small" id="peActRemove">{{ icon('x', 'icon-sm') }}<span></span></button>
+    <button type="button" class="btn btn-danger btn-small" id="peActDelete">{{ icon('trash', 'icon-sm') }}<span></span></button>
+    <button type="button" class="icon-btn" id="peActClear" title="{{ t('person_editor.clear_selection') }}" aria-label="{{ t('person_editor.clear_selection') }}">{{ icon('x') }}</button>
+</div>
+
+<!-- What the image model gets of this person -->
+<div class="modal-overlay" id="pePreviewDialog">
+    <div class="modal-dialog references-preview" role="dialog" aria-modal="true" aria-labelledby="pePreviewTitle">
+        <div class="modal-header">
+            <h3 class="modal-title" id="pePreviewTitle"></h3>
+            <button type="button" class="icon-btn" data-close-preview title="{{ t('common.close') }}" aria-label="{{ t('common.close') }}">{{ icon('x') }}</button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" id="pePreviewHint">{{ t('person_editor.preview_hint') }}</p>
+            <div class="references-preview-grid" id="pePreviewGrid"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Full frame viewer -->
+<div class="lightbox hidden" id="peLightbox" tabindex="-1" role="dialog" aria-modal="true" aria-label="{{ t('person_editor.viewer_label') }}">
+    <div class="lightbox-stage" id="peLightboxStage">
+        <div class="lightbox-frame">
+            <img id="peLightboxImage" alt="">
+            <span class="pe-lightbox-face hidden" id="peLightboxFace"></span>
+        </div>
+    </div>
+    <div class="lightbox-bar">
+        <button type="button" class="icon-btn" id="peLightboxPrev" title="{{ t('person_editor.viewer_prev') }}" aria-label="{{ t('person_editor.viewer_prev') }}">{{ icon('chevron-left') }}</button>
+        <div class="lightbox-info" id="peLightboxInfo"></div>
+        <button type="button" class="btn btn-secondary btn-small" id="peLightboxSelect" aria-pressed="false">{{ icon('check', 'icon-sm') }}<span></span></button>
+        <button type="button" class="icon-btn" id="peLightboxNext" title="{{ t('person_editor.viewer_next') }}" aria-label="{{ t('person_editor.viewer_next') }}">{{ icon('chevron-right') }}</button>
+        <button type="button" class="icon-btn" id="peLightboxClose" title="{{ t('common.close') }}" aria-label="{{ t('common.close') }}">{{ icon('x') }}</button>
+    </div>
+</div>
+
+{% include 'components/crop_dialog.html' %}
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="/static/js/person_editor.js"></script>
+{% endblock %}

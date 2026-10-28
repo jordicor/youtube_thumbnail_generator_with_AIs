@@ -1,46 +1,35 @@
 /**
  * Video Detail Page - Clusters Module
  * ====================================
- * Handles cluster loading, selection, merging, and deletion.
+ * Detected people tab: cluster loading, the "in the thumbnail" button of each
+ * card, and checking people to merge or delete them (floating action bar).
+ * Choosing who appears in the thumbnail lives in people.js.
  */
 
-import { state, clearClusterSelection, clearReferenceCluster } from './state.js';
-
-// H8: Store scroll indicator handler references for cleanup
-let _scrollHandler = null;
-let _resizeHandler = null;
+import { state, clearClusterSelection } from './state.js';
+import * as People from './people.js';
 
 // =========================================================================
 // CLUSTER DISPLAY HELPERS
 // =========================================================================
 
 /**
- * Get display name for a cluster based on its type.
+ * Get the HTML-escaped display name for a cluster.
  * @param {Object} cluster - Cluster object
- * @returns {string} Display name
+ * @returns {string} Escaped display name
  */
 export function getDisplayName(cluster) {
-    if (cluster.label) {
-        return escapeHtml(cluster.label);
-    }
-
-    if (cluster.cluster_type === 'person_scene') {
-        const parentLabel = cluster.parent_label || t('video_detail.clusters.person', {index: (cluster.parent_cluster_index || 0) + 1});
-        const sceneNum = cluster.scene_index !== null ? cluster.scene_index : '?';
-        return `${escapeHtml(parentLabel)} - ${t('video_detail.clusters.scene', {index: sceneNum})}`;
-    }
-
-    return t('video_detail.clusters.person', {index: cluster.cluster_index + 1});
+    return escapeHtml(ThumbnailApp.getClusterDisplayName(cluster));
 }
 
 /**
- * Get cluster name by index.
+ * Get cluster name by index (plain text).
  * @param {number} clusterIndex - Cluster index
  * @returns {string} Cluster name
  */
 export function getName(clusterIndex) {
     const cluster = state.clusters.find(c => c.cluster_index === clusterIndex);
-    return cluster?.label || t('video_detail.clusters.person', {index: clusterIndex + 1});
+    return ThumbnailApp.getClusterDisplayName(cluster);
 }
 
 // =========================================================================
@@ -48,139 +37,146 @@ export function getName(clusterIndex) {
 // =========================================================================
 
 /**
- * Load clusters from the API and render them.
+ * Show how many people the video has in the page header (the 'person' view).
  */
-export async function load() {
-    const grid = document.getElementById('clustersGrid');
-    const select = document.getElementById('clusterSelect');
-
-    try {
-        const response = await fetch(`/api/analysis/${state.videoId}/clusters?view_mode=${state.currentClusterType}`);
-        const data = await response.json();
-
-        state.clusters = data.clusters;
-        clearClusterSelection();
-        updateSelectionUI();
-
-        if (data.clusters.length === 0) {
-            const emptyMsg = state.currentClusterType === 'person_scene'
-                ? t('empty_state.no_clusters_scene')
-                : t('empty_state.no_clusters');
-            grid.innerHTML = `<p class="empty-state">${emptyMsg}</p>`;
-            return;
-        }
-
-        grid.innerHTML = '';
-        select.innerHTML = `<option value="">${t('common.select')}</option>`;
-
-        for (const cluster of data.clusters) {
-            const displayName = getDisplayName(cluster);
-
-            // Add to grid
-            const card = document.createElement('div');
-            card.className = 'cluster-card';
-            card.dataset.clusterIndex = cluster.cluster_index;
-            card.innerHTML = `
-                <div class="card-checkbox">
-                    <input type="checkbox" id="cluster-cb-${cluster.cluster_index}">
-                </div>
-                <div class="cluster-card-actions">
-                    <button class="cluster-reference-btn" onclick="event.stopPropagation(); VideoDetail.setClusterAsReference(${cluster.cluster_index})" title="${t('generate_form.cluster_tooltip')}">
-                        &#9734;
-                    </button>
-                    <a href="/video/${state.videoId}/cluster/${cluster.cluster_index}/frames?view_mode=${state.currentClusterType}" class="cluster-frames-btn" onclick="event.stopPropagation()" title="${t('video_detail.clusters.manage_frames')}">
-                        &#9881;
-                    </a>
-                    <button class="cluster-delete-btn" onclick="event.stopPropagation(); VideoDetail.showDeleteModal(${cluster.cluster_index}, ${cluster.num_frames})" title="${t('video_detail.clusters.delete_cluster')}">
-                        &#128465;
-                    </button>
-                </div>
-                <div class="cluster-reference-badge" style="display: none;">
-                    &#128247; ${t('clusters.references_title')}
-                </div>
-                <img src="/api/analysis/${state.videoId}/clusters/by-id/${cluster.id}/image"
-                     alt="Cluster ${cluster.cluster_index}"
-                     loading="lazy"
-                     onerror="this.src='/static/img/placeholder.svg'">
-                <div class="cluster-info">
-                    <h4>${displayName}</h4>
-                    <p>${t('clusters.frame_count_other', {count: cluster.num_frames})}</p>
-                </div>
-            `;
-            // Click on card (outside action buttons) toggles checkbox selection
-            card.addEventListener('click', (e) => {
-                if (!e.target.closest('.cluster-card-actions') &&
-                    !e.target.closest('.card-checkbox')) {
-                    toggleSelection(cluster.cluster_index);
-                }
-            });
-            // Also handle checkbox click directly
-            const checkbox = card.querySelector('.card-checkbox');
-            checkbox.addEventListener('click', (e) => {
-                e.stopPropagation();
-                toggleSelection(cluster.cluster_index);
-            });
-            grid.appendChild(card);
-
-            // Add to select
-            const option = document.createElement('option');
-            option.value = cluster.cluster_index;
-            option.textContent = `${displayName} (${t('clusters.frame_count_other', {count: cluster.num_frames})})`;
-            select.appendChild(option);
-        }
-
-        document.getElementById('clusterSelectionBar').classList.add('visible');
-
-        // Setup scroll indicator for the grid container
-        setupScrollIndicator();
-
-    } catch (error) {
-        grid.innerHTML = `<div class="error">${t('errors.load_clusters')}: ${escapeHtml(error.message)}</div>`;
+function updateHeaderCount() {
+    const item = document.getElementById('videoMetaPeople');
+    item.classList.toggle('hidden', state.personCount === null);
+    if (state.personCount !== null) {
+        item.querySelector('span').textContent = t('index.card.persons', { count: state.personCount });
     }
 }
 
 /**
- * Setup scroll indicator for the clusters grid.
- * Shows a fade effect when there's more content to scroll.
+ * Load the clusters of the current view and render them.
  */
-function setupScrollIndicator() {
-    const container = document.getElementById('clustersGridContainer');
+export async function load() {
     const grid = document.getElementById('clustersGrid');
+    const viewMode = state.currentClusterType;
 
-    if (!container || !grid) return;
+    try {
+        const response = await fetch(`/api/analysis/${state.videoId}/clusters?view_mode=${viewMode}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
 
-    // H8: Remove old event listeners before adding new ones
-    if (_scrollHandler) {
-        grid.removeEventListener('scroll', _scrollHandler);
+        // A newer view switch superseded this request
+        if (viewMode !== state.currentClusterType) return;
+
+        state.clusters = data.clusters;
+        clearClusterSelection();
+        document.getElementById('createPersonLink').href = `/video/${state.videoId}/person/new?view_mode=${viewMode}`;
+
+        document.getElementById('peopleTabCount').textContent = data.clusters.length;
+        if (viewMode === 'person') {
+            state.personCount = data.clusters.length;
+            updateHeaderCount();
+        }
+
+        if (data.clusters.length === 0) {
+            const emptyMsg = viewMode === 'person_scene'
+                ? t('empty_state.no_clusters_scene')
+                : t('empty_state.no_clusters');
+            grid.innerHTML = `<p class="empty-state">${escapeHtml(emptyMsg)}</p>`;
+        } else {
+            grid.replaceChildren(...data.clusters.map(createCard));
+        }
+
+        updateSelectionUI();
+        People.syncWithClusters();
+    } catch (error) {
+        grid.innerHTML = `<div class="error">${escapeHtml(t('errors.load_clusters'))}: ${escapeHtml(error.message)}</div>`;
     }
-    if (_resizeHandler) {
-        window.removeEventListener('resize', _resizeHandler);
-    }
+}
 
-    const updateScrollState = () => {
-        const hasScroll = grid.scrollHeight > grid.clientHeight;
-        const scrolledToBottom = grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 10;
+/**
+ * Build the card of one cluster.
+ * @param {Object} cluster - Cluster object
+ * @returns {HTMLElement} Card element
+ */
+function createCard(cluster) {
+    const displayName = getDisplayName(cluster);
+    const editUrl = `/video/${state.videoId}/person/${cluster.id}`;
+    const unnamed = People.isUnnamed(cluster);
+    const meta = t('clusters.card_meta', {
+        frames: t('clusters.in_frames', { count: cluster.num_frames }),
+        photos: t('clusters.face_photos', { count: cluster.reference_count })
+    });
 
-        container.classList.toggle('has-scroll', hasScroll && !scrolledToBottom);
-        container.classList.toggle('scrolled-bottom', scrolledToBottom);
-    };
+    const card = document.createElement('div');
+    card.className = 'cluster-card';
+    card.dataset.clusterIndex = cluster.cluster_index;
+    card.dataset.clusterId = cluster.id;
+    card.innerHTML = `
+        <label class="card-checkbox" title="${escapeHtml(t('clusters.select_for_actions'))}">
+            <input type="checkbox" aria-label="${escapeHtml(t('clusters.select_for_actions'))}">
+        </label>
+        <span class="cluster-role-badge hidden"></span>
+        <a class="cluster-image" href="${editUrl}" title="${escapeHtml(t('video_detail.clusters.edit_person'))}">
+            <img src="${ThumbnailApp.personFaceUrl(state.videoId, cluster)}"
+                 alt="${displayName}"
+                 loading="lazy"
+                 onerror="this.src='/static/img/placeholder.svg'">
+        </a>
+        <div class="cluster-info">
+            <h4 title="${displayName}"${unnamed ? ' class="unnamed"' : ''}>${displayName}</h4>
+            ${unnamed ? `<a class="link-btn cluster-name-link" href="${editUrl}">${escapeHtml(t('generate_form.name_them'))}</a>` : ''}
+            <p>${escapeHtml(meta)}</p>
+            ${cluster.is_picture ? `<p>${escapeHtml(t('clusters.picture'))}</p>` : ''}
+        </div>
+        <div class="cluster-card-footer">
+            <button type="button" class="btn btn-small cluster-thumb-toggle"></button>
+            <a href="${editUrl}" class="icon-btn" title="${escapeHtml(t('video_detail.clusters.edit_person'))}"
+               aria-label="${escapeHtml(t('video_detail.clusters.edit_person'))}">${ThumbnailApp.icon('pencil', 'icon-sm')}</a>
+            <button type="button" class="icon-btn cluster-more" aria-haspopup="menu" aria-expanded="false"
+                    title="${escapeHtml(t('index.card.more'))}" aria-label="${escapeHtml(t('index.card.more'))}">${ThumbnailApp.icon('more')}</button>
+        </div>
+    `;
 
-    // Store references for future cleanup
-    _scrollHandler = updateScrollState;
-    _resizeHandler = updateScrollState;
+    card.querySelector('.card-checkbox input').addEventListener('change', () => toggleSelection(cluster.cluster_index));
+    card.querySelector('.cluster-thumb-toggle').addEventListener('click', () => People.toggle(cluster));
 
-    // Initial check
-    updateScrollState();
+    const moreBtn = card.querySelector('.cluster-more');
+    moreBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        ThumbnailApp.showMenu(moreBtn, [
+            { label: t('video_detail.clusters.edit_person'), icon: 'pencil', onSelect: () => { window.location.href = editUrl; } },
+            { label: t('video_detail.clusters.delete_cluster'), icon: 'trash', danger: true, onSelect: () => showDeleteModal(cluster.cluster_index) }
+        ]);
+    });
 
-    // Update on scroll
-    grid.addEventListener('scroll', _scrollHandler);
+    renderThumbnailState(card);
+    return card;
+}
 
-    // Update on resize
-    window.addEventListener('resize', _resizeHandler);
+/**
+ * Show on a card whether its person is in the thumbnail, with its role.
+ * @param {HTMLElement} card - Cluster card
+ */
+function renderThumbnailState(card) {
+    const role = state.selectedPeople.findIndex(person => person.id === parseInt(card.dataset.clusterId));
+    const inThumbnail = role >= 0;
+    const badge = card.querySelector('.cluster-role-badge');
+    badge.classList.toggle('hidden', !inThumbnail);
+    badge.textContent = inThumbnail ? t('clusters.in_thumbnail', { role: People.roleLabel(role) }) : '';
+
+    const button = card.querySelector('.cluster-thumb-toggle');
+    button.classList.toggle('btn-soft', inThumbnail);
+    button.classList.toggle('btn-secondary', !inThumbnail);
+    button.title = inThumbnail ? t('clusters.remove_from_thumbnail') : '';
+    button.innerHTML = inThumbnail
+        ? `${ThumbnailApp.icon('check', 'icon-sm')}<span>${escapeHtml(t('clusters.in_thumbnail_short'))}</span>`
+        : `${ThumbnailApp.icon('plus', 'icon-sm')}<span>${escapeHtml(t('clusters.use_in_thumbnail'))}</span>`;
+}
+
+/**
+ * Mark on the cards which clusters are in the thumbnail, with their role.
+ */
+export function updatePeopleBadges() {
+    document.querySelectorAll('.cluster-card').forEach(renderThumbnailState);
 }
 
 // =========================================================================
-// CLUSTER SELECTION
+// CLUSTER SELECTION (merge / delete)
 // =========================================================================
 
 /**
@@ -197,131 +193,44 @@ export function toggleSelection(clusterIndex) {
 }
 
 /**
- * Toggle selection of all clusters.
+ * Clear the merge/delete selection.
  */
-export function toggleSelectAll() {
-    const selectAllCheckbox = document.getElementById('selectAllClusters');
-    if (selectAllCheckbox.checked) {
-        state.clusters.forEach(c => state.selectedClusters.add(c.cluster_index));
-    } else {
-        state.selectedClusters.clear();
-    }
+export function clearSelection() {
+    state.selectedClusters.clear();
     updateSelectionUI();
 }
 
 /**
- * Update selection UI elements.
+ * Update the checkboxes and the floating action bar.
  */
 export function updateSelectionUI() {
     const count = state.selectedClusters.size;
-    const countEl = document.getElementById('clusterSelectionCount');
-    const mergeBtn = document.getElementById('btnMergeClusters');
-    const deleteBtn = document.getElementById('btnDeleteSelectedClusters');
-    const selectAllCb = document.getElementById('selectAllClusters');
-
-    countEl.textContent = t('selection.selected_count', {count: count});
-    countEl.className = count > 0 ? 'selection-count has-selection' : 'selection-count';
-
-    mergeBtn.disabled = count < 2;
-    deleteBtn.disabled = count < 1;
-
-    selectAllCb.checked = count === state.clusters.length && count > 0;
-    selectAllCb.indeterminate = count > 0 && count < state.clusters.length;
+    document.getElementById('clusterBulkBar').classList.toggle('hidden', count === 0);
+    document.getElementById('clusterSelectionCount').textContent = t('clusters.selected', { count });
+    const merge = document.getElementById('btnMergeClusters');
+    merge.disabled = count < 2;
+    merge.title = count < 2 ? t('clusters.merge_needs_two') : '';
 
     document.querySelectorAll('.cluster-card').forEach(card => {
-        const idx = parseInt(card.dataset.clusterIndex);
-        const cb = card.querySelector('input[type="checkbox"]');
-        if (cb) cb.checked = state.selectedClusters.has(idx);
-        card.classList.toggle('cluster-selected', state.selectedClusters.has(idx));
+        const selected = state.selectedClusters.has(parseInt(card.dataset.clusterIndex));
+        card.querySelector('.card-checkbox input').checked = selected;
+        card.classList.toggle('cluster-selected', selected);
     });
-
-    // Also update reference UI
-    updateReferenceUI();
 }
 
 /**
- * Update the visual state of reference cluster selection.
+ * Switch the cluster view (Detected people tab or the people picker).
+ * The people chosen for the thumbnail are kept: they are stored by ID.
+ * @param {string} viewMode - 'person' or 'person_scene'
  */
-export function updateReferenceUI() {
-    const select = document.getElementById('clusterSelect');
-    const display = document.getElementById('selectedClusterDisplay');
-
-    document.querySelectorAll('.cluster-card').forEach(card => {
-        const idx = parseInt(card.dataset.clusterIndex);
-        const isReference = state.referenceClusterIndex === idx;
-        const refBtn = card.querySelector('.cluster-reference-btn');
-        const refBadge = card.querySelector('.cluster-reference-badge');
-
-        // Update card state
-        card.classList.toggle('cluster-reference', isReference);
-
-        // Update star button (filled vs outline)
-        if (refBtn) {
-            refBtn.innerHTML = isReference ? '&#9733;' : '&#9734;';  // ★ vs ☆
-            refBtn.classList.toggle('active', isReference);
-        }
-
-        // Update badge visibility
-        if (refBadge) {
-            refBadge.style.display = isReference ? 'block' : 'none';
-        }
+export function setViewType(viewMode) {
+    state.currentClusterType = viewMode;
+    document.querySelectorAll('#clusterViewToggle button').forEach(button => {
+        const active = button.dataset.view === viewMode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
     });
-
-    // Sync with hidden select
-    if (select) {
-        select.value = state.referenceClusterIndex !== null ? state.referenceClusterIndex : '';
-    }
-
-    // Update the display in generation form
-    if (display) {
-        if (state.referenceClusterIndex !== null) {
-            const cluster = state.clusters.find(c => c.cluster_index === state.referenceClusterIndex);
-            if (cluster) {
-                const displayName = getDisplayName(cluster);
-                display.innerHTML = `
-                    <div class="cluster-preview">
-                        <img src="/api/analysis/${state.videoId}/clusters/by-id/${cluster.id}/image"
-                             alt="${escapeHtml(displayName)}"
-                             onerror="this.src='/static/img/placeholder.svg'">
-                        <div class="cluster-preview-info">
-                            <span class="cluster-preview-name">${displayName}</span>
-                            <span class="cluster-preview-frames">${cluster.num_frames} ${t('video_detail.clusters.frames_other')}</span>
-                        </div>
-                    </div>
-                    <span class="cluster-preview-badge">&#9733; ${t('clusters.references_title')}</span>
-                `;
-                display.classList.add('has-selection');
-            }
-        } else {
-            display.innerHTML = `<span class="no-selection">&#9734; ${t('errors.select_cluster')}</span>`;
-            display.classList.remove('has-selection');
-        }
-    }
-}
-
-/**
- * Set a cluster as the reference for AI image generation.
- * Only one cluster can be the reference at a time.
- * @param {number} clusterIndex - Cluster index to set as reference
- */
-export function setAsReference(clusterIndex) {
-    // Toggle: if already selected, deselect; otherwise select
-    if (state.referenceClusterIndex === clusterIndex) {
-        state.referenceClusterIndex = null;
-    } else {
-        state.referenceClusterIndex = clusterIndex;
-    }
-    updateReferenceUI();
-}
-
-/**
- * Change cluster view type (person vs person_scene).
- */
-export function changeViewType() {
-    state.currentClusterType = document.getElementById('clusterViewType').value;
     clearClusterSelection();
-    clearReferenceCluster();
-    updateSelectionUI();
     load();
 }
 
@@ -332,13 +241,10 @@ export function changeViewType() {
 /**
  * Show delete confirmation modal for a single cluster.
  * @param {number} clusterIndex - Cluster index
- * @param {number} numFrames - Number of frames in cluster
  */
-export function showDeleteModal(clusterIndex, numFrames) {
+export function showDeleteModal(clusterIndex) {
     state.clusterToDelete = clusterIndex;
-    const name = getName(clusterIndex);
-    document.getElementById('deleteClusterMessage').textContent =
-        t('clusters.delete_message');
+    document.getElementById('deleteClusterMessage').textContent = t('clusters.delete_message');
     document.getElementById('deleteClusterModal').classList.add('visible');
 }
 
@@ -346,17 +252,10 @@ export function showDeleteModal(clusterIndex, numFrames) {
  * Show delete confirmation modal for selected clusters.
  */
 export function showDeleteSelectedModal() {
-    const count = state.selectedClusters.size;
-    if (count === 0) return;
-
-    const totalFrames = state.clusters
-        .filter(c => state.selectedClusters.has(c.cluster_index))
-        .reduce((sum, c) => sum + c.num_frames, 0);
+    if (state.selectedClusters.size === 0) return;
 
     state.clusterToDelete = Array.from(state.selectedClusters);
-    // M30: Use the correct delete message key (not merge_message)
-    document.getElementById('deleteClusterMessage').textContent =
-        t('clusters.delete_message');
+    document.getElementById('deleteClusterMessage').textContent = t('clusters.delete_message');
     document.getElementById('deleteClusterModal').classList.add('visible');
 }
 
@@ -381,10 +280,7 @@ export async function confirmDelete() {
             }
         }
 
-        ThumbnailApp.showToast(
-            t('clusters.delete_title'),
-            'success'
-        );
+        ThumbnailApp.showToast(t('api.messages.cluster_deleted'), 'success');
         closeModal('deleteClusterModal');
         load();
     } catch (error) {
@@ -417,8 +313,8 @@ export function showMergeModal() {
         option.className = 'merge-target-option';
         option.innerHTML = `
             <input type="radio" name="mergeTarget" value="${idx}" ${i === 0 ? 'checked' : ''}>
-            <img src="/api/analysis/${state.videoId}/clusters/by-id/${cluster?.id}/image" alt="${escapeHtml(name)}">
-            <span>${escapeHtml(name)} (${t('clusters.frame_count_other', {count: cluster?.num_frames || 0})})</span>
+            <img src="${ThumbnailApp.personFaceUrl(state.videoId, cluster)}" alt="${escapeHtml(name)}">
+            <span>${escapeHtml(name)} (${escapeHtml(t('clusters.frame_count', { count: cluster.num_frames }))})</span>
         `;
         optionsContainer.appendChild(option);
     });
@@ -452,7 +348,7 @@ export async function confirmMerge() {
             throw new Error(error.detail || t('errors.merge_clusters'));
         }
 
-        ThumbnailApp.showToast(t('clusters.merge_title'), 'success');
+        ThumbnailApp.showToast(t('api.messages.clusters_merged'), 'success');
         closeModal('mergeClustersModal');
         load();
     } catch (error) {
@@ -470,4 +366,22 @@ export async function confirmMerge() {
  */
 export function closeModal(modalId) {
     document.getElementById(modalId).classList.remove('visible');
+}
+
+/**
+ * Bind the toolbar, the action bar and the modals of the tab.
+ */
+export function setupControls() {
+    document.querySelectorAll('#clusterViewToggle button').forEach(button => {
+        button.addEventListener('click', () => {
+            if (button.dataset.view !== state.currentClusterType) setViewType(button.dataset.view);
+        });
+    });
+    setViewType(state.currentClusterType);
+
+    document.getElementById('btnMergeClusters').addEventListener('click', showMergeModal);
+    document.getElementById('btnDeleteSelectedClusters').addEventListener('click', showDeleteSelectedModal);
+    document.getElementById('btnClearClusterSelection').addEventListener('click', clearSelection);
+    document.getElementById('confirmDeleteBtn').addEventListener('click', confirmDelete);
+    document.getElementById('confirmMergeBtn').addEventListener('click', confirmMerge);
 }

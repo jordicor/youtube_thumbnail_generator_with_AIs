@@ -4,13 +4,14 @@ Content Generation API Routes
 Endpoints for AI-powered title and description generation.
 """
 
+import asyncio
 import orjson
 import logging
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from typing import Optional, Literal, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from database.db import (
     get_db,
@@ -25,6 +26,9 @@ from config import OUTPUT_DIR
 from utils import VideoOutput
 from transcription import transcribe_video
 from transcript_processing import get_formatted_transcript_with_timestamps, has_multiple_speakers
+from gransabio_prompt_generator import (
+    GranSabioError, TextProvider, require_text_model, resolve_text_model,
+)
 from services.content_generation_service import (
     # Title imports
     TitleGenerationRequest,
@@ -64,23 +68,26 @@ class GenerateTitlesRequest(BaseModel):
     custom_instructions: Optional[str] = Field(None)
     language: Literal["es", "en", "fr", "it", "de", "pt"] = "es"
     num_titles: int = Field(5, ge=1, le=10)
-    provider: Literal["anthropic", "openai", "google", "xai"] = "anthropic"
+    provider: TextProvider = "anthropic"
     model: Optional[str] = Field(None)
     # Thinking mode settings
     thinking_enabled: bool = False
     thinking_level: Literal["low", "medium", "high"] = "medium"
 
+    @model_validator(mode="after")
+    def _explicit_local_model(self):
+        resolve_text_model(self.provider, self.model)
+        return self
+
 
 class GenerateTitlesResponse(BaseModel):
     """Response from title generation."""
-    success: bool
     titles: List[str]
     provider: str
     model: str
     style: str
     language: str
     transcription_generated: bool = False
-    error: Optional[str] = None
 
 
 # ============================================================================
@@ -100,16 +107,20 @@ class GenerateDescriptionsRequest(BaseModel):
     include_hashtags: bool = False
     include_emojis: bool = False
     include_social_links: bool = False
-    provider: Literal["anthropic", "openai", "google", "xai"] = "anthropic"
+    provider: TextProvider = "anthropic"
     model: Optional[str] = Field(None)
     # Thinking mode settings
     thinking_enabled: bool = False
     thinking_level: Literal["low", "medium", "high"] = "medium"
 
+    @model_validator(mode="after")
+    def _explicit_local_model(self):
+        resolve_text_model(self.provider, self.model)
+        return self
+
 
 class GenerateDescriptionsResponse(BaseModel):
     """Response from description generation."""
-    success: bool
     descriptions: List[str]
     provider: str
     model: str
@@ -117,7 +128,6 @@ class GenerateDescriptionsResponse(BaseModel):
     language: str
     length: str
     transcription_generated: bool = False
-    error: Optional[str] = None
 
 
 # ============================================================================
@@ -267,7 +277,12 @@ def get_or_create_transcription(video_path: Path, video_filename: str) -> tuple[
 
 
 async def get_video_info(video_id: int) -> tuple[str, Path]:
-    """Get video title and path from database."""
+    """Get video title and path from database.
+
+    The video file is only required when it still has to be transcribed: a
+    transcribed video works while its file is unreachable (e.g. on a network
+    drive that is not connected).
+    """
     async with get_db() as db:
         query = "SELECT filename, filepath FROM videos WHERE id = ?"
         async with db.execute(query, (video_id,)) as cursor:
@@ -279,8 +294,10 @@ async def get_video_info(video_id: int) -> tuple[str, Path]:
     video_title = row[0]
     video_path = Path(row[1])
 
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail=t('api.errors.video_file_not_found'))
+    if not VideoOutput(video_path, Path(OUTPUT_DIR)).transcription_file.exists():
+        # A network drive can take seconds to answer: keep it off the event loop
+        if not await asyncio.to_thread(video_path.exists):
+            raise HTTPException(status_code=404, detail=t('api.errors.video_file_not_found'))
 
     return video_title, video_path
 
@@ -296,7 +313,10 @@ async def generate_video_titles(request: GenerateTitlesRequest):
     if request.style == "custom" and not request.custom_prompt:
         raise HTTPException(status_code=400, detail=t('api.errors.custom_prompt_required'))
 
-    # Model validation is handled by Gran Sabio LLM internally
+    try:
+        model_info = await require_text_model(request.provider, request.model)
+    except GranSabioError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
     video_title, video_path = await get_video_info(request.video_id)
 
@@ -317,20 +337,22 @@ async def generate_video_titles(request: GenerateTitlesRequest):
         model=request.model,  # None = Gran Sabio LLM uses default for provider
         thinking_enabled=request.thinking_enabled,
         thinking_level=request.thinking_level,
+        model_info=model_info,
     )
 
     # Run blocking API call in thread pool
-    result = await run_in_threadpool(generate_titles, gen_request)
+    try:
+        result = await run_in_threadpool(generate_titles, gen_request)
+    except GranSabioError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
     return GenerateTitlesResponse(
-        success=result.success,
         titles=result.titles,
         provider=result.provider,
         model=result.model,
         style=result.style,
         language=result.language,
         transcription_generated=was_generated,
-        error=result.error,
     )
 
 
@@ -442,7 +464,10 @@ async def generate_video_descriptions(request: GenerateDescriptionsRequest):
     if request.style == "custom" and not request.custom_prompt:
         raise HTTPException(status_code=400, detail=t('api.errors.custom_prompt_required'))
 
-    # Model validation is handled by Gran Sabio LLM internally
+    try:
+        model_info = await require_text_model(request.provider, request.model)
+    except GranSabioError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
     video_title, video_path = await get_video_info(request.video_id)
 
@@ -498,13 +523,16 @@ async def generate_video_descriptions(request: GenerateDescriptionsRequest):
         timestamped_transcript=timestamped_transcript,
         thinking_enabled=request.thinking_enabled,
         thinking_level=request.thinking_level,
+        model_info=model_info,
     )
 
     # Run blocking API call in thread pool
-    result = await run_in_threadpool(generate_descriptions, gen_request)
+    try:
+        result = await run_in_threadpool(generate_descriptions, gen_request)
+    except GranSabioError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
     return GenerateDescriptionsResponse(
-        success=result.success,
         descriptions=result.descriptions,
         provider=result.provider,
         model=result.model,
@@ -512,7 +540,6 @@ async def generate_video_descriptions(request: GenerateDescriptionsRequest):
         language=result.language,
         length=result.length,
         transcription_generated=was_generated,
-        error=result.error,
     )
 
 
@@ -638,12 +665,8 @@ async def check_transcription_exists(video_id: int):
         if not row:
             raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
-    video_path = Path(row[0])
-
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail=t('api.errors.video_file_not_found'))
-
-    output = VideoOutput(video_path, Path(OUTPUT_DIR))
+    # Only the output folder is read: the video file itself may be unreachable
+    output = VideoOutput(Path(row[0]), Path(OUTPUT_DIR))
     exists = output.transcription_file.exists()
 
     return {"exists": exists}
@@ -660,12 +683,8 @@ async def get_transcription(video_id: int):
         if not row:
             raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
-    video_path = Path(row[0])
-
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail=t('api.errors.video_file_not_found'))
-
-    output = VideoOutput(video_path, Path(OUTPUT_DIR))
+    # Only the output folder is read: the video file itself may be unreachable
+    output = VideoOutput(Path(row[0]), Path(OUTPUT_DIR))
     segments_file = output.output_dir / "transcription_segments.json"
 
     # Try structured segments file first
@@ -718,7 +737,10 @@ async def get_transcription(video_id: int):
 @router.get("/providers")
 async def get_providers():
     """Get available AI providers and their models."""
-    return get_available_providers()
+    try:
+        return await get_available_providers()
+    except GranSabioError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 @router.get("/styles/titles", response_model=List[StyleInfo])
@@ -757,7 +779,7 @@ async def get_gransabio_status():
     Returns connection status and available providers.
     """
     from gransabio_prompt_generator import check_gransabio_status
-    return check_gransabio_status()
+    return await check_gransabio_status()
 
 
 @router.get("/gransabio/models")
@@ -768,4 +790,7 @@ async def get_gransabio_models():
     Returns dict mapping provider names to model lists.
     """
     from gransabio_prompt_generator import get_available_models
-    return get_available_models()
+    try:
+        return await get_available_models()
+    except GranSabioError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e

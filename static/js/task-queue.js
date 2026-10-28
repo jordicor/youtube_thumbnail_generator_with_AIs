@@ -277,7 +277,7 @@ class TaskQueueManager {
 
         // Show toast notification (only for generation, analysis handled by index.html)
         if (window.showToast && task.type === 'generation') {
-            const message = t('task_queue.generation_complete', { name: task.video_name });
+            const message = t('task_queue.generation_complete', { name: ThumbnailApp.formatVideoName(task.video_name) });
             showToast(message, 'success');
         }
     }
@@ -482,7 +482,7 @@ class TaskQueueManager {
                     <div class="task-item-info">
                         <span class="task-item-icon ${task.type} ${isActive ? '' : 'pending'}">${icon}</span>
                         <div class="task-item-details">
-                            <a href="/video/${task.video_id}" class="task-item-link" onclick="window.TaskQueue.hideModal()" title="${escapeHtml(task.video_name)}">${escapeHtml(task.video_name)}</a>
+                            <a href="/video/${task.video_id}" class="task-item-link" onclick="window.TaskQueue.hideModal()" title="${escapeHtml(ThumbnailApp.formatVideoName(task.video_name))}">${escapeHtml(ThumbnailApp.formatVideoName(task.video_name))}</a>
                             <div class="task-item-type">${typeLabel}</div>
                         </div>
                     </div>
