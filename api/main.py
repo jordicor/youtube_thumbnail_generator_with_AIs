@@ -221,7 +221,7 @@ app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Main page - video list."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 @app.get("/video/{video_id}", response_class=HTMLResponse)
@@ -231,8 +231,8 @@ async def video_detail(request: Request, video_id: int):
     _, face_swap_missing = face_swap_available()
     _, face_restoration_missing = face_restoration_available()
     return templates.TemplateResponse(
-        "video_detail.html",
-        {"request": request, "video_id": video_id, "face_swap_missing": face_swap_missing,
+        request=request, name="video_detail.html",
+        context={"video_id": video_id, "face_swap_missing": face_swap_missing,
          "face_restoration_missing": face_restoration_missing}
     )
 
@@ -245,9 +245,8 @@ async def new_person(
 ):
     """Person editor, creating a person of a view."""
     return templates.TemplateResponse(
-        "person_editor.html",
-        {
-            "request": request,
+        request=request, name="person_editor.html",
+        context={
             "video_id": video_id,
             "person_id": None,
             "view_mode": view_mode,
@@ -260,9 +259,8 @@ async def new_person(
 async def edit_person(request: Request, video_id: int, person_id: int):
     """Person editor: frames, references, name and notes of a person."""
     return templates.TemplateResponse(
-        "person_editor.html",
-        {
-            "request": request,
+        request=request, name="person_editor.html",
+        context={
             "video_id": video_id,
             "person_id": person_id,
             "view_mode": None,

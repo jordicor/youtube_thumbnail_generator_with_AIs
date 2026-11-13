@@ -116,7 +116,7 @@ async def test_download_names_keep_any_character(client, test_db):
 
 
 def test_removed_endpoints_are_gone(app):
-    paths = {route.path for route in app.routes}
+    paths = app.openapi()["paths"]
 
     # A GET that registered videos and an upload that overwrote files
     assert "/api/videos/scan" not in paths

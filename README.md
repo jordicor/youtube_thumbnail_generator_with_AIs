@@ -172,6 +172,21 @@ Windows 10/11 is the main target; Linux and macOS should work.
 
 ### Install
 
+**Windows: use the guided installer.** Download or clone this repository, open a
+PowerShell terminal in its folder, and run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+It explains each choice, creates separate Python environments, downloads the latest
+GranSabio, sets up Redis through WSL or uses your existing server, and checks the result.
+Then double-click **Start Thumbnail Generator.cmd**. Read the
+[Windows installation guide](INSTALL_WINDOWS.md) for explanations, troubleshooting,
+updates, and **non-interactive commands for AI agents**, including read-only JSON plans.
+
+Manual installation (including other operating systems):
+
 ```bash
 git clone https://github.com/jordicor/youtube_thumbnail_generator_with_AIs.git
 cd youtube_thumbnail_generator_with_AIs
@@ -180,7 +195,9 @@ python -m venv venv
 venv\Scripts\activate            # Windows
 # source venv/bin/activate       # Linux/macOS
 
-pip install -r requirements.txt
+pip install -r requirements-cpu.txt
+# NVIDIA: install the CUDA PyTorch build first, then requirements-cuda.txt.
+# Then replace InsightFace's CPU ONNX runtime; see INSTALL_WINDOWS.md.
 
 # Local models for choosing face and body photos
 python scripts/download_portrait_model.py
@@ -231,16 +248,18 @@ Open http://localhost:8057, add your video folder, and analyze. The interface is
 
 ## Command line and AI agents
 
-The same pipeline runs without the web interface or Redis (Gran Sabio is still needed for the ideas):
+The `process` command generates thumbnails directly from video files without the web interface or Redis. It reuses the analysis and generation stages, but does not register videos or results in the web database. Gran Sabio is still needed for the ideas.
 
 ```bash
-python main.py                                   # every video in VIDEOS_DIR
-python main.py --single "path/to/video.mp4"      # one video
-python main.py --dry-run                         # see what would be processed
-python main.py --num-images 5 --image-provider comfyui
+python main.py process                           # every video in VIDEOS_DIR
+python main.py process --single "path/to/video.mp4" --output "path/to/results"
+python main.py process --dry-run                  # preview without writing files
+python main.py process --num-images 5 --image-provider comfyui
 ```
 
-Inspection and generation commands print JSON with absolute file paths, so an AI agent can look at the frames and thumbnails itself:
+`--output` controls all generated files, caches, and the pipeline log. Completed videos are skipped when their metadata and all thumbnail files are present. Use `--force-thumbnails` to generate new images while reusing analysis and ideas, or `--force-all` to rerun every stage. Processing stops at the first failure and exits with a nonzero status. Run `python main.py process --help` for the remaining options; a subcommand is always required.
+
+The commands below operate on videos already registered in the web database. `generate` runs the web's generation service in the CLI process, including its job ownership checks. With `--json`, these commands print JSON with absolute file paths so an AI agent can inspect the frames and thumbnails:
 
 ```bash
 python main.py list-videos --json

@@ -1,0 +1,4 @@
+# NVIDIA analysis. Install the CUDA PyTorch build first; see INSTALL_WINDOWS.md.
+-r requirements.txt
+# PyPI builds from 1.27 use CUDA 13; this profile uses PyTorch CUDA 12.8.
+onnxruntime-gpu>=1.21.0,<1.27.0

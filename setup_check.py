@@ -1,172 +1,178 @@
-#!/usr/bin/env python3
-"""
-YouTube Thumbnail Generator - Setup Checker
-============================================
-Verifies that all dependencies are correctly installed.
-"""
-
-import sys
+"""Check installation without processing videos or calling AI providers."""
+import argparse
+from contextlib import redirect_stdout
+import hashlib
+import importlib
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import urllib.request
 
-def check_import(module_name, package_name=None):
-    """Try to import a module and report status"""
-    package_name = package_name or module_name
-    try:
-        __import__(module_name)
-        print(f"  [OK] {package_name}")
-        return True
-    except ImportError as e:
-        print(f"  [X]  {package_name} - Not installed")
-        return False
+ROOT = Path(__file__).resolve().parent
 
-def check_ffmpeg():
-    """Check if FFmpeg is available"""
-    import subprocess
-    try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
-        if result.returncode == 0:
-            print("  [OK] FFmpeg")
-            return True
-    except Exception:
-        pass
-    print("  [X]  FFmpeg - Not found in PATH")
-    return False
 
-def check_cuda():
-    """Check CUDA availability for GPU acceleration"""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)
-            print(f"  [OK] CUDA - {gpu_name}")
-            return True
-        else:
-            print("  [!]  CUDA - Not available (will use CPU)")
-            return False
-    except ImportError:
-        # Check via onnxruntime
+def inspect_installation(args):
+    checks = []
+
+    def record(name, operation):
         try:
-            import onnxruntime
-            providers = onnxruntime.get_available_providers()
-            if 'CUDAExecutionProvider' in providers:
-                print("  [OK] CUDA (via ONNX Runtime)")
-                return True
-            else:
-                print("  [!]  CUDA - Not available (will use CPU)")
-                return False
-        except ImportError:
-            print("  [?]  CUDA - Cannot verify (torch/onnxruntime not installed)")
-            return False
+            checks.append({"name": name, "status": "ok", "detail": operation() or "Available."})
+        except Exception as exc:
+            checks.append({"name": name, "status": "error", "detail": str(exc)})
 
-def check_api_keys():
-    """Check if API keys are configured"""
-    import os
+    def require(condition, explanation):
+        if not condition:
+            raise ValueError(explanation)
 
-    keys = {
-        'GEMINI_API_KEY': 'Gemini (Nano Banana Pro)',
-        'ANTHROPIC_API_KEY': 'Claude (Anthropic)',
-        'OPENAI_API_KEY': 'OpenAI (GPT/DALL-E)',
-        'ELEVENLABS_API_KEY': 'ElevenLabs (Transcription)',
-    }
+    record("Python", lambda: require(sys.version_info[:2] == (3, 11) and sys.maxsize > 2**32,
+                                      "Use 64-bit Python 3.11 and rerun installation."))
 
-    print("\nAPI Keys:")
+    def packages():
+        for module in ("cv2", "numpy", "PIL", "scenedetect", "insightface", "mediapipe", "torchvision",
+                       "whisper", "fastapi", "uvicorn", "arq", "redis", "aiosqlite", "orjson", "psutil",
+                       "anthropic", "openai", "google.genai", "replicate", "ai_json_cleanroom", "gfpgan", "client"):
+            importlib.import_module(module)
+        importlib.import_module("api.main")
+        importlib.import_module("workers.main")
+        return "Required packages and actual web/worker entry points import successfully."
 
-    # Also check config.py
-    try:
-        from config import GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY
-        config_keys = {
-            'GEMINI_API_KEY': GEMINI_API_KEY,
-            'ANTHROPIC_API_KEY': ANTHROPIC_API_KEY,
-            'OPENAI_API_KEY': OPENAI_API_KEY,
-            'ELEVENLABS_API_KEY': ELEVENLABS_API_KEY,
-        }
-    except ImportError:
-        config_keys = {}
+    record("Application packages", packages)
 
-    configured = 0
-    for key, name in keys.items():
-        env_val = os.getenv(key, '')
-        config_val = config_keys.get(key, '')
+    def ffmpeg():
+        for name in ("ffmpeg", "ffprobe"):
+            require(shutil.which(name), f"{name} is missing. Run install.ps1 -InstallPrerequisites.")
+            subprocess.run([name, "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=True, timeout=10)
+        return "FFmpeg and FFprobe both run."
 
-        if env_val or config_val:
-            print(f"  [OK] {name}")
-            configured += 1
+    record("Video tools", ffmpeg)
+
+    def hardware():
+        import numpy as np
+        import torch
+        import onnxruntime as ort
+        from onnx import TensorProto, helper
+        if args.hardware == "cuda":
+            require(torch.cuda.is_available(), "NVIDIA acceleration is unavailable in PyTorch. Check the driver and CUDA build; setup does not silently switch to CPU.")
+            torch.ones(1, device="cuda").add_(1).cpu()
+            provider = "CUDAExecutionProvider"
         else:
-            print(f"  [!]  {name} - Not configured")
+            provider = "CPUExecutionProvider"
+        graph = helper.make_graph([helper.make_node("Identity", ["x"], ["y"])], "setup_probe",
+                                  [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+                                  [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=8)
+        session = ort.InferenceSession(model.SerializeToString(), providers=[provider])
+        require(provider in session.get_providers(), "ONNX could not load the selected hardware provider. Check CUDA/cuDNN compatibility.")
+        result = session.run(None, {"x": np.array([2], dtype=np.float32)})
+        require(result[0][0] == 2, "The ONNX execution check returned an unexpected result.")
+        return f"A small real ONNX operation passed on {provider}; PyTorch is usable."
 
-    return configured > 0
+    record("Analysis hardware", hardware)
 
-def check_reference_face():
-    """Info about the clustering-based workflow (reference_face no longer needed)"""
-    print("  [OK] Face detection: Automatic clustering (no reference image needed)")
-    print("       Faces are automatically grouped by person from video frames")
-    return True
+    def models():
+        from services.portrait_quality import MODEL_PATH, MODEL_SHA256, SEGMENTER_PATH, SEGMENTER_SHA256
+        from services.body_references import MODEL_PATH as BODY, MODEL_SHA256 as BODY_SHA
+        from services.body_references import SEGMENTATION_PATH, SEGMENTATION_SHA256
+        for path, expected in ((MODEL_PATH, MODEL_SHA256), (SEGMENTER_PATH, SEGMENTER_SHA256),
+                               (BODY, BODY_SHA), (SEGMENTATION_PATH, SEGMENTATION_SHA256)):
+            require(path.is_file(), f"Missing {path.name}. Run install.py install --non-interactive --models core.")
+            require(hashlib.sha256(path.read_bytes()).hexdigest() == expected, f"{path.name} has the wrong checksum; inspect it before downloading again.")
+        return "Required face/body selection models match their published checksums."
+
+    if args.models == "none":
+        checks.append({"name": "Analysis models", "status": "action", "detail": "Downloads were deferred. Install core models before analyzing a video."})
+    else:
+        record("Analysis models", models)
+    if args.models == "all":
+        def face_swap_models():
+            from scripts.download_face_swap_models import MODELS, _sha256_of
+            for spec in MODELS.values():
+                require(spec.target.is_file(), f"Missing optional model: {spec.name}.")
+                require(_sha256_of(spec.target) == spec.expected_sha256, f"Wrong checksum for {spec.name}.")
+            return "All optional face replacement/restoration models match their checksums."
+        record("Face replacement models", face_swap_models)
+
+    from dotenv import dotenv_values
+    env = {**dotenv_values(ROOT / ".env"), **os.environ}
+    gran_env = dotenv_values(args.gransabio_dir / ".env") if args.gransabio_dir else {}
+
+    def configured(value):
+        return bool(value) and "your-" not in value and "your_" not in value
+
+    missing = []
+    if not configured(gran_env.get("ANTHROPIC_API_KEY")):
+        missing.append("Default Claude ideas: add ANTHROPIC_API_KEY to GranSabio's .env, or select your configured text engine in Settings.")
+    image_key = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY", "poe": "POE_API_KEY",
+                 "replicate": "REPLICATE_API_TOKEN"}.get(env.get("IMAGE_PROVIDER", "gemini"))
+    if image_key and not configured(env.get(image_key)):
+        missing.append(f"Images: add {image_key} to this app's .env, or select your configured image engine in Settings.")
+    if env.get("USE_LOCAL_WHISPER", "false").lower() != "true" and not configured(env.get("ELEVENLABS_API_KEY")):
+        missing.append("Transcription: set USE_LOCAL_WHISPER=true for local transcription, or configure ElevenLabs.")
+    checks.append({"name": "AI configuration", "status": "action" if missing else "ok",
+                   "detail": " ".join(missing) if missing else "Default cloud credentials are present; validity and billing were not tested."})
+
+    if args.services:
+        def http_health(url, expected):
+            try:
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    require(json.load(response).get("status") == expected, "Unhealthy service.")
+            except Exception:
+                raise ValueError("Service did not pass its health check. Start it and check its local log.") from None
+
+        record("GranSabio service", lambda: http_health(env.get("GRANSABIO_LLM_URL", "http://127.0.0.1:8000").rstrip("/") + "/health", "healthy"))
+        def web():
+            url = f"http://127.0.0.1:{args.web_port}"
+            http_health(url + "/health", "ok")
+            with urllib.request.urlopen(url, timeout=5) as response:
+                require(response.status == 200 and "text/html" in response.headers.get("Content-Type", ""),
+                        "The web home page did not render successfully.")
+            return "The health endpoint responds and the home page renders."
+
+        record("Web service", web)
+
+        def queue():
+            import redis
+            from services.queue_health import WORKER_HEALTH_KEY
+            try:
+                with redis.Redis.from_url(env.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
+                                          socket_connect_timeout=3, socket_timeout=3) as client:
+                    client.ping()
+                    require(client.exists(WORKER_HEALTH_KEY), "The worker has no current heartbeat. Check .install/worker.log.")
+            except redis.RedisError:
+                raise ValueError("Redis is unreachable. Start it and check REDIS_URL locally.") from None
+            return "Redis responds and a worker has a current heartbeat."
+
+        record("Job queue and worker", queue)
+    failed = any(item["status"] == "error" for item in checks)
+    pending = any(item["status"] == "action" for item in checks)
+    return {"checks": checks, "installation_ok": not failed, "configuration_pending": pending,
+            "paid_generation_tested": False, "exit_code": 1 if failed else 3 if pending else 0}
+
 
 def main():
-    print("=" * 60)
-    print("YouTube Thumbnail Generator - Setup Check")
-    print("=" * 60)
-
-    all_ok = True
-
-    # Core dependencies
-    print("\nCore Dependencies:")
-    all_ok &= check_import('cv2', 'OpenCV')
-    all_ok &= check_import('numpy', 'NumPy')
-    all_ok &= check_import('PIL', 'Pillow')
-    all_ok &= check_import('requests', 'Requests')
-
-    # Scene detection
-    print("\nScene Detection:")
-    all_ok &= check_import('scenedetect', 'PySceneDetect')
-
-    # Face detection
-    print("\nFace Detection:")
-    all_ok &= check_import('insightface', 'InsightFace')
-
-    # Transcription
-    print("\nTranscription:")
-    check_import('whisper', 'OpenAI Whisper (local)')
-
-    # LLM APIs
-    print("\nLLM APIs:")
-    check_import('anthropic', 'Anthropic (Claude)')
-    check_import('openai', 'OpenAI')
-    check_import('google.generativeai', 'Google Generative AI')
-
-    # Image generation
-    print("\nImage Generation:")
-    check_import('replicate', 'Replicate')
-
-    # System tools
-    print("\nSystem Tools:")
-    all_ok &= check_ffmpeg()
-
-    # GPU
-    print("\nGPU Acceleration:")
-    check_cuda()
-
-    # API Keys
-    check_api_keys()
-
-    # Reference face
-    print("\nConfiguration:")
-    check_reference_face()
-
-    # Summary
-    print("\n" + "=" * 60)
-    if all_ok:
-        print("All core dependencies OK!")
-        print("\nTo start processing videos:")
-        print("  python main.py --dry-run    # Preview what will be processed")
-        print("  python main.py              # Process all videos")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--hardware", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--models", choices=("core", "all", "none"), default="core")
+    parser.add_argument("--gransabio-dir", type=Path)
+    parser.add_argument("--web-port", type=int, default=8057)
+    parser.add_argument("--services", action="store_true")
+    args = parser.parse_args()
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env", override=False)
+    with redirect_stdout(sys.stderr):
+        result = inspect_installation(args)
+    if args.json:
+        print(json.dumps(result, indent=2))
     else:
-        print("Some dependencies are missing.")
-        print("\nInstall missing packages with:")
-        print("  pip install -r requirements.txt")
-    print("=" * 60)
+        for item in result["checks"]:
+            print(f"[{item['status'].upper()}] {item['name']}: {item['detail']}")
+    return result["exit_code"]
 
-    return 0 if all_ok else 1
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

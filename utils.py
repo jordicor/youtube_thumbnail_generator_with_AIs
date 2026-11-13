@@ -14,11 +14,11 @@ import orjson
 
 import config
 
-# Configure stdout encoding for Windows
+# Configure Windows streams in place without taking ownership of their buffers.
 if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='replace')
 
 
 # =============================================================================
@@ -92,53 +92,6 @@ def success(self, message, *args, **kwargs):
         self._log(logging.SUCCESS, message, args, **kwargs)
 
 logging.Logger.success = success
-
-
-# =============================================================================
-# PROGRESS TRACKING
-# =============================================================================
-
-class ProgressTracker:
-    """Track progress of batch operations"""
-
-    def __init__(self, total: int, description: str = "Processing"):
-        self.total = total
-        self.current = 0
-        self.description = description
-        self.start_time = datetime.now()
-        self.successes = 0
-        self.failures = 0
-
-    def update(self, success: bool = True, message: str = ""):
-        """Update progress counter"""
-        self.current += 1
-        if success:
-            self.successes += 1
-        else:
-            self.failures += 1
-
-        pct = (self.current / self.total) * 100 if self.total > 0 else 0
-        elapsed = datetime.now() - self.start_time
-
-        status = f"[{self.current}/{self.total}] ({pct:.1f}%)"
-        if message:
-            status += f" {message}"
-
-        print(f"\n{'='*60}")
-        print(f"{status}")
-        print(f"Elapsed: {elapsed} | Success: {self.successes} | Failed: {self.failures}")
-        print(f"{'='*60}")
-
-    def summary(self) -> dict:
-        """Get final summary"""
-        elapsed = datetime.now() - self.start_time
-        return {
-            "total": self.total,
-            "processed": self.current,
-            "successes": self.successes,
-            "failures": self.failures,
-            "elapsed": str(elapsed),
-        }
 
 
 # =============================================================================
@@ -408,11 +361,12 @@ class VideoOutput:
         return {}
 
     def is_complete(self) -> bool:
-        """Check if processing is already complete"""
-        thumbnails_dir = self.output_dir / "thumbnails"
-        if not thumbnails_dir.exists():
-            return False
-        return any(thumbnails_dir.glob("*_p*_v*.png"))
+        """Require a successful run's metadata and all its thumbnail files."""
+        metadata = self.load_metadata()
+        paths = metadata.get("thumbnail_paths", [])
+        return bool(paths) and len(paths) == metadata.get("total_thumbnails") and all(
+            Path(path).is_file() for path in paths
+        )
 
 
 class ReferenceImageError(ValueError):

@@ -4,11 +4,10 @@ YouTube Thumbnail Generator - Main Pipeline & CLI
 =================================================
 Single entry point for batch processing AND AI-agent-friendly inspection.
 
-Usage (batch processing — default when no subcommand is given):
-    python main.py                      # Process all videos in configured folder
-    python main.py --source /path/to/videos
-    python main.py --single video.mp4   # Process single video
-    python main.py --dry-run            # Show what would be processed
+Usage (file processing):
+    python main.py process --source /path/to/videos
+    python main.py process --single video.mp4 --output /path/to/output
+    python main.py process --dry-run
 
 Usage (subcommands for AI agents and scripting — all support --json):
     python main.py list-videos --json
@@ -20,45 +19,39 @@ Usage (subcommands for AI agents and scripting — all support --json):
 """
 
 import argparse
+import base64
+import logging
+import shutil
 import json
 import asyncio
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
-from datetime import datetime
 from typing import Optional
 
 import orjson
 
-# Add project directory to path
-PROJECT_DIR = Path(__file__).parent
-sys.path.insert(0, str(PROJECT_DIR))
+import config
 
 from config import (
     VIDEOS_DIR,
     OUTPUT_DIR,
     VIDEO_EXTENSIONS,
     EXCLUDE_FOLDERS,
-    LOG_FILE,
     LOG_LEVEL,
     NUM_PROMPT_VARIATIONS,
-    NUM_IMAGE_VARIATIONS,
-    GEMINI_IMAGE_MODEL,
     GEMINI_MODELS,
     IMAGE_PROVIDER,
-    OPENAI_IMAGE_MODEL,
     OPENAI_MODELS,
-    POE_IMAGE_MODEL,
     POE_MODELS,
 )
 from utils import (
     setup_logger,
     find_videos,
     VideoOutput,
-    ProgressTracker,
     get_video_info,
-    ensure_dir,
     resolve_output_path,
+    load_reference_images,
 )
 # NOTE: heavy imports (scene_detection, face_extraction, transcription,
 # prompt_generation, image_generation, gransabio_prompt_generator) are
@@ -66,417 +59,102 @@ from utils import (
 # should not pay the import cost of insightface/onnx/cv2.
 
 # Setup main logger
-logger = setup_logger("main", LOG_FILE, LOG_LEVEL)
+logger = setup_logger("main", level=LOG_LEVEL)
 
 
 # =============================================================================
-# HELPERS
+# FILE PROCESSING
 # =============================================================================
 
-def _frames_to_base64(frames: list[Path]) -> list[str]:
-    """Convert a list of frame paths to base64-encoded JPEGs (max 1024px).
 
-    Used by the CLI to send reference frames to Gran Sabio LLM for vision
-    analysis. Mirrors the conversion done by the web service.
-    """
-    import base64
-    import io
-    from PIL import Image as _PILImage
-
-    encoded = []
-    for path in frames:
-        if not path or not path.exists():
-            continue
-        try:
-            with _PILImage.open(path) as img:
-                if max(img.size) > 1024:
-                    img.thumbnail((1024, 1024))
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=85)
-                encoded.append(base64.b64encode(buf.getvalue()).decode("utf-8"))
-        except Exception as e:
-            logger.warning(f"Could not encode frame {path.name}: {e}")
-    return encoded
-
-
-# =============================================================================
-# PIPELINE STEPS
-# =============================================================================
-
-def process_single_video(
-    video_path: Path,
-    skip_transcription: bool = False,
-    use_composite: bool = False,
-    force: bool = False,  # Deprecated, kept for compatibility
-    num_images: int = None,
-    use_pro_model: bool = False,
-    force_scenes: bool = False,
-    force_faces: bool = False,
-    force_transcription: bool = False,
-    force_prompts: bool = False,
-    force_thumbnails: bool = False,
-    image_provider: str = None,
-    gemini_model: str = None,
-    openai_model: str = None,
-    poe_model: str = None,
-    comfyui_workflow: str = None,
-    comfyui_config: dict = None,
-    comfyui_profile: dict = None,
-    allow_provider_fallback: bool = False
-) -> bool:
-    """
-    Process a single video through the entire pipeline.
-
-    Steps:
-    1. Scene detection & frame extraction
-    2. Face detection & best frame selection
-    3. Audio transcription
-    4. Thumbnail prompt generation
-    5. Thumbnail image generation
-
-    Args:
-        video_path: Path to the video file
-        skip_transcription: Skip the transcription step
-        use_composite: Use composite thumbnail (real face + AI background)
-        force: Force reprocessing even if already done
-
-    Returns:
-        True if successful, False otherwise
-    """
-
-    print()  # Empty line before header
-    logger.info("=" * 60)
-    logger.info(f"Processing: {video_path.name}")
-    logger.info("=" * 60)
-
-    # Setup output structure
-    output = VideoOutput(video_path, OUTPUT_DIR)
-
-    # Check if already complete (skip only if NO force flags are set)
-    any_force = force or force_scenes or force_faces or force_transcription or force_prompts or force_thumbnails
-    if not any_force and output.is_complete():
-        logger.info("Video already processed, skipping (use --force-* flags to reprocess)")
-        return True
+def _process_video(video_path: Path, output: VideoOutput, args,
+                   comfyui_config=None, comfyui_profile=None) -> None:
+    """Process one file using the shared analysis, prompt, and image stages."""
+    # Imports stay here so inspection and dry runs do not load GPU libraries.
+    from scene_detection import process_video_scenes
+    from face_extraction import process_faces
+    from transcription import read_transcription, transcribe_video
+    from prompt_generation import generate_thumbnail_images
+    from image_generation import generate_thumbnails_from_images
+    from gransabio_prompt_generator import PromptGenerationConfig
 
     output.setup()
-
-    # Get video info
+    # A failed rerun must not retain the previous run's completion record.
+    output.metadata_file.unlink(missing_ok=True)
     info = get_video_info(video_path)
-    logger.info(f"Video: {info['duration']:.1f}s, {info['width']}x{info['height']}, {info['size_mb']:.1f}MB")
+    logger.info(f"Video: {video_path.name}, {info['duration']:.1f}s, {info['width']}x{info['height']}")
 
-    try:
-        if (image_provider or IMAGE_PROVIDER) == "comfyui":
-            if allow_provider_fallback or use_composite:
-                raise ValueError("ComfyUI does not allow provider fallback or composite generation")
-            from services.comfyui_service import prepare
-            comfyui_profile, comfyui_config = prepare(comfyui_workflow, comfyui_config, comfyui_profile)
-            comfyui_workflow = comfyui_profile["id"]
+    if args.force_scenes:
+        output.scenes_file.unlink(missing_ok=True)
+        if not output.frames_dir.resolve().is_relative_to(output.output_dir.resolve()):
+            raise ValueError("The frames directory is outside this video's output directory")
+        shutil.rmtree(output.frames_dir)
+        output.frames_dir.mkdir()
+    # Replacing the frames also invalidates the faces extracted from them.
+    if args.force_scenes or args.force_faces:
+        output.faces_file.unlink(missing_ok=True)
 
-        # Deferred imports: heavy pipeline modules (insightface, cv2, onnx).
-        from scene_detection import process_video_scenes
-        from face_extraction import process_faces
-        from transcription import read_transcription, transcribe_video
-        from prompt_generation import generate_thumbnail_images
-        from image_generation import generate_thumbnails_from_images
-        from gransabio_prompt_generator import PromptGenerationConfig
+    scene_result, frames = process_video_scenes(video_path, output)
+    if not scene_result or not frames:
+        raise RuntimeError(f"No frames could be extracted from {video_path}")
+    face_result = process_faces(frames, output)
+    if face_result and face_result.all_faces:
+        face_by_path = {}
+        for face in face_result.all_faces:
+            if face.frame_path not in face_by_path or face.quality_score > face_by_path[face.frame_path].quality_score:
+                face_by_path[face.frame_path] = face
+        best = sorted(face_by_path.values(), key=lambda face: face.quality_score, reverse=True)
+        reference_frames = [Path(face.frame_path) for face in best[:8]]
+    else:
+        # A video without people can still supply setting references.
+        reference_frames = frames[:8]
 
-        # Step 1: Scene Detection
-        logger.info("\n[Step 1/5] Scene Detection...")
-        if force_scenes:
-            logger.info("Force mode: Deleting cached scene data...")
-            output.scenes_file.unlink(missing_ok=True)
-            import shutil
-            shutil.rmtree(output.frames_dir, ignore_errors=True)
-            output.frames_dir.mkdir(exist_ok=True)
+    if args.skip_transcription:
+        transcription = read_transcription(output)
+    else:
+        if args.force_transcription:
+            output.transcription_file.unlink(missing_ok=True)
+        transcription = transcribe_video(video_path, output)
 
-        scene_result, extracted_frames = process_video_scenes(video_path, output)
-
-        if not scene_result:
-            logger.error("Scene detection failed")
-            return False
-
-        logger.success(f"Extracted {len(extracted_frames)} frames from {scene_result.total_scenes} scenes")
-
-        # Step 2: Face Extraction
-        logger.info("\n[Step 2/5] Face Detection & Selection...")
-        if force_faces:
-            logger.info("Force mode: Deleting cached face data...")
-            output.faces_file.unlink(missing_ok=True)
-
-        face_result = process_faces(extracted_frames, output)
-
-        # For CLI mode (without cluster selection), use frames with detected faces
-        # sorted by quality as reference images for the AI
-        if face_result and face_result.all_faces:
-            # Get unique frame paths sorted by quality score
-            face_by_path = {}
-            for face in face_result.all_faces:
-                path = face.frame_path
-                if path not in face_by_path or face.quality_score > face_by_path[path].quality_score:
-                    face_by_path[path] = face
-
-            sorted_faces = sorted(face_by_path.values(), key=lambda f: f.quality_score, reverse=True)
-            reference_frames = [Path(f.frame_path) for f in sorted_faces[:8]]
-        else:
-            logger.warning("Face detection returned no results")
-            reference_frames = extracted_frames[:8]  # Fallback to first few frames
-
-        logger.success(f"Selected {len(reference_frames)} reference frames for image generation")
-
-        # Step 3: Transcription
-        transcription = ""
-        if not skip_transcription:
-            logger.info("\n[Step 3/5] Transcription...")
-            if force_transcription:
-                logger.info("Force mode: Deleting cached transcription...")
-                output.transcription_file.unlink(missing_ok=True)
-
-            transcription = transcribe_video(video_path, output)
-
-            if not transcription:
-                logger.warning("Nobody speaks in the video: the prompt will use its title")
-                transcription = video_path.stem
-        else:
-            logger.info("\n[Step 3/5] Transcription... SKIPPED")
-            # Use the transcription the video already has, if any
-            transcription = read_transcription(output) or video_path.stem
-
-        # Use config defaults or override
-        n_images = num_images if num_images else NUM_PROMPT_VARIATIONS
-
-        # Select Gemini model
-        # Priority: explicit --gemini-model > --image-pro > default
-        selected_gemini_model = gemini_model
-        if not selected_gemini_model and use_pro_model:
-            selected_gemini_model = "gemini-3-pro-image"
-        if selected_gemini_model == "gemini-3-pro-image":
-            logger.info("Using Nano Banana Pro (gemini-3-pro-image)")
-
-        # Log image provider and model
-        effective_provider = image_provider or IMAGE_PROVIDER
-        if effective_provider == "openai":
-            effective_openai_model = openai_model or OPENAI_IMAGE_MODEL
-            logger.info(f"Using OpenAI ({effective_openai_model})")
-        elif effective_provider == "gemini":
-            logger.info(f"Using Gemini ({selected_gemini_model or GEMINI_IMAGE_MODEL})")
-
-        # Step 4: Prompt Generation (via Gran Sabio LLM)
-        logger.info(f"\n[Step 4/5] Generating {n_images} Thumbnail Concepts via Gran Sabio LLM...")
-        if force_prompts:
-            logger.info("Force mode: Deleting cached prompts...")
-            import shutil
-            prompts_dir = output.output_dir / "prompts"
-            shutil.rmtree(prompts_dir, ignore_errors=True)
-
-        # Convert reference frames to base64 so the LLM can see who's in the video
-        ref_images_b64 = _frames_to_base64(reference_frames) if reference_frames else None
-
-        prompt_config = PromptGenerationConfig(provider="anthropic")
-
-        thumbnail_images = generate_thumbnail_images(
-            transcription=transcription,
-            video_title=video_path.stem,
-            output=output,
-            num_images=n_images,
-            prompt_config=prompt_config,
-            reference_images_base64=ref_images_b64,
-        )
-
-        logger.success(f"Generated {len(thumbnail_images)} thumbnail concepts")
-        for i, img in enumerate(thumbnail_images, 1):
-            logger.info(f"  Concept {i}: '{img.suggested_title}'")
-
-        # Step 5: Image Generation
-        logger.info(f"\n[Step 5/5] Generating {n_images} Thumbnail Images...")
-
-        thumbnail_paths = generate_thumbnails_from_images(
-            images=thumbnail_images,
-            best_frames=reference_frames,
-            output=output,
-            use_composite=use_composite,
-            gemini_model=selected_gemini_model,
-            openai_model=openai_model,
-            poe_model=poe_model,
-            comfyui_workflow=comfyui_workflow,
-            comfyui_config=comfyui_config,
-            comfyui_profile=comfyui_profile,
-            image_provider=image_provider,
-            allow_provider_fallback=allow_provider_fallback,
-        )
-
-        if not thumbnail_paths:
-            logger.error("Thumbnail generation failed")
-            return False
-
-        # Save final metadata
-        output.save_metadata({
-            "scenes_detected": scene_result.total_scenes,
-            "frames_extracted": len(extracted_frames),
-            "faces_detected": face_result.frames_with_faces if face_result else 0,
-            "reference_frames": len(reference_frames),
-            "num_images": len(thumbnail_images),
-            "total_thumbnails": len(thumbnail_paths),
-            "thumbnail_paths": [str(p) for p in thumbnail_paths],
-            "use_composite": use_composite,
-            "use_pro_model": use_pro_model,
-        })
-
-        logger.success(f"\n{len(thumbnail_paths)} thumbnails generated successfully!")
-        logger.success(f"Output directory: {output.output_dir / 'thumbnails'}")
-
-        return True
-
-    except KeyboardInterrupt:
-        logger.warning("\nInterrupted by user")
-        raise
-    except Exception as e:
-        logger.error(f"Error processing video: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
-        return False
-
-
-def process_batch(
-    source_dir: Path,
-    skip_transcription: bool = False,
-    use_composite: bool = False,
-    force: bool = False,  # Deprecated
-    dry_run: bool = False,
-    num_images: int = None,
-    use_pro_model: bool = False,
-    force_scenes: bool = False,
-    force_faces: bool = False,
-    force_transcription: bool = False,
-    force_prompts: bool = False,
-    force_thumbnails: bool = False,
-    image_provider: str = None,
-    gemini_model: str = None,
-    openai_model: str = None,
-    poe_model: str = None,
-    comfyui_workflow: str = None,
-    comfyui_config: dict = None,
-    comfyui_profile: dict = None,
-    allow_provider_fallback: bool = False
-) -> dict:
-    """
-    Process all videos in a directory.
-
-    Args:
-        source_dir: Directory containing videos
-        skip_transcription: Skip transcription step
-        use_composite: Use composite thumbnails
-        force: Force reprocessing
-        dry_run: Only show what would be processed
-
-    Returns:
-        Summary dict with statistics
-    """
-
-    logger.info(f"\n{'='*60}")
-    logger.info("YouTube Thumbnail Generator - Batch Processing")
-    logger.info(f"{'='*60}")
-    logger.info(f"Source: {source_dir}")
-    logger.info(f"Output: {OUTPUT_DIR}")
-
-    # Find videos
-    videos = find_videos(source_dir, VIDEO_EXTENSIONS, EXCLUDE_FOLDERS)
-
-    if not videos:
-        logger.error("No videos found!")
-        return {"total": 0, "processed": 0, "success": 0, "failed": 0}
-
-    logger.info(f"Found {len(videos)} video(s)")
-
-    # Check which need processing
-    pending = []
-    skipped = []
-
-    for video in videos:
-        output = VideoOutput(video, OUTPUT_DIR)
-        if force or not output.is_complete():
-            pending.append(video)
-        else:
-            skipped.append(video)
-
-    if skipped:
-        logger.info(f"Skipping {len(skipped)} already processed video(s)")
-
-    if not pending:
-        logger.success("All videos already processed!")
-        return {"total": len(videos), "processed": 0, "success": len(skipped), "failed": 0}
-
-    logger.info(f"Videos to process: {len(pending)}")
-
-    # Dry run mode
-    if dry_run:
-        logger.info("\n[DRY RUN] Videos that would be processed:")
-        for i, video in enumerate(pending, 1):
-            rel_path = video.relative_to(source_dir) if source_dir in video.parents else video.name
-            print(f"  {i}. {rel_path}")
-        return {"total": len(videos), "processed": 0, "success": 0, "failed": 0, "dry_run": True}
-
-    # Process videos
-    progress = ProgressTracker(len(pending), "Processing videos")
-    failed_videos = []
-
-    for video in pending:
-        try:
-            success = process_single_video(
-                video,
-                skip_transcription=skip_transcription,
-                use_composite=use_composite,
-                force=force,
-                num_images=num_images,
-                use_pro_model=use_pro_model,
-                force_scenes=force_scenes,
-                force_faces=force_faces,
-                force_transcription=force_transcription,
-                force_prompts=force_prompts,
-                force_thumbnails=force_thumbnails,
-                image_provider=image_provider,
-                gemini_model=gemini_model,
-                openai_model=openai_model,
-                poe_model=poe_model,
-                comfyui_workflow=comfyui_workflow,
-                comfyui_config=comfyui_config,
-                comfyui_profile=comfyui_profile,
-                allow_provider_fallback=allow_provider_fallback
-            )
-            progress.update(success, video.name)
-
-            if not success:
-                failed_videos.append(video)
-
-        except KeyboardInterrupt:
-            logger.warning("\nBatch processing interrupted")
-            break
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            progress.update(False, video.name)
-            failed_videos.append(video)
-
-    # Summary
-    summary = progress.summary()
-    summary["skipped"] = len(skipped)
-
-    logger.info(f"\n{'='*60}")
-    logger.info("BATCH PROCESSING COMPLETE")
-    logger.info(f"{'='*60}")
-    logger.success(f"Successful: {summary['successes']}")
-    if summary['failures'] > 0:
-        logger.error(f"Failed: {summary['failures']}")
-    if skipped:
-        logger.info(f"Skipped: {len(skipped)}")
-    logger.info(f"Total time: {summary['elapsed']}")
-
-    if failed_videos:
-        logger.info("\nFailed videos:")
-        for video in failed_videos:
-            print(f"  - {video}")
-
-    return summary
+    if args.force_prompts:
+        (output.output_dir / "prompts" / "images.json").unlink(missing_ok=True)
+    # Use the same strict, native-resolution loader as the image providers.
+    references = [base64.b64encode(data).decode("ascii") for data in load_reference_images(reference_frames)]
+    images = generate_thumbnail_images(
+        transcription=transcription or video_path.stem,
+        video_title=video_path.stem,
+        output=output,
+        num_images=args.num_images,
+        prompt_config=PromptGenerationConfig(provider="anthropic"),
+        reference_images_base64=references,
+    )
+    paths = generate_thumbnails_from_images(
+        images=images,
+        best_frames=reference_frames,
+        output=output,
+        use_composite=args.composite,
+        gemini_model=args.gemini_model,
+        openai_model=args.openai_model,
+        poe_model=args.poe_model,
+        comfyui_workflow=args.comfyui_workflow,
+        comfyui_config=comfyui_config,
+        comfyui_profile=comfyui_profile,
+        image_provider=args.image_provider,
+        allow_provider_fallback=args.provider_fallback,
+    )
+    if len(paths) != args.num_images or not all(path.is_file() for path in paths):
+        raise RuntimeError(f"Expected {args.num_images} finished thumbnails for {video_path.name}, got {len(paths)}")
+    output.save_metadata({
+        "scenes_detected": scene_result.total_scenes,
+        "frames_extracted": len(frames),
+        "faces_detected": face_result.frames_with_faces if face_result else 0,
+        "reference_frames": len(reference_frames),
+        "num_images": len(images),
+        "total_thumbnails": len(paths),
+        "thumbnail_paths": [str(path) for path in paths],
+        "use_composite": args.composite,
+    })
+    logger.success(f"Saved {len(paths)} thumbnails to {output.output_dir / 'thumbnails'}")
 
 
 # =============================================================================
@@ -886,12 +564,6 @@ async def cmd_generate(args) -> int:
     return 0 if result['status'] == 'completed' else 1
 
 
-SUBCOMMANDS = {
-    'list-videos', 'list-clusters', 'list-frames', 'list-thumbnails',
-    'score-thumbnails', 'inspect', 'generate', 'process',
-}
-
-
 def _add_common_json_flag(p):
     p.add_argument('--json', action='store_true', help='Emit machine-readable JSON to stdout')
 
@@ -908,23 +580,30 @@ def _comfyui_cli_config(args):
     return Connection.model_validate(values).model_dump()
 
 
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("The number of images must be at least 1")
+    return number
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='main.py',
         description='YouTube Thumbnail Generator — batch processing and AI-agent CLI',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    subparsers = parser.add_subparsers(dest='command')
+    subparsers = parser.add_subparsers(dest='command', required=True)
 
     # ----- process (batch / single video) -----
-    p_proc = subparsers.add_parser('process', help='Process videos to generate thumbnails (default if no subcommand)')
-    p_proc.add_argument('--source', '-s', type=Path, default=VIDEOS_DIR)
-    p_proc.add_argument('--single', type=Path, help='Process a single video file')
+    p_proc = subparsers.add_parser('process', help='Generate thumbnails directly from video files', allow_abbrev=False)
+    source = p_proc.add_mutually_exclusive_group()
+    source.add_argument('--source', '-s', type=Path, default=VIDEOS_DIR, help='Directory to scan for videos')
+    source.add_argument('--single', type=Path, help='Process a single video file')
     p_proc.add_argument('--output', '-o', type=Path, default=OUTPUT_DIR)
     p_proc.add_argument('--dry-run', '-n', action='store_true')
     p_proc.add_argument('--skip-transcription', action='store_true')
     p_proc.add_argument('--composite', action='store_true')
-    p_proc.add_argument('--force', '-f', action='store_true', help='[DEPRECATED] Use --force-all')
     p_proc.add_argument('--force-all', action='store_true')
     p_proc.add_argument('--force-scenes', action='store_true')
     p_proc.add_argument('--force-faces', action='store_true')
@@ -932,8 +611,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p_proc.add_argument('--force-prompts', action='store_true')
     p_proc.add_argument('--force-thumbnails', action='store_true')
     p_proc.add_argument('--verbose', '-v', action='store_true')
-    p_proc.add_argument('--num-images', type=int, default=NUM_PROMPT_VARIATIONS)
-    p_proc.add_argument('--image-pro', action='store_true')
+    p_proc.add_argument('--num-images', type=_positive_int, default=NUM_PROMPT_VARIATIONS)
     p_proc.add_argument('--image-provider', choices=['gemini', 'openai', 'replicate', 'poe', 'comfyui'], default=None,
                         help=f'Image generation provider (default from config: {IMAGE_PROVIDER}). Reference image support depends on the selected model.')
     p_proc.add_argument('--gemini-model', choices=list(GEMINI_MODELS), default=None)
@@ -985,7 +663,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p_g.add_argument('--clusters', type=str, required=True,
                      help='Comma-separated cluster_index values, in person_XX order. E.g. "0,2" → person_01=cluster 0, person_02=cluster 2')
     p_g.add_argument('--view-mode', choices=['person', 'person_scene'], default='person')
-    p_g.add_argument('--num-images', type=int, default=NUM_PROMPT_VARIATIONS)
+    p_g.add_argument('--num-images', type=_positive_int, default=NUM_PROMPT_VARIATIONS)
     p_g.add_argument('--image-provider', choices=['gemini', 'openai', 'replicate', 'poe', 'comfyui'], default=IMAGE_PROVIDER)
     p_g.add_argument('--gemini-model', choices=list(GEMINI_MODELS), default=None)
     p_g.add_argument('--openai-model', choices=list(OPENAI_MODELS), default=None)
@@ -1010,94 +688,65 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 # =============================================================================
 
 def _run_process(args) -> int:
-    """Execute the legacy batch/single video pipeline."""
-    comfyui_config = _comfyui_cli_config(args)
-    # Deprecated --force flag → treat as --force-all
-    if args.force:
-        logger.warning("--force is deprecated, use --force-all instead")
-        args.force_all = True
+    """Select files once for both single-video and batch processing."""
+    if args.single is not None:
+        if not args.single.is_file():
+            raise ValueError(f"Video file not found: {args.single}")
+        videos = [args.single.resolve()]
+    else:
+        if not args.source.is_dir():
+            raise ValueError(f"Source directory not found: {args.source}")
+        videos = find_videos(args.source.resolve(), VIDEO_EXTENSIONS, EXCLUDE_FOLDERS)
+        if not videos:
+            raise ValueError(f"No videos found in {args.source}")
 
+    if args.skip_transcription and (args.force_transcription or args.force_all):
+        raise ValueError("Cannot skip transcription and force it in the same command")
     if args.force_all:
-        args.force_scenes = True
-        args.force_faces = True
-        args.force_transcription = True
-        args.force_prompts = True
-        args.force_thumbnails = True
+        args.force_scenes = args.force_faces = args.force_transcription = args.force_prompts = args.force_thumbnails = True
+    force = any((args.force_scenes, args.force_faces, args.force_transcription, args.force_prompts, args.force_thumbnails))
+    args.output = args.output.resolve()
+    selected = [(video, VideoOutput(video, args.output)) for video in videos]
+    if len({output.output_dir for _, output in selected}) != len(selected):
+        raise ValueError("Multiple input videos have the same output folder name; rename them before processing")
+    pending = [(video, output) for video, output in selected if force or not output.is_complete()]
+    logger.setLevel("DEBUG" if args.verbose else LOG_LEVEL)
+    logger.info(f"Output: {args.output}; pending: {len(pending)}; completed: {len(selected) - len(pending)}")
+    if args.dry_run:
+        for video, output in pending:
+            print(f"{video} -> {output.output_dir}")
+        return 0
+    if not pending:
+        return 0
 
-    ensure_dir(args.output)
+    comfyui_config = _comfyui_cli_config(args)
+    comfyui_profile = None
+    if (args.image_provider or IMAGE_PROVIDER) == "comfyui":
+        from services.comfyui_service import prepare
+        comfyui_profile, comfyui_config = prepare(args.comfyui_workflow, comfyui_config)
 
-    if args.single:
-        if not args.single.exists():
-            logger.error(f"Video not found: {args.single}")
-            return 1
-        success = process_single_video(
-            args.single,
-            skip_transcription=args.skip_transcription,
-            use_composite=args.composite,
-            force=args.force,
-            num_images=args.num_images,
-            use_pro_model=args.image_pro,
-            force_scenes=args.force_scenes,
-            force_faces=args.force_faces,
-            force_transcription=args.force_transcription,
-            force_prompts=args.force_prompts,
-            force_thumbnails=args.force_thumbnails,
-            image_provider=args.image_provider,
-            gemini_model=args.gemini_model,
-            openai_model=args.openai_model,
-            poe_model=args.poe_model,
-            comfyui_workflow=args.comfyui_workflow,
-            comfyui_config=comfyui_config,
-            allow_provider_fallback=args.provider_fallback
-        )
-        return 0 if success else 1
-
-    if not args.source.exists():
-        logger.error(f"Source directory not found: {args.source}")
-        return 1
-
-    summary = process_batch(
-        args.source,
-        skip_transcription=args.skip_transcription,
-        use_composite=args.composite,
-        force=args.force,
-        dry_run=args.dry_run,
-        num_images=args.num_images,
-        use_pro_model=args.image_pro,
-        force_scenes=args.force_scenes,
-        force_faces=args.force_faces,
-        force_transcription=args.force_transcription,
-        force_prompts=args.force_prompts,
-        force_thumbnails=args.force_thumbnails,
-        image_provider=args.image_provider,
-        gemini_model=args.gemini_model,
-        openai_model=args.openai_model,
-        poe_model=args.poe_model,
-        comfyui_workflow=args.comfyui_workflow,
-        comfyui_config=comfyui_config,
-        allow_provider_fallback=args.provider_fallback
-    )
-    return 0 if summary.get('failures', 0) == 0 else 1
+    args.output.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(args.output / "pipeline.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
+    # Face-cache serialization uses this root too. Override it only for this
+    # file command, without changing the web's environment or database paths.
+    previous_output = config.OUTPUT_DIR
+    config.OUTPUT_DIR = args.output
+    try:
+        for index, (video, output) in enumerate(pending, 1):
+            logger.info(f"Processing {index}/{len(pending)}: {video}")
+            _process_video(video, output, args, comfyui_config, comfyui_profile)
+    finally:
+        config.OUTPUT_DIR = previous_output
+        logger.removeHandler(handler)
+        handler.close()
+    return 0
 
 
 def main():
-    # Compatibility shim: if the user invoked `python main.py` or
-    # `python main.py --flag ...` (old-style), inject the implicit
-    # `process` subcommand so argparse routes correctly.
-    if len(sys.argv) == 1:
-        sys.argv.append('process')
-    elif sys.argv[1] not in SUBCOMMANDS and sys.argv[1].startswith('-'):
-        sys.argv.insert(1, 'process')
-
     parser = _build_arg_parser()
     args = parser.parse_args()
-
-    if args.command is None:
-        parser.print_help()
-        return 1
-
-    if args.command == 'process':
-        return _run_process(args)
 
     # All AI-agent subcommands are async; the rest run via asyncio.run.
     handlers = {
@@ -1109,16 +758,18 @@ def main():
         'inspect': cmd_inspect,
         'generate': cmd_generate,
     }
-    handler = handlers.get(args.command)
-    if handler is None:
-        parser.print_help()
-        return 1
     try:
-        return asyncio.run(_run_subcommand(handler, args))
+        if args.command == 'process':
+            return _run_process(args)
+        return asyncio.run(_run_subcommand(handlers[args.command], args))
+    except KeyboardInterrupt:
+        print('Interrupted by user', file=sys.stderr)
+        return 130
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc(file=sys.stderr)
+        if getattr(args, 'verbose', False):
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         return 1
 
 

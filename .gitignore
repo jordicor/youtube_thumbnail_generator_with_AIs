@@ -55,6 +55,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.install/
 venv/
 env/
 node_modules/

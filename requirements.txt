@@ -1,6 +1,6 @@
 # YouTube Thumbnail Generator - Dependencies
 # ==========================================
-# Install with: pip install -r requirements.txt
+# Use requirements-cpu.txt or requirements-cuda.txt for the selected hardware.
 # Use a dedicated virtual environment; see README.md for setup commands.
 
 # Core dependencies
@@ -20,13 +20,13 @@ scenedetect>=0.6.2
 # Face detection and recognition
 # InsightFace - Best accuracy (99.86% on LFW)
 insightface>=0.7.3
-onnxruntime-gpu>=1.19.0  # GPU support for RTX 4090
 
 # Face swap / restoration (Phase 2 — local post-processing pipeline)
 # inswapper_128.onnx and GFPGANv1.4.pth are downloaded by
 # scripts/download_face_swap_models.py — not via pip.
 gfpgan>=1.3.8              # Face restoration after InSwapper
-basicsr>=1.4.2             # GFPGAN dependency (image super-resolution backbone)
+# The PyPI 1.4.2 release imports a removed torchvision module. Use the upstream fix.
+basicsr @ git+https://github.com/XPixelGroup/BasicSR@8d56e3a045f9fb3e1d8872f92ee4a4f07f886b0a
 facexlib>=0.3.0            # GFPGAN dependency (face alignment helpers)
 
 # Transcription (local Whisper - uses GPU)
@@ -35,7 +35,6 @@ openai-whisper>=20231117
 # LLM APIs for prompt generation
 anthropic>=0.18.0          # Claude API (best for prompts)
 openai>=1.12.0             # OpenAI/GPT API
-google-generativeai>=0.4.0 # Gemini API (legacy)
 google-genai>=0.8.0        # Google GenAI SDK (for Imagen/Nano Banana)
 
 # Image generation (optional alternatives)
