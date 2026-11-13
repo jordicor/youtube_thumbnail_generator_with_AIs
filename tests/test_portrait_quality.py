@@ -94,6 +94,7 @@ async def test_refresh_keeps_people_notes_and_transcripts(test_db, people_video,
     service = AnalysisService(test_db)
     await service.run_full_analysis(video, refresh_references=True)
     assert (await service.get_video(video))["status"] == "analyzed"
+    assert (await service.get_video(video))["analysis_outcome"] == "completed"
     async with test_db.execute("SELECT id,label,description,embedding_centroid FROM clusters WHERE video_id=? ORDER BY id",
                                [video]) as cursor:
         assert await cursor.fetchall() == before
@@ -102,16 +103,32 @@ async def test_refresh_keeps_people_notes_and_transcripts(test_db, people_video,
     assert await ReferenceService(test_db).list(video, people_video["ana"])
 
 
-async def test_cancellation_preserves_preexisting_transcripts_and_people(test_db, people_video):
+async def test_cancellation_preserves_preexisting_transcripts_and_people(test_db, people_video, monkeypatch):
+    from contextlib import asynccontextmanager
+    from services.task_service import TaskService
+    from workers import tasks
+
     video = people_video["video_id"]
     paths = [people_video["dir"] / name for name in ("transcription.txt", "transcription.json", "clustering_result.json")]
     for path in paths:
         path.write_bytes(b"Previously completed data")
     refs = await ReferenceService(test_db).list(video)
     service = AnalysisService(test_db)
-    await service.update_video_status(video, "cancelled")
-    result = await service.cleanup_partial_analysis(video)
-    assert not result["cleaned_files"] and not result["cleaned_db_records"]
+    run = await service.claim_analysis(video)
+
+    @asynccontextmanager
+    async def get_db():
+        yield test_db
+
+    monkeypatch.setattr(tasks, "get_db", get_db)
+
+    async def cancelled_while_running(self, video_id, **kwargs):
+        assert await TaskService(self.db).cancel_task("analysis", video_id)
+
+    monkeypatch.setattr(AnalysisService, "run_full_analysis", cancelled_while_running)
+    result = await tasks.analyze_video({}, video, run)
+
+    assert result["status"] == "cancelled"
     assert all(path.read_bytes() == b"Previously completed data" for path in paths)
     assert await ReferenceService(test_db).list(video) == refs
 

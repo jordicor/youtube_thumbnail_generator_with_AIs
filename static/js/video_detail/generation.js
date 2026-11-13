@@ -1,7 +1,9 @@
 /**
  * Video Detail Page - Generation Module
  * ======================================
- * Handles thumbnail generation process, SSE updates, and polling fallback.
+ * Handles the thumbnail generation form and follows the running job through
+ * its SSE stream. The task queue (task-queue.js) is the one that says, with a
+ * toast on every page, how the job ended; here the panel shows it.
  */
 
 import { state, resetGenerationState, saveGenerationJobState, clearGenerationJobState } from './state.js';
@@ -65,6 +67,33 @@ function restoreSubmitButton() {
         submitBtn.textContent = generateButtonLabel();
     }
     hideCancelButton();
+}
+
+/**
+ * Say next to the results why the video's last generation failed, or clear it.
+ * It stays until the next generation starts: the toast fades, and a failure
+ * that happened with the page closed would leave nothing else behind.
+ * @param {?string} reason - Why it failed; null clears the note
+ */
+function setFailureNote(reason) {
+    const note = document.getElementById('generationFailure');
+    note.classList.toggle('hidden', !reason);
+    note.textContent = reason ? t('generate_form.last_failed', { error: reason }) : '';
+}
+
+/**
+ * Show the failure note if the video's newest generation job failed.
+ */
+async function showLastFailure() {
+    try {
+        const response = await fetch(`/api/generation/${state.videoId}/history`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const { jobs } = await response.json();
+        const last = jobs[0];
+        setFailureNote(last && last.status === 'error' ? (last.error_message || t('errors.generic')) : null);
+    } catch (error) {
+        console.error('Error loading the generation history:', error);
+    }
 }
 
 /**
@@ -181,23 +210,15 @@ function setupCancelButton() {
 
         const confirmed = await ThumbnailApp.showModal({
             title: t('task_queue.cancel_title'),
-            message: t('task_queue.cancel_confirm'),
+            message: t('task_queue.cancel_confirm_generation'),
             type: 'warning',
             confirmText: t('common.yes'),
             cancelText: t('common.no')
         });
 
         if (confirmed) {
-            try {
-                await fetch(`/api/tasks/generation/${state.currentJobId}/cancel`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                // SSE will notify of cancellation and update UI
-            } catch (error) {
-                console.error('Error cancelling generation:', error);
-                ThumbnailApp.showToast(t('errors.generic'), 'error');
-            }
+            // The task queue says whether it could; the job's stream updates the panel
+            await window.TaskQueue.cancelTask('generation', state.currentJobId);
         }
     });
 }
@@ -251,6 +272,10 @@ function summaryText(key, value) {
     }
     if (key === 'face_photos') {
         return t('generate_form.summary_face_photos', { count: value });
+    }
+    if (key === 'provider_fallback') {
+        // "If the model fails: it stops" says more than "If the model fails: No"
+        return t(value ? 'generate_form.fallback_tries_others' : 'generate_form.fallback_stops');
     }
     return t(value ? 'generate_form.summary_on' : 'generate_form.summary_off');
 }
@@ -371,6 +396,7 @@ export function setupForm() {
         document.getElementById('progressFill').style.width = '0%';
         document.getElementById('progressText').textContent = t('generate_form.progress_starting');
         document.getElementById('thumbnailsGrid').innerHTML = '';
+        setFailureNote(null);
 
         // Close any existing SSE connection
         resetGenerationState();
@@ -385,8 +411,7 @@ export function setupForm() {
             });
 
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(typeof error.detail === 'string' ? error.detail : t('errors.generation_failed'));
+                throw new Error(await ThumbnailApp.readApiError(response));
             }
 
             const data = await response.json();
@@ -396,7 +421,7 @@ export function setupForm() {
             document.getElementById('generationStatus').classList.remove('hidden');
             document.getElementById('resultsTitle').textContent = t('generate_form.results_generating');
             updateResultsPanel();
-            pollStatus();
+            startSSE();
         } catch (error) {
             ThumbnailApp.showToast(t('errors.generic') + ': ' + error.message, 'error');
             restoreSubmitButton();
@@ -446,10 +471,16 @@ export function startSSE() {
         state.currentEventSource.close();
     }
 
-    state.currentEventSource = ThumbnailApp.createSSEConnection(
+    const source = ThumbnailApp.createSSEConnection(
         `/api/events/generation/${state.currentJobId}`,
         {
             progress: (data) => {
+                if (data.status === 'stopping') {
+                    // Cancelled: the worker is finishing the thumbnail it was making
+                    hideCancelButton();
+                    document.getElementById('progressText').textContent = data.current_step;
+                    return;
+                }
                 document.getElementById('progressFill').style.width = `${data.progress}%`;
                 document.getElementById('progressText').textContent =
                     `${data.current_step || data.status} - ${data.progress}% (${data.thumbnails_generated}/${data.total_thumbnails})`;
@@ -461,84 +492,39 @@ export function startSSE() {
                 document.getElementById('progressFill').style.width = '100%';
                 document.getElementById('progressText').textContent = t('generation.complete');
                 document.getElementById('resultsTitle').textContent = t('generate_form.results_last');
-                ThumbnailApp.showToast(t('generation.complete'), 'success');
                 clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
                 loadResults();
             },
-            error: (data) => {
-                const reason = data.error_message || data.error;
-                // The toast fades; the reason stays next to the progress bar
-                document.getElementById('progressText').textContent = `${t('common.error')}: ${reason}`;
-                document.getElementById('resultsTitle').textContent = t('generate_form.results_last');
-                ThumbnailApp.showToast(t('errors.generic') + ': ' + reason, 'error');
+            failed: (data) => {
+                // The thumbnails the job made before failing stay in the panel;
+                // with none, the panel goes back to the video's recent ones
+                const made = document.getElementById('thumbnailsGrid').children.length > 0;
+                document.getElementById('generationStatus').classList.add('hidden');
+                document.getElementById('resultsTitle').textContent =
+                    t(made ? 'generate_form.results_last' : 'generate_form.results_recent');
+                setFailureNote(data.error_message || data.error);
                 clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
                 updateResultsPanel();
             },
             cancelled: (data) => {
-                document.getElementById('progressText').textContent = t('task_queue.cancelled');
+                document.getElementById('progressText').textContent = t('task_queue.cancelled_generation');
                 document.getElementById('resultsTitle').textContent = t('generate_form.results_last');
-                ThumbnailApp.showToast(t('task_queue.cancelled'), 'info');
                 clearGenerationJobState();  // Clear persisted state
                 restoreSubmitButton();
-                updateResultsPanel();
+                // The thumbnails the job had made stay
+                loadResults();
+            },
+            closed: () => {
+                // The browser gave up on the stream; the job goes on in the worker
+                setTimeout(() => {
+                    if (state.currentEventSource === source) startSSE();
+                }, 3000);
             }
         }
     );
-}
-
-// =========================================================================
-// POLLING FALLBACK
-// =========================================================================
-
-/**
- * Poll for generation status updates.
- * Falls back to polling if SSE is not supported.
- */
-export async function pollStatus() {
-    if (!state.currentJobId) return;
-
-    // Prefer SSE if supported
-    if (ThumbnailApp.isSSESupported()) {
-        startSSE();
-        return;
-    }
-
-    // M37: Store polling interval ID in state for cleanup
-    state.pollingInterval = setInterval(async () => {
-        try {
-            const response = await fetch(`/api/generation/jobs/${state.currentJobId}/status`);
-            const data = await response.json();
-
-            document.getElementById('progressFill').style.width = `${data.progress}%`;
-            document.getElementById('progressText').textContent =
-                `${data.status} - ${data.progress}% (${data.thumbnails_generated}/${data.total_thumbnails})`;
-
-            if (data.status === 'completed') {
-                clearInterval(state.pollingInterval);
-                state.pollingInterval = null;
-                clearGenerationJobState();
-                restoreSubmitButton();
-                loadResults();
-            } else if (data.status === 'error' || data.status === 'cancelled') {
-                clearInterval(state.pollingInterval);
-                state.pollingInterval = null;
-                clearGenerationJobState();
-                restoreSubmitButton();
-                if (data.status === 'error') {
-                    const reason = data.error_message || t('errors.generic');
-                    document.getElementById('progressText').textContent = `${t('common.error')}: ${reason}`;
-                    ThumbnailApp.showToast(t('errors.generation_failed') + ': ' + reason, 'error');
-                }
-            }
-        } catch (error) {
-            clearInterval(state.pollingInterval);
-            state.pollingInterval = null;
-            clearGenerationJobState();
-            restoreSubmitButton();
-        }
-    }, 2000);
+    state.currentEventSource = source;
 }
 
 // =========================================================================
@@ -754,26 +740,25 @@ export function clearReferenceImage() {
  * Used when restoring state after page navigation.
  * @param {Object} jobData - Optional job status data from API
  */
-function showGeneratingUI(jobData = null) {
+function showGeneratingUI(jobData) {
     submitBtn = document.getElementById('generateBtn');
     submitBtn.disabled = true;
     submitBtn.textContent = t('generation.generating');
     submitBtn.classList.add('generating');
-    showCancelButton();
+    // A job that is already stopping cannot be cancelled again
+    if (jobData.stopping) {
+        hideCancelButton();
+    } else {
+        showCancelButton();
+    }
 
-    // Show progress section
+    // Show progress section; the stream writes what the job is doing as soon as it connects
     document.getElementById('generationStatus').classList.remove('hidden');
     document.getElementById('resultsTitle').textContent = t('generate_form.results_generating');
+    document.getElementById('progressFill').style.width = `${jobData.progress || 0}%`;
+    document.getElementById('progressText').textContent = t('generate_form.progress_starting');
+    setFailureNote(null);
     updateResultsPanel();
-
-    // Update progress if we have data
-    if (jobData) {
-        document.getElementById('progressFill').style.width = `${jobData.progress || 0}%`;
-        const progressText = jobData.current_step
-            ? `${jobData.current_step} - ${jobData.progress || 0}% (${jobData.thumbnails_generated || 0}/${jobData.total_thumbnails || 0})`
-            : t('generate_form.progress_starting');
-        document.getElementById('progressText').textContent = progressText;
-    }
 }
 
 /**
@@ -821,8 +806,11 @@ async function restoreActiveJob() {
         checkTaskQueueForActiveJob();
     }
 
-    // No job to restore
-    if (!state.currentJobId) return;
+    // No job to restore: the last one may have failed with nobody watching
+    if (!state.currentJobId) {
+        await showLastFailure();
+        return;
+    }
 
     console.log(`Checking status of generation job ${state.currentJobId}...`);
 
@@ -834,13 +822,15 @@ async function restoreActiveJob() {
             console.log('Job not found, clearing state');
             clearGenerationJobState();
             state.currentJobId = null;
+            await showLastFailure();
             return;
         }
 
         const data = await response.json();
 
-        // Check if job is still active
-        if (data.status === 'generating' || data.status === 'pending' || data.status === 'transcribing' || data.status === 'prompting') {
+        // Still working, or cancelled with its worker still finishing a thumbnail
+        const active = ['pending', 'transcribing', 'prompting', 'generating'].includes(data.status) || data.stopping;
+        if (active) {
             console.log(`Job ${state.currentJobId} is still active (${data.status}), restoring UI`);
 
             // Load thumbnails already generated while user was away
@@ -852,15 +842,11 @@ async function restoreActiveJob() {
             // Reconnect to SSE stream
             startSSE();
         } else {
-            // Job finished while we were away
+            // Job finished while we were away: its thumbnails are among the recent ones
             console.log(`Job ${state.currentJobId} finished (${data.status}), clearing state`);
             clearGenerationJobState();
             state.currentJobId = null;
-
-            // If completed, we could show a notification
-            if (data.status === 'completed') {
-                ThumbnailApp.showToast(t('generation.complete'), 'success');
-            }
+            await showLastFailure();
         }
     } catch (error) {
         console.warn('Error checking job status:', error);

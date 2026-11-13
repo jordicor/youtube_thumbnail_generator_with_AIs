@@ -24,7 +24,9 @@ from database.db import (
 )
 from config import OUTPUT_DIR
 from utils import VideoOutput
-from transcription import transcribe_video
+from transcription import (
+    TRANSCRIPT_CHARS_FOR_AI, TranscriptionError, read_transcription, transcribe_video,
+)
 from transcript_processing import get_formatted_transcript_with_timestamps, has_multiple_speakers
 from gransabio_prompt_generator import (
     GranSabioError, TextProvider, require_text_model, resolve_text_model,
@@ -243,37 +245,31 @@ class GetDescriptionsResponse(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
-def get_or_create_transcription(video_path: Path, video_filename: str) -> tuple[Optional[str], bool]:
+def get_or_create_transcription(video_path: Path, video_filename: str) -> tuple[str, bool]:
     """
     Get existing transcription or create one if it doesn't exist.
 
     Returns:
-        tuple: (transcription_text, was_generated)
+        tuple: (transcription_text, was_generated). The text is empty for a
+        video without speech.
+
+    Raises:
+        HTTPException: 502 with the reason when the video cannot be transcribed
     """
     output = VideoOutput(video_path, Path(OUTPUT_DIR))
 
-    if output.transcription_file.exists():
+    saved = read_transcription(output)
+    if saved is not None:
         logger.info(f"Loading existing transcription for {video_filename}")
-        try:
-            with open(output.transcription_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-                lines = content.split('\n')
-                transcription_lines = [l for l in lines if not l.startswith('#')]
-                return '\n'.join(transcription_lines).strip(), False
-        except Exception as e:
-            logger.error(f"Error reading transcription file: {e}")
-            return None, False
+        return saved, False
 
     logger.info(f"Generating transcription for {video_filename}...")
     output.setup()
-    transcription = transcribe_video(video_path, output)
-
-    if transcription:
-        logger.info(f"Transcription generated successfully for {video_filename}")
-        return transcription, True
-    else:
-        logger.warning(f"Failed to generate transcription for {video_filename}")
-        return None, False  # was_generated=False because it failed
+    try:
+        return transcribe_video(video_path, output), True
+    except TranscriptionError as error:
+        logger.error(f"Transcription of {video_filename} failed: {error}")
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 async def get_video_info(video_id: int) -> tuple[str, Path]:
@@ -327,7 +323,7 @@ async def generate_video_titles(request: GenerateTitlesRequest):
 
     gen_request = TitleGenerationRequest(
         video_title=video_title,
-        transcription_summary=transcription[:30000] if transcription else None,
+        transcription_summary=transcription[:TRANSCRIPT_CHARS_FOR_AI] if transcription else None,
         style=TitleStyle(request.style),
         custom_prompt=request.custom_prompt,
         custom_instructions=request.custom_instructions,
@@ -507,7 +503,7 @@ async def generate_video_descriptions(request: GenerateDescriptionsRequest):
 
     gen_request = DescriptionGenerationRequest(
         video_title=video_title,
-        transcription_summary=transcription[:30000] if transcription else None,
+        transcription_summary=transcription[:TRANSCRIPT_CHARS_FOR_AI] if transcription else None,
         style=DescriptionStyle(request.style),
         custom_prompt=request.custom_prompt,
         custom_instructions=request.custom_instructions,
@@ -707,27 +703,12 @@ async def get_transcription(video_id: int):
             # Fall through to try plain text file
 
     # Fallback to plain text transcription
-    if not output.transcription_file.exists():
-        return {"exists": False, "text": None}
-
     try:
-        with open(output.transcription_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-            # Remove header lines (starting with # or =)
-            lines = content.split('\n')
-            transcription_lines = []
-            skip_header = True
-            for line in lines:
-                if skip_header:
-                    if line.startswith('#') or line.startswith('=') or line.strip() == '':
-                        continue
-                    skip_header = False
-                transcription_lines.append(line)
-            text = '\n'.join(transcription_lines).strip()
-            return {"exists": True, "text": text}
+        text = read_transcription(output)
     except Exception as e:
         logger.error(f"Error reading transcription file: {e}")
         raise HTTPException(status_code=500, detail=t('api.errors.error_reading_transcription'))
+    return {"exists": text is not None, "text": text}
 
 
 # ============================================================================

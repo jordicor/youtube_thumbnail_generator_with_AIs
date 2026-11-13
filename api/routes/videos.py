@@ -4,12 +4,16 @@ Videos API Routes
 Endpoints for video management.
 """
 
+import asyncio
+import os
+
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel
 
+from api.dependencies import video_taken_error
 from database.db import get_db
 from services.video_service import VideoService
 from services.analysis_service import AnalysisService
@@ -118,13 +122,16 @@ async def get_video(video_id: int):
 
 @router.delete("/{video_id}")
 async def delete_video(video_id: int):
-    """Delete a video and all its associated data."""
+    """Delete a video's record and everything the database holds of it (409 while it has a task)."""
     async with get_db() as db:
-        service = VideoService(db)
-        success = await service.delete_video(video_id)
+        video = await AnalysisService(db).get_video(video_id)
+        if not video:
+            raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
+        # A task in the worker is reading and writing this video
+        if video['analysis_run'] is not None or video['status'] == 'generating':
+            raise video_taken_error(video['status'])
 
-    if not success:
-        raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
+        await VideoService(db).delete_video(video_id)
 
     return {"deleted": True, "video_id": video_id}
 
@@ -174,38 +181,37 @@ async def show_video(video_id: int):
 @router.post("/{video_id}/reanalyze")
 async def reanalyze_video(video_id: int):
     """
-    Delete all analysis data and restart analysis.
-    Deletes: clusters, frames, jobs, thumbnails.
-    Keeps: video record, preview image.
+    Analyze a video again from scratch.
+
+    Its people (with their names, notes and photos), frames, generation jobs
+    and thumbnails are deleted, by the worker and only once the reanalysis
+    starts. Nothing is deleted when it cannot be made again: the video file is
+    not found (409), the video has a task running (409) or the job cannot be
+    queued (500).
     """
     async with get_db() as db:
         # The analysis reads the video file: its directory must answer here
         await DirectoryService(db).switch_video_directory(video_id)
 
-        service = VideoService(db)
-        success = await service.reanalyze_video(video_id)
-
-        if not success:
+        service = AnalysisService(db)
+        video = await service.get_video(video_id)
+        if not video:
             raise HTTPException(status_code=404, detail=t('api.errors.video_not_found'))
 
-        # Update status to analyzing
-        analysis_service = AnalysisService(db)
-        await analysis_service.update_video_status(video_id, 'analyzing')
+        # A video the owner moved away keeps what it has: it cannot be analyzed again
+        if not await asyncio.to_thread(os.path.isfile, video['filepath']):
+            raise HTTPException(status_code=409, detail=t('api.errors.video_file_missing'))
 
-    # Enqueue analysis job to Redis (force all steps since this is a reanalysis)
-    job_id = await enqueue_analysis(
-        video_id=video_id,
-        force_scenes=True,
-        force_faces=True,
-        force_clustering=True,
-        force_transcription=True
-    )
+        analysis_run = await service.claim_analysis(video_id)
+        if analysis_run is None:
+            raise video_taken_error((await service.get_video(video_id))['status'])
+
+    job_id = await enqueue_analysis(video_id=video_id, analysis_run=analysis_run, reset=True)
 
     if not job_id:
-        # Failed to enqueue - revert status
+        # Nothing was queued or deleted: the video goes back as it was
         async with get_db() as db:
-            analysis_service = AnalysisService(db)
-            await analysis_service.update_video_status(video_id, 'pending', t('api.errors.failed_enqueue_analysis'))
+            await AnalysisService(db).unclaim_analysis(video_id, analysis_run)
         raise HTTPException(status_code=500, detail=t('api.errors.failed_enqueue_analysis'))
 
     return {"reanalyzing": True, "video_id": video_id, "job_id": job_id}

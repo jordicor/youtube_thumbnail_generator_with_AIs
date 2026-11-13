@@ -324,7 +324,7 @@
     "best_prompt": "Sigue mejor las instrucciones",
     "combine_refs": "Combinar refs",
     "text_logos": "Texto/logos",
-    "refs_info": "{model} admite hasta {max} imágenes por miniatura: fotos de cara, fichas faciales e imagen de estilo.",
+    "refs_info": "{model} admite hasta {max} imágenes por miniatura: fotos de cara, collages e imagen de estilo.",
     "change": "Cambiar",
     "with_thinking": "con razonamiento",
     "summary_generate": "Ideas: {text} · Dibujo: {image}",
@@ -400,13 +400,12 @@
     "start": "Analizar",
     "analyzing": "Analizando...",
     "transcribing": "Transcribiendo audio...",
-    "complete": "Análisis completado",
     "queued": "En cola...",
     "queue_position": "Posición: {position}",
     "added_to_queue": "Vídeo añadido a la cola de análisis",
     "started_for_count": "Análisis iniciado para {count} vídeo(s)",
     "reanalyze_title": "Reanalizar vídeo",
-    "reanalyze_message": "¿Quieres volver a analizar este vídeo?<br><br><strong>Se eliminarán:</strong> clusters detectados, frames extraídos, trabajos de generación y miniaturas.<br><br><strong>No se eliminará:</strong> el archivo de vídeo original.",
+    "reanalyze_message": "El vídeo se analizará otra vez desde cero.<br><br><strong>Se borrará:</strong> sus personas detectadas, con sus nombres, notas y fotos elegidas, y sus miniaturas generadas: <strong>{thumbnails}</strong>.<br><br><strong>Se conserva:</strong> el vídeo, sus títulos y sus descripciones.<br><br><small>Si el archivo del vídeo ya no está en su sitio, no se borra nada.</small>",
     "reanalyze_started": "Reanálisis iniciado"
   },
   "directory": {
@@ -450,10 +449,13 @@
   "video_analyze": {
     "title": "Analizar vídeos",
     "message": "¿Quieres analizar <strong>{count}</strong> vídeo(s)?<br><br>Este proceso puede tardar varios minutos.",
-    "already_analyzed_title": "Vídeos ya analizados",
-    "already_analyzed_message": "<strong>{count}</strong> vídeo(s) de los seleccionados ya han sido analizados.<br><br>¿Quieres volver a analizarlos?<br><br><small>Se eliminarán los datos del análisis anterior.</small>",
-    "reanalyze_all": "Sí, reanalizar todos",
-    "no_videos_in_selection": "No hay vídeos para analizar en la selección"
+    "analyzed_kept": "Los otros <strong>{count}</strong> seleccionados ya están analizados y se quedan como están.",
+    "no_videos_in_selection": "No hay vídeos sin analizar en la selección",
+    "reanalyze_title": "Reanalizar vídeos",
+    "reanalyze_message": "<strong>{count}</strong> vídeo(s) se analizarán otra vez desde cero.<br><br><strong>Se borrará:</strong> sus personas detectadas, con sus nombres, notas y fotos elegidas, y sus miniaturas generadas: <strong>{thumbnails}</strong>.<br><br><strong>Se conserva:</strong> los vídeos, sus títulos y sus descripciones.<br><br><small>Los vídeos cuyo archivo ya no esté en su sitio no se tocan.</small>",
+    "reanalyze_confirm": "Borrar y reanalizar",
+    "reanalyze_none": "No hay vídeos analizados en la selección",
+    "reanalyze_refused": "{count} vídeo(s) se quedan como están: {reason}"
   },
   "selection": {
     "selected_count": "{count} seleccionado(s)",
@@ -595,6 +597,7 @@
     "instructions_placeholder_with_ref": "Ej.: Usa el mismo fondo que la imagen de referencia. Mantén los colores pero cambia la composición. Estilo similar pero más dinámico...",
     "progress_starting": "Iniciando...",
     "results_generating": "Generando miniaturas...",
+    "last_failed": "La última generación falló: {error}",
     "face_swap_label": "Poner la cara real al terminar (face swap)",
     "face_swap_missing": "No disponible. Falta: {missing}",
     "step_people": "¿Quién saldrá en la miniatura?",
@@ -665,6 +668,8 @@
     "summary_unavailable": "No disponible",
     "summary_on": "Sí",
     "summary_off": "No",
+    "fallback_tries_others": "prueba con los demás",
+    "fallback_stops": "se detiene",
     "summary_face_photos_one": "Hasta {count}",
     "summary_face_photos_other": "Hasta {count}",
     "results_view_all_count_one": "Ver la miniatura",
@@ -783,9 +788,10 @@
       "thumbnail_not_available": "Miniatura no disponible",
       "directory_not_found": "Directorio no encontrado",
       "analysis_in_progress": "Análisis ya en curso",
+      "analysis_stopping": "El análisis cancelado todavía se está parando. Vuelve a intentarlo en unos segundos.",
+      "video_file_missing": "No se encuentra el archivo del vídeo, así que no se puede volver a analizar. No se ha borrado nada.",
       "failed_enqueue_analysis": "Error al encolar el trabajo de análisis",
       "failed_enqueue_generation": "Error al encolar el trabajo de generación",
-      "failed_merge_clusters": "Error al fusionar clusters. Verifica que los índices existan.",
       "min_clusters_required": "Se requieren al menos 2 clusters para fusionar",
       "min_one_frame_required": "Se requiere al menos un frame",
       "invalid_file_path": "Ruta de archivo no válida",
@@ -848,7 +854,8 @@
       "transcribing_audio": "Transcribiendo audio...",
       "starting": "Iniciando...",
       "generating_prompts": "Pensando las miniaturas...",
-      "creating_thumbnails": "Dibujando las miniaturas..."
+      "creating_thumbnails": "Dibujando las miniaturas...",
+      "stopping_generation": "Parando: se termina la miniatura en curso..."
     }
   },
   "time_service": {
@@ -870,14 +877,28 @@
     "empty": "No hay tareas en cola",
     "cancel": "Cancelar",
     "cancel_title": "Cancelar tarea",
-    "cancel_confirm": "¿Seguro que quieres cancelar esta tarea?",
+    "cancel_confirm": "¿Parar el análisis? Lo que ya esté hecho se conserva.",
+    "cancel_confirm_generation": "¿Parar la generación? Las miniaturas que ya estén hechas se conservan.",
     "cancelled": "Tarea cancelada",
+    "cancelled_generation": "Generación parada. Las miniaturas hechas se conservan.",
     "analysis": "Analizando vídeo",
     "generation": "Generando miniaturas",
     "analysis_complete": "{name}: análisis completado",
     "generation_complete": "{name}: miniaturas generadas",
     "thumbnails_progress": "{done}/{total} miniaturas",
     "waiting": "En cola...",
+    "steps": {
+      "analyzing_scenes": "Detectando escenas...",
+      "analyzing_faces": "Analizando caras...",
+      "clustering": "Agrupando caras...",
+      "transcribing": "Transcribiendo audio...",
+      "prompting": "Pensando las miniaturas...",
+      "generating": "Dibujando las miniaturas...",
+      "stopping_analysis": "Parando: se termina el paso en curso...",
+      "stopping_generation": "Parando: se termina la miniatura en curso..."
+    },
+    "redis_down": "Redis no responde: no se puede analizar ni generar hasta que arranque.",
+    "worker_down": "El worker no está en marcha: los análisis y las generaciones se quedan en cola hasta que arranque.",
     "button": "Tareas"
   },
   "ai_providers": {
@@ -897,18 +918,10 @@
   "analysis_overlay": {
     "title": "Analizando vídeo",
     "starting": "Iniciando análisis...",
-    "cancel": "Cancelar análisis",
-    "detecting_scenes": "Detectando escenas...",
-    "analyzing_faces": "Analizando caras...",
-    "clustering_faces": "Agrupando caras...",
-    "transcribing": "Transcribiendo audio...",
-    "finalizing": "Finalizando..."
+    "cancel": "Cancelar análisis"
   },
   "queue_indicator": {
     "generating_thumbnails": "Generando: {done} de {total}",
-    "running_and_queued": "{running} activa(s), {queued} en cola",
-    "tasks_running": "{count} tarea(s) en ejecución",
-    "tasks_queued": "{count} tarea(s) en cola",
     "view": "Ver"
   },
   "video_status": {

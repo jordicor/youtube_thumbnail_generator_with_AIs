@@ -1,4 +1,4 @@
-# Text engines and the shared GPU
+# AI engines and the shared GPU
 
 Thumbnail ideas, titles and descriptions are written by a text model reached
 through [Gran Sabio LLM](https://github.com/jordicor/GranSabio_LLM). Choose the
@@ -15,6 +15,23 @@ at the model's catalog limit and Gran Sabio's model fallback is disabled.
 
 Thumbnail ideas only offer models that see images, because their requests carry
 the face photos. Thinking is offered only for models that advertise reasoning.
+
+## Cloud image models
+
+Select **OpenAI** as the image provider in **Settings**, then choose
+**GPT Image 2.6 Sunburst** for detailed compositions and precise editing, or
+**GPT Image 2.6 Flare** for fast generation and editing. Both use the existing
+`OPENAI_API_KEY` and accept up to 16 reference images. The CLI accepts
+`--image-provider openai --openai-model gpt-image-2.6-sunburst` or
+`--openai-model gpt-image-2.6-flare`. Saved settings and the configured default
+remain unchanged until you choose a different model.
+
+The application uses the Images API: `images.edit` with references and
+`images.generate` without them, at high quality and `1536x864`, then saves a
+`1280x720` thumbnail. GPT Image 2.6 uses its API default for complexity.
+See OpenAI's [Sunburst model](https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst),
+[Flare model](https://developers.openai.com/api/docs/models/gpt-image-2.6-flare), and
+[image generation guide](https://developers.openai.com/api/docs/guides/image-generation).
 
 ## Local models
 

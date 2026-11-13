@@ -183,13 +183,27 @@ function pageLocale() {
     return getLanguage() === 'es' ? 'es-ES' : 'en-US';
 }
 
+// Cards and tiles show a thumbnail about 320 px wide: they load a JPEG copy
+// twice that (for sharp screens) instead of its PNG of 1-3 MB. The viewer and
+// the downloads use the file itself.
+const CARD_IMAGE_WIDTH = 640;
+
+/**
+ * Address of a thumbnail's small copy.
+ * @param {number} thumbnailId - Thumbnail ID
+ * @returns {string} URL
+ */
+function cardImageUrl(thumbnailId) {
+    return `/api/thumbnails/${thumbnailId}?width=${CARD_IMAGE_WIDTH}`;
+}
+
 /**
  * Format a thumbnail's creation date for display.
  * @param {string} createdAt - ISO date
  * @returns {string} Localized day, month and time
  */
 export function formatDate(createdAt) {
-    return new Date(createdAt).toLocaleDateString(pageLocale(), {
+    return ThumbnailApp.parseServerDate(createdAt).toLocaleDateString(pageLocale(), {
         day: '2-digit',
         month: 'short',
         hour: '2-digit',
@@ -214,7 +228,7 @@ export function createResultTile(thumb) {
     tile.rel = 'noopener';
     tile.title = title;
     tile.innerHTML = `
-        <img src="/api/thumbnails/${thumb.id}" alt="${escapeHtml(title)}" loading="lazy">
+        <img src="${cardImageUrl(thumb.id)}" alt="${escapeHtml(title)}" loading="lazy">
         <span class="result-tile-title">${escapeHtml(title)}</span>
     `;
     return tile;
@@ -260,7 +274,7 @@ export function createCard(thumb, index) {
     card.innerHTML = `
         <a class="thumbnail-image-wrapper" href="/api/thumbnails/${thumb.id}" target="_blank" rel="noopener">
             <img class="lazy-image"
-                 data-src="/api/thumbnails/${thumb.id}"
+                 data-src="${cardImageUrl(thumb.id)}"
                  src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1280 720'%3E%3Crect fill='%232a2a2a' width='1280' height='720'/%3E%3C/svg%3E"
                  alt="${escapeHtml(title)}"
                  loading="lazy">
@@ -316,7 +330,7 @@ export async function toggleBeforeAfter(thumbId) {
         btn.title = t('thumbnails.show_swapped');
     } else {
         // Switch back to swapped (the canonical filepath)
-        img.src = `/api/thumbnails/${thumbId}`;
+        img.src = cardImageUrl(thumbId);
         btn.dataset.state = 'swapped';
         btn.title = t('thumbnails.show_original');
     }
@@ -342,8 +356,8 @@ export async function fixFace(thumbId) {
             && !restoration.disabled && restoration.checked;
         const response = await fetch(`/api/thumbnails/${thumbId}/face_swap?restore_faces=${restoreFaces}`, { method: 'POST' });
         if (!response.ok) {
-            const detail = await response.text();
-            ThumbnailApp.showToast(t('thumbnails.fix_face_failed', {error: detail}), 'error');
+            const reason = await ThumbnailApp.readApiError(response);
+            ThumbnailApp.showToast(t('thumbnails.fix_face_failed', {error: reason}), 'error');
             return;
         }
         const result = await response.json();
@@ -357,7 +371,7 @@ export async function fixFace(thumbId) {
         // Force-reload the image, busting the browser cache
         const img = card.querySelector('.lazy-image');
         if (img) {
-            img.src = `/api/thumbnails/${thumbId}?t=${Date.now()}`;
+            img.src = `${cardImageUrl(thumbId)}&t=${Date.now()}`;
         }
     } catch (e) {
         ThumbnailApp.showToast(t('thumbnails.fix_face_failed', {error: e.message}), 'error');

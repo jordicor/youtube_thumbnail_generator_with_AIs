@@ -10,7 +10,7 @@ import base64
 import hashlib
 import orjson
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 from dataclasses import dataclass, asdict
 
 from config import THUMBNAIL_STYLE
@@ -334,6 +334,7 @@ def generate_thumbnail_images(
     reference_images_base64: Optional[list[str]] = None,
     has_style_reference: bool = False,
     reference_mapping: Optional[list[dict]] = None,
+    cancellation_check: Optional[Callable[[], bool]] = None,
 ) -> list:
     """Two-stage thumbnail prompt generation with fine-grained caching.
 
@@ -348,13 +349,20 @@ def generate_thumbnail_images(
         Keyed by `concepts_hash` (every input: count, expression, starred
         titles, ideas model, avoid repeat with its history, transcription...).
 
-    prompts/images.json keeps the newest CACHE_BATCHES batches:
-      - A batch with both hashes → its images, no LLM call.
+    prompts/images.json keeps the newest CACHE_BATCHES batches, saved after the
+    skeleton and after every concept, so a run that fails or is cancelled half
+    way keeps what it had paid for:
+      - A batch with both hashes and all its concepts → its images, no LLM call.
+      - A batch with both hashes that stopped half way → the concepts it lacks.
       - A batch with the skeleton hash → its skeleton, new concepts.
       - None → new skeleton and concepts; the worker log says which inputs
         differ from the closest batch.
     Avoid repeat sends the previous thumbnails, which every job adds to, so
     its concepts are always new.
+
+    cancellation_check is asked before every LLM call. Once it says the job
+    is cancelled no more calls are made and the images written so far are
+    returned: fewer than num_images, for a caller that is stopping anyway.
 
     Returns a list of num_images ThumbnailImage.
 
@@ -364,7 +372,7 @@ def generate_thumbnail_images(
     """
     logger.info(f"Generating {num_images} thumbnail concept(s) via skeleton+N pipeline...")
 
-    transcription_summary = get_transcription_summary(transcription, 3000)
+    transcription_summary = get_transcription_summary(transcription)
     inputs = _cache_inputs(
         reference_mapping=reference_mapping,
         reference_images_base64=reference_images_base64,
@@ -382,14 +390,18 @@ def generate_thumbnail_images(
     others = [batch for batch in batches
               if (batch["skeleton_hash"], batch["concepts_hash"]) != (skeleton_hash, concepts_hash)]
 
-    # --- Full cache hit -----------------------------------------------------
-    hit = next((batch for batch in batches if batch["concepts_hash"] == concepts_hash), None)
-    if hit is not None:
-        logger.info(f"Cache HIT (full): skeleton + {num_images} concepts reused, no LLM calls")
+    def save(batch: dict) -> None:
+        """Keep the batch as the newest one, which is the one kept the longest."""
         try:
-            _save_batches(images_file, [hit, *others])  # Newest first: kept the longest
+            _save_batches(images_file, [batch, *others])
         except OSError as e:
             logger.warning(f"Could not persist {images_file.name} cache: {e}")
+
+    # --- Full cache hit -----------------------------------------------------
+    hit = next((batch for batch in batches if batch["concepts_hash"] == concepts_hash), None)
+    if hit is not None and len(hit["images"]) == num_images:
+        logger.info(f"Cache HIT (full): skeleton + {num_images} concepts reused, no LLM calls")
+        save(hit)
         return [_cached_image(img_data, video_title, reference_mapping) for img_data in hit["images"]]
 
     # --- LLM calls require a config -----------------------------------------
@@ -402,31 +414,63 @@ def generate_thumbnail_images(
     )
     style_guidance = f"Style guidance:\n{THUMBNAIL_STYLE}"
 
-    # --- Skeleton: cached or new -------------------------------------------
-    cached_skeleton = next((batch for batch in batches if batch["skeleton_hash"] == skeleton_hash), None)
-    if cached_skeleton is not None:
-        skeleton = cached_skeleton["skeleton"]
-        changed = ", ".join(_changed_inputs(inputs, cached_skeleton))
-        logger.info(f"Cache HIT (skeleton): identity/style reused, new concepts because these changed: {changed}")
+    def cancelled() -> bool:
+        return cancellation_check is not None and cancellation_check()
+
+    # --- Skeleton: what a run that stopped half way left, cached, or new -----
+    concepts: list[dict] = []
+    if hit is not None:
+        # The same request failed or was cancelled before its last concept
+        skeleton = hit["skeleton"]
+        concepts = list(hit["concepts"])
+        logger.info(f"Cache HIT (partial): skeleton and {len(concepts)} of {num_images} concepts reused")
     else:
-        logger.info(f"Cache MISS: {_explain_miss(inputs, batches)}")
-        logger.info("Stage 1/2: requesting skeleton from Gran Sabio LLM...")
-        skeleton = generate_skeleton_gransabio(
-            transcription=transcription_summary,
-            video_title=video_title,
-            config=prompt_config,
-            cluster_description=cluster_description,
-            thumbnail_style=style_guidance,
-            reference_images_base64=reference_images_base64,
-            has_style_reference=has_style_reference,
-            reference_mapping=reference_mapping,
-        )
+        cached_skeleton = next((batch for batch in batches if batch["skeleton_hash"] == skeleton_hash), None)
+        if cached_skeleton is not None:
+            skeleton = cached_skeleton["skeleton"]
+            changed = ", ".join(_changed_inputs(inputs, cached_skeleton))
+            logger.info(f"Cache HIT (skeleton): identity/style reused, new concepts because these changed: {changed}")
+        else:
+            logger.info(f"Cache MISS: {_explain_miss(inputs, batches)}")
+            if cancelled():
+                logger.info("Cancelled before the skeleton: nothing was asked for")
+                return []
+            logger.info("Stage 1/2: requesting skeleton from Gran Sabio LLM...")
+            skeleton = generate_skeleton_gransabio(
+                transcription=transcription_summary,
+                video_title=video_title,
+                config=prompt_config,
+                cluster_description=cluster_description,
+                thumbnail_style=style_guidance,
+                reference_images_base64=reference_images_base64,
+                has_style_reference=has_style_reference,
+                reference_mapping=reference_mapping,
+            )
+
+    images: list[ThumbnailImage] = [
+        _concept_to_thumbnail_image(concept, skeleton, reference_mapping, video_title) for concept in concepts
+    ]
+
+    def save_progress() -> None:
+        """What has been paid for stays: a later run with the same inputs goes on from here."""
+        save({
+            "skeleton_hash": skeleton_hash,
+            "concepts_hash": concepts_hash,
+            "inputs": inputs,
+            "skeleton": skeleton,
+            "concepts": concepts,
+            "images": [img.to_dict() for img in images],
+        })
+
+    # The skeleton is the expensive call (it carries the photos): saved at once
+    save_progress()
 
     # --- Concepts: strict series with batch-local anti-repetition ----------
-    logger.info(f"Stage 2/2: generating {num_images} concept(s) in strict series...")
-    concepts: list[dict] = []
-    images: list[ThumbnailImage] = []
-    for k in range(1, num_images + 1):
+    logger.info(f"Stage 2/2: generating concepts {len(concepts) + 1}-{num_images} in strict series...")
+    for k in range(len(concepts) + 1, num_images + 1):
+        if cancelled():
+            logger.info(f"Cancelled: {len(concepts)} of {num_images} concepts written, kept in the cache")
+            return images
         concept = generate_concept_gransabio(
             transcription=transcription_summary,
             video_title=video_title,
@@ -444,19 +488,7 @@ def generate_thumbnail_images(
         images.append(
             _concept_to_thumbnail_image(concept, skeleton, reference_mapping, video_title)
         )
-
-    # --- Persist cache ------------------------------------------------------
-    batch = {
-        "skeleton_hash": skeleton_hash,
-        "concepts_hash": concepts_hash,
-        "inputs": inputs,
-        "skeleton": skeleton,
-        "images": [img.to_dict() for img in images],
-    }
-    try:
-        _save_batches(images_file, [batch, *others])
-    except OSError as e:
-        logger.warning(f"Could not persist {images_file.name} cache: {e}")
+        save_progress()
 
     logger.success(f"Generated {num_images} thumbnail concept(s) via skeleton+N")
     return images

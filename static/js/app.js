@@ -32,8 +32,7 @@ async function apiRequest(endpoint, options = {}) {
         const response = await fetch(url, mergedOptions);
 
         if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            throw new Error(error.detail || `HTTP error ${response.status}`);
+            throw new Error(await readApiError(response));
         }
 
         return await response.json();
@@ -54,11 +53,44 @@ function formatDuration(seconds) {
 }
 
 /**
+ * Why a request failed, from its response: the API's `detail`, which is a text
+ * or, for a request that does not validate, the list of what is wrong in it.
+ * @param {Response} response - A response that is not ok
+ * @returns {Promise<string>} The reason, or the HTTP status when the API gave none
+ */
+async function readApiError(response) {
+    const body = await response.json().catch(() => null);
+    const detail = body ? body.detail : null;
+    if (typeof detail === 'string' && detail) {
+        return detail;
+    }
+    if (Array.isArray(detail) && detail.length > 0) {
+        return detail.map((item) => {
+            const field = (item.loc || []).filter((part) => part !== 'body').join('.');
+            return field ? `${field}: ${item.msg}` : item.msg;
+        }).join('; ');
+    }
+    return `HTTP ${response.status}`;
+}
+
+/**
+ * A date as the server gives it. SQLite's timestamps ("2026-01-08 19:45:22")
+ * are UTC without saying so, and `new Date` would take them for local time.
+ * A text that carries its zone ("Z" or an offset) is read as it is.
+ * @param {string} text - Date from the API
+ * @returns {Date}
+ */
+function parseServerDate(text) {
+    const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(text);
+    return new Date(hasZone ? text : `${text.replace(' ', 'T')}Z`);
+}
+
+/**
  * Format date string
  */
 function formatDate(dateString) {
     if (!dateString) return t('common.na');
-    const date = new Date(dateString);
+    const date = parseServerDate(dateString);
     const locale = getLanguage() === 'es' ? 'es-ES' : 'en-US';
     return date.toLocaleDateString(locale, {
         year: 'numeric',
@@ -463,41 +495,14 @@ function debounce(func, wait) {
 }
 
 /**
- * Poll for status updates (legacy fallback)
- */
-function pollStatus(endpoint, callback, interval = 3000, maxAttempts = 100) {
-    let attempts = 0;
-
-    const poll = async () => {
-        if (attempts >= maxAttempts) {
-            console.warn('Max polling attempts reached');
-            return;
-        }
-
-        attempts++;
-
-        try {
-            const data = await apiRequest(endpoint);
-            const shouldContinue = callback(data);
-
-            if (shouldContinue !== false) {
-                setTimeout(poll, interval);
-            }
-        } catch (error) {
-            console.error('Polling error:', error);
-            // Continue polling on error
-            setTimeout(poll, interval);
-        }
-    };
-
-    poll();
-}
-
-/**
  * SSE (Server-Sent Events) helper for real-time updates
  *
- * @param {string} endpoint - SSE endpoint (e.g., '/api/events/analysis/1')
- * @param {Object} handlers - Event handlers { progress, complete, error, thumbnail }
+ * A cut connection is not a failure of what the stream follows: the browser
+ * reconnects by itself and the stream starts again from the current state.
+ * Only when the browser gives up is `closed` called, to open a new one.
+ *
+ * @param {string} endpoint - SSE endpoint (e.g., '/api/events/generation/1')
+ * @param {Object} handlers - Event handlers { progress, thumbnail, complete, failed, cancelled, closed }
  * @returns {EventSource} - The EventSource object (call .close() to stop)
  */
 function createSSEConnection(endpoint, handlers = {}) {
@@ -508,15 +513,14 @@ function createSSEConnection(endpoint, handlers = {}) {
         console.log('SSE connected:', endpoint);
     };
 
-    // General error handling
-    eventSource.onerror = (error) => {
-        console.error('SSE error:', error);
-        if (handlers.error) {
-            handlers.error({ error: 'Connection error' });
-        }
-        // Close on persistent errors
+    eventSource.onerror = () => {
         if (eventSource.readyState === EventSource.CLOSED) {
-            console.log('SSE connection closed');
+            console.warn('SSE connection closed by the browser:', endpoint);
+            if (handlers.closed) {
+                handlers.closed();
+            }
+        } else {
+            console.warn('SSE connection lost, reconnecting:', endpoint);
         }
     };
 
@@ -545,15 +549,15 @@ function createSSEConnection(endpoint, handlers = {}) {
         });
     }
 
-    // Error event (from server)
-    if (handlers.error) {
-        eventSource.addEventListener('error', (event) => {
+    // What the stream follows failed (the server says so; it is not a connection error)
+    if (handlers.failed) {
+        eventSource.addEventListener('failed', (event) => {
             try {
                 const data = JSON.parse(event.data);
-                handlers.error(data);
+                handlers.failed(data);
                 eventSource.close();
             } catch (e) {
-                // Ignore parse errors for connection errors
+                console.error('Error parsing failed event:', e);
             }
         });
     }
@@ -598,13 +602,6 @@ function createSSEConnection(endpoint, handlers = {}) {
     return eventSource;
 }
 
-/**
- * Check if SSE is supported by the browser
- */
-function isSSESupported() {
-    return typeof EventSource !== 'undefined';
-}
-
 // Steppers: the − and + buttons around a number input, kept within its min and max
 document.addEventListener('click', (e) => {
     const button = e.target.closest('.stepper button[data-step]');
@@ -619,6 +616,8 @@ document.addEventListener('click', (e) => {
 // Export for use in other scripts
 window.ThumbnailApp = {
     apiRequest,
+    readApiError,
+    parseServerDate,
     formatDuration,
     formatDate,
     formatVideoName,
@@ -633,7 +632,5 @@ window.ThumbnailApp = {
     setVideoBreadcrumb,
     loadVideoBreadcrumb,
     debounce,
-    pollStatus,
-    createSSEConnection,
-    isSSESupported
+    createSSEConnection
 };

@@ -52,6 +52,8 @@ class GenerationRequest(BaseModel):
         "gemini-nano-banana-2.1"
     ]] = None
     openai_model: Optional[Literal[
+        "gpt-image-2.6-sunburst",
+        "gpt-image-2.6-flare",
         "gpt-image-2.5-sunburst",
         "gpt-image-2.5-flare",
         "gpt-image-2"
@@ -104,6 +106,8 @@ class GenerationStatusResponse(BaseModel):
     job_id: int
     video_id: int
     status: str
+    # A cancelled job whose worker has not stopped yet
+    stopping: bool = False
     progress: int
     current_step: Optional[str] = None
     thumbnails_generated: int

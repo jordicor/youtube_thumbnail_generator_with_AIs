@@ -144,41 +144,16 @@ function hideQueueIndicator() {
  * @returns {string} Formatted status text
  */
 function formatQueueStatusText(tasks) {
-    // Categorize tasks
-    const running = tasks.filter(t =>
-        t.status === 'generating' ||
-        t.status === 'prompting' ||
-        t.status === 'transcribing'
-    );
-    const queued = tasks.filter(t => t.status === 'pending');
-
-    // Case: Single task running - show thumbnail progress
-    if (tasks.length === 1 && running.length === 1) {
-        const task = running[0];
-        const done = task.thumbnails_generated || 0;
-        const total = task.total_thumbnails || '?';
-        return t('queue_indicator.generating_thumbnails', { done, total });
+    // The server refuses a second generation of a video while one has it, so
+    // there is one task to tell: stopping, waiting its turn, or running
+    const task = tasks[0];
+    if (window.TaskQueue.isStopping(task) || window.TaskQueue.isQueued(task)) {
+        return window.TaskQueue.stepLabel(task);
     }
-
-    // Case: Multiple tasks with some running and some queued
-    if (running.length > 0 && queued.length > 0) {
-        return t('queue_indicator.running_and_queued', {
-            running: running.length,
-            queued: queued.length
-        });
-    }
-
-    // Case: Only running tasks
-    if (running.length > 0) {
-        return t('queue_indicator.tasks_running', { count: running.length });
-    }
-
-    // Case: Only queued tasks
-    if (queued.length > 0) {
-        return t('queue_indicator.tasks_queued', { count: queued.length });
-    }
-
-    return '';
+    return t('queue_indicator.generating_thumbnails', {
+        done: task.thumbnails_generated || 0,
+        total: task.total_thumbnails || '?'
+    });
 }
 
 /**

@@ -125,7 +125,8 @@ function setAnalyzed(analyzed, video) {
     app.classList.toggle('is-not-analyzed', !analyzed);
     document.getElementById('notAnalyzedState').classList.toggle('hidden', analyzed);
     const error = document.getElementById('notAnalyzedError');
-    const failed = !analyzed && video.status === 'error' && video.error_message;
+    // 'pending' with a reason: the worker stopped in the middle of its analysis
+    const failed = !analyzed && ['error', 'pending'].includes(video.status) && video.error_message;
     error.classList.toggle('hidden', !failed);
     error.textContent = failed ? t('video_detail.analysis_failed', { error: video.error_message }) : '';
     document.getElementById('videoMoreBtn').classList.toggle('hidden', !analyzed);
@@ -194,11 +195,14 @@ async function analyzeVideo() {
  * Reset the analysis and analyze the video again (the server queues it).
  */
 async function reanalyzeVideo() {
+    const count = state.thumbnailsTotal;
     const confirmed = await ThumbnailApp.showModal({
         title: t('analysis.reanalyze_title'),
-        htmlMessage: t('analysis.reanalyze_message'),
+        htmlMessage: t('analysis.reanalyze_message', {
+            thumbnails: t(count === 1 ? 'index.card.thumbnails_one' : 'index.card.thumbnails_other', { count })
+        }),
         type: 'danger',
-        confirmText: t('index.card.reanalyze'),
+        confirmText: t('video_analyze.reanalyze_confirm'),
         cancelText: t('common.cancel')
     });
     if (!confirmed) return;
@@ -338,12 +342,16 @@ function hideAnalysisOverlay() {
 function updateAnalysisOverlay(task) {
     if (!analysisOverlay.container) return;
 
-    const progress = task.progress || 0;
-    const step = task.current_step || t('analysis_overlay.starting');
-
-    analysisOverlay.progressFill.style.width = `${progress}%`;
-    analysisOverlay.step.textContent = step;
-    analysisOverlay.percent.textContent = `${progress}%`;
+    // A cancelled analysis that is still stopping keeps the bar where it was
+    const stopping = window.TaskQueue.isStopping(task);
+    if (!stopping) {
+        const progress = task.progress || 0;
+        analysisOverlay.progressFill.style.width = `${progress}%`;
+        analysisOverlay.percent.textContent = `${progress}%`;
+    }
+    analysisOverlay.step.textContent = window.TaskQueue.stepLabel(task);
+    analysisOverlay.percent.classList.toggle('hidden', stopping);
+    analysisOverlay.cancelBtn.classList.toggle('hidden', stopping);
 }
 
 /**
@@ -363,27 +371,13 @@ async function cancelAnalysis() {
     });
 
     if (confirmed) {
-        try {
-            const response = await fetch(`/api/tasks/analysis/${task.id}/cancel`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
-            });
-
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                throw new Error(error.detail || 'Failed to cancel');
-            }
-        } catch (error) {
-            console.error('Error cancelling analysis:', error);
-            if (window.showToast) {
-                showToast(error.message, 'error');
-            }
-        }
+        // The task queue says whether it could; its events update the overlay
+        await window.TaskQueue.cancelTask('analysis', task.id);
     }
 }
 
 /**
- * Reload all page content after analysis completes.
+ * Reload all page content after an analysis ends.
  */
 function reloadPageContent() {
     loadVideoInfo().catch(error => {
@@ -445,27 +439,13 @@ async function initAnalysisOverlay() {
                 updateAnalysisOverlay(task);
                 break;
 
+            // However it ended (the task queue says how), the page shows the
+            // video as it is now: analyzed, as it was, or with why it failed
             case 'task_completed':
-                hideAnalysisOverlay();
-                reloadPageContent();
-                if (window.showToast) {
-                    showToast(t('analysis.complete'), 'success');
-                }
-                break;
-
             case 'task_cancelled':
-                hideAnalysisOverlay();
-                if (window.showToast) {
-                    showToast(t('task_queue.cancelled'), 'info');
-                }
-                break;
-
             case 'task_error':
                 hideAnalysisOverlay();
-                if (window.showToast) {
-                    const msg = task.error_message || t('errors.analysis_failed');
-                    showToast(msg, 'error');
-                }
+                reloadPageContent();
                 break;
         }
     });
@@ -520,11 +500,13 @@ function setupGenerationTaskSubscription() {
                 }
                 break;
 
+            // The job ended and let go of the video, however it did: a cancelled
+            // or failed one keeps the thumbnails it had made
             case 'task_completed':
-                // Reload full gallery to ensure sync
-                console.log(`Generation job ${task.id} completed, reloading gallery`);
+            case 'task_cancelled':
+            case 'task_error':
                 Thumbnails.loadExisting();
-                // Restore button if SSE complete event didn't arrive
+                // The job's own stream restores the button too; this covers a cut one
                 Generation.restoreSubmitButtonIfNeeded();
                 break;
         }
@@ -591,6 +573,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     People.init({ setView: Clusters.setViewType });
     References.init();
     document.addEventListener('people:changed', Clusters.updatePeopleBadges);
+    // Back from the person editor with the browser's button: people may have
+    // been renamed, emptied or renumbered there, and the list acts by position
+    window.addEventListener('pageshow', (e) => { if (e.persisted) Clusters.load(); });
 
     // Load all data
     loadVideoInfo().catch(error => {

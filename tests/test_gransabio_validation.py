@@ -324,7 +324,7 @@ def test_changed_text_contract_regenerates_concepts_but_reuses_identity(monkeypa
 
     config = PromptGenerationConfig(custom_instructions='Render the headline exactly: HELLO!')
     kwargs = _ideas_kwargs(tmp_path, prompt_config=config)
-    summary = prompts.get_transcription_summary('transcript', 3000)
+    summary = prompts.get_transcription_summary('transcript')
     previous_schema = deepcopy(CONCEPT_SCHEMA)
     previous_schema['properties']['text_overlay'] = {'type': 'string'}
     previous_schema['required'].append('text_overlay')
@@ -391,6 +391,84 @@ def test_avoid_repeat_always_brings_new_ideas(monkeypatch, tmp_path):
         config = PromptGenerationConfig(include_history=True, history_prompts=history)
         prompts.generate_thumbnail_images(**_ideas_kwargs(tmp_path, prompt_config=config))
     assert len(ideas.skeletons) == 1 and len(ideas.concepts) == 2
+
+
+def test_ideas_that_fail_half_way_keep_what_was_paid_for(monkeypatch, tmp_path):
+    """The skeleton (the call that carries the photos) and the ideas already written used to be asked for again."""
+    import prompt_generation as prompts
+
+    ideas = _Ideas(monkeypatch)
+
+    def fails_on_the_third(**kwargs):
+        if len(ideas.concepts) == 2:
+            raise RuntimeError('Gran Sabio did not answer')
+        return ideas.concept(**kwargs)
+
+    monkeypatch.setattr(generator, 'generate_concept_gransabio', fails_on_the_third)
+    with pytest.raises(RuntimeError):
+        prompts.generate_thumbnail_images(**_ideas_kwargs(tmp_path, num_images=4))
+    assert len(ideas.skeletons) == 1 and len(ideas.concepts) == 2
+
+    # The same request again: only what was missing, written knowing the ideas there already are
+    known = []
+
+    def goes_on(**kwargs):
+        known.append([concept['concept_name'] for concept in kwargs['prior_concepts']])
+        return ideas.concept(**kwargs)
+
+    monkeypatch.setattr(generator, 'generate_concept_gransabio', goes_on)
+    images = prompts.generate_thumbnail_images(**_ideas_kwargs(tmp_path, num_images=4))
+
+    assert len(ideas.skeletons) == 1 and len(ideas.concepts) == 4
+    assert known == [['Idea 1', 'Idea 2'], ['Idea 1', 'Idea 2', 'Idea 3']]
+    assert [(image.image_index, image.concept_name) for image in images] == \
+        [(1, 'Idea 1'), (2, 'Idea 2'), (3, 'Idea 3'), (4, 'Idea 4')]
+
+    # And now it is a whole batch: nothing is asked for
+    again = prompts.generate_thumbnail_images(**_ideas_kwargs(tmp_path, num_images=4))
+    assert len(ideas.concepts) == 4 and [image.concept_name for image in again] == [image.concept_name for image in images]
+
+
+def test_cancelled_ideas_stop_asking_and_keep_what_they_wrote(monkeypatch, tmp_path):
+    """Every idea of the batch used to be written, and paid for, before the cancellation was seen."""
+    import prompt_generation as prompts
+
+    ideas = _Ideas(monkeypatch)
+
+    # The job is cancelled while the second idea is being written
+    images = prompts.generate_thumbnail_images(**_ideas_kwargs(
+        tmp_path, num_images=5, cancellation_check=lambda: len(ideas.concepts) >= 2))
+
+    assert len(ideas.concepts) == 2 and [image.concept_name for image in images] == ['Idea 1', 'Idea 2']
+
+    # Asked for again, the batch goes on from the third idea
+    images = prompts.generate_thumbnail_images(**_ideas_kwargs(tmp_path, num_images=5))
+    assert len(ideas.skeletons) == 1 and len(ideas.concepts) == 5 and len(images) == 5
+
+
+def test_ideas_cancelled_before_they_start_ask_for_nothing(monkeypatch, tmp_path):
+    import prompt_generation as prompts
+
+    ideas = _Ideas(monkeypatch)
+
+    assert prompts.generate_thumbnail_images(**_ideas_kwargs(tmp_path, cancellation_check=lambda: True)) == []
+    assert not ideas.skeletons and not ideas.concepts
+    assert not (tmp_path / 'prompts' / 'images.json').exists()
+
+
+def test_ideas_read_more_than_the_first_minutes_of_the_video(monkeypatch, tmp_path):
+    """They read 3,000 characters, about three minutes; titles and descriptions already read 30,000."""
+    import prompt_generation as prompts
+    from transcription import TRANSCRIPT_CHARS_FOR_AI
+
+    ideas = _Ideas(monkeypatch)
+    quarter_of_an_hour = 'Una frase del vídeo. ' * 700
+
+    prompts.generate_thumbnail_images(**_ideas_kwargs(tmp_path, transcription=quarter_of_an_hour))
+
+    assert ideas.skeletons[0]['transcription'] == ideas.concepts[0]['transcription'] == quarter_of_an_hour
+    assert len(quarter_of_an_hour) > 3000
+    assert len(prompts.get_transcription_summary('Otra frase más. ' * 4000)) <= TRANSCRIPT_CHARS_FOR_AI
 
 
 def test_a_miss_names_what_changed(monkeypatch, tmp_path, caplog):

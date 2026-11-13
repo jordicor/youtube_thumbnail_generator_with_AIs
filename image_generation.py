@@ -860,7 +860,9 @@ def generate_with_openai(
     Generate image using OpenAI GPT Image.
 
     Supports (all with up to 16 reference images, sent to images.edit):
-    - gpt-image-2.5-sunburst (most capable, precise editing)
+    - gpt-image-2.6-sunburst (detailed compositions and precise editing)
+    - gpt-image-2.6-flare (fast generation and editing)
+    - gpt-image-2.5-sunburst (precise editing)
     - gpt-image-2.5-flare (fast, high quality)
     - gpt-image-2 (previous generation)
 

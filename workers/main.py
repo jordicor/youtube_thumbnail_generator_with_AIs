@@ -44,8 +44,19 @@ async def startup(ctx: dict) -> None:
 
     # Initialize database connection pool (optional, tasks create their own)
     # This just ensures the database exists and migrations are run
-    from database.db import init_db
+    from database.db import get_db, init_db
+    from services.task_service import release_interrupted_tasks
     await init_db()
+
+    # Recover the previous worker's analyses and generations whose executor
+    # stopped. A generation running directly in the CLI keeps its video.
+    async with get_db() as db:
+        interrupted = await release_interrupted_tasks(db)
+    if interrupted['analyses'] or interrupted['generations']:
+        logger.warning(
+            f"The previous worker left {interrupted['analyses']} analysis(es) and "
+            f"{interrupted['generations']} generation job(s) unfinished; their videos are free again"
+        )
 
     logger.info("Worker startup complete")
 
@@ -106,8 +117,8 @@ class WorkerSettings:
     # Retry delay (exponential backoff handled by arq)
     retry_jobs = True
 
-    # Queue name
-    queue_name = "arq:queue"
+    # Queue name. The web reads this worker's health key from it (services/queue_health.py)
+    queue_name = WS.QUEUE_DEFAULT
 
     # Log job results
     after_job_end = None  # Can add a hook here for custom logging

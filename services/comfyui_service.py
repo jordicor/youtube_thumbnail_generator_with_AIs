@@ -63,7 +63,7 @@ class Profile(StrictModel):
     seed: list[Binding] = Field(min_length=1)
     references: list[Binding] = Field(min_length=1, max_length=64)
     output_node: str
-    prompt_format: Literal["qwen", "json"] = "json"
+    prompt_format: Literal["qwen", "minimax", "json"] = "json"
     parameters: dict[str, Parameter] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -155,8 +155,10 @@ def build_prompt(profile, image, reference_count):
     mapping = getattr(image, "reference_mapping", None)
     if mapping and [entry["image_index"] for entry in mapping] != list(range(1, reference_count + 1)):
         raise ValueError("Reference mapping does not match the uploaded image order")
-    contract = json.dumps(build_image_prompt_v3(image, has_reference_images=True),
-                          ensure_ascii=False, separators=(",", ":"))
+    description = build_image_prompt_v3(image, has_reference_images=True)
+    if profile.prompt_format == "minimax":
+        return _minimax_prompt(image, description, reference_count)
+    contract = json.dumps(description, ensure_ascii=False, separators=(",", ":"))
     if profile.prompt_format == "json":
         return contract
     slots = []
@@ -170,6 +172,52 @@ def build_prompt(profile, image, reference_count):
             "Preserve each person's identity and assigned clothing. Follow the specified "
             "roles for style and environments. Render only the requested visible text.\n"
             + "\n".join(slots) + "\n" + contract)
+
+
+def _minimax_prompt(image, description, reference_count):
+    """Render the existing scene as prose using MiniMax's picture labels."""
+    from image_generation import _build_face_source_header
+
+    parts = [
+        "Create a new 16:9 YouTube thumbnail. The attached pictures supply the assigned "
+        "identity, body, setting, or style references. Compose the target image as described; "
+        "do not copy a reference sheet or make a collage of the input pictures.",
+        " ".join(f"<Picture {index}> is Image {index}." for index in range(1, reference_count + 1)),
+        _build_face_source_header(image.reference_mapping).strip(),
+        image.scene or image.image_prompt,
+    ]
+    for person, character in description.get("characters", {}).items():
+        if character.get("outfit"):
+            parts.append(f"{person} wears {character['outfit']}.")
+        if character.get("outfit_note"):
+            parts.append(character["outfit_note"])
+    for label, value in (
+        ("Pose", image.subject_pose), ("Expression", image.subject_expression),
+        ("Action", image.subject_action), ("Mood", image.mood),
+    ):
+        if value:
+            parts.append(f"{label}: {value}.")
+    environment = description["scene"]["environment"]
+    for label, value in environment.items():
+        if value:
+            text = "; ".join(value) if isinstance(value, list) else value
+            parts.append(f"{label.replace('_', ' ')}: {text}.")
+    for label, value in description["camera_and_lighting"].items():
+        parts.append(f"{label}: {value}.")
+    for label, value in description.get("style_directive", {}).items():
+        if value and label != "mandatory":
+            text = "; ".join(value) if isinstance(value, list) else value
+            parts.append(f"{label.replace('_', ' ')}: {text}.")
+    palette = image.color_palette or image.colors
+    if palette:
+        parts.append(f"Color palette: {', '.join(palette)}.")
+    parts.append(f"Quality: {description['output']['quality']}.")
+    if image.text_in_image:
+        parts.append(f"The only visible lettering is {json.dumps(image.text_in_image, ensure_ascii=False)}. "
+                     "Preserve its exact spelling and language, with bold legible typography.")
+    else:
+        parts.append("The target image contains no lettering, captions, or watermarks.")
+    return "\n".join(parts)
 
 
 class Client:
@@ -252,6 +300,8 @@ class Client:
                     if (not valid_type or value < options.get("min", float("-inf"))
                             or value > options.get("max", float("inf"))):
                         raise ComfyUIError(f"Invalid numeric value for {node_id}.{name}: {value}")
+                    if kind == "INT" and options.get("step") and (value - options.get("min", 0)) % options["step"]:
+                        raise ComfyUIError(f"Invalid numeric step for {node_id}.{name}: {value}")
                 if kind == "STRING" and not isinstance(value, str):
                     raise ComfyUIError(f"Expected text for {node_id}.{name}")
         for binding in profile.references:
@@ -262,8 +312,20 @@ class Client:
                 continue
             prefix, separator, slot = binding.input.partition(".")
             dynamic = inputs.get(prefix)
-            if not (separator and dynamic and dynamic[0] == "COMFY_AUTOGROW_V3"
-                    and slot in dynamic[1]["template"].get("names", [])):
+            if not (separator and dynamic and dynamic[0] == "COMFY_AUTOGROW_V3"):
+                raise ComfyUIError(f"Unsupported image input: {binding.node}.{binding.input}")
+            template = dynamic[1]["template"]
+            template_inputs = template["input"].get("required", {})
+            if len(template_inputs) != 1 or next(iter(template_inputs.values()))[0] != "IMAGE":
+                raise ComfyUIError(f"Unsupported image input: {binding.node}.{binding.input}")
+            if "names" in template:
+                valid_slot = slot in template["names"]
+            else:
+                prefix = template.get("prefix", "")
+                number = slot.removeprefix(prefix)
+                valid_slot = (bool(prefix) and slot.startswith(prefix) and number.isascii() and number.isdigit()
+                              and str(int(number)) == number and 1 <= int(number) <= template["max"])
+            if not valid_slot:
                 raise ComfyUIError(f"Unsupported image input: {binding.node}.{binding.input}")
         if not info["nodes"][profile.workflow[profile.output_node]["class_type"]].get("output_node"):
             raise ComfyUIError("The selected workflow output is not an output node")

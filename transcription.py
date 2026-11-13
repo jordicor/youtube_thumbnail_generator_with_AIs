@@ -30,12 +30,46 @@ from utils import setup_logger, VideoOutput
 logger = setup_logger(__name__)
 
 
+class TranscriptionError(Exception):
+    """The audio could not be extracted or transcribed. The message says why."""
+
+
+def _last_lines(output: bytes, count: int = 3) -> str:
+    """The end of a tool's output, where ffmpeg and ffprobe say what went wrong."""
+    lines = [line.strip() for line in output.decode('utf-8', errors='ignore').splitlines() if line.strip()]
+    return ' | '.join(lines[-count:])[:500]
+
+
 # =============================================================================
 # AUDIO EXTRACTION
 # =============================================================================
 
-def extract_audio(video_path: Path) -> Optional[Path]:
-    """Extract audio from video using ffmpeg"""
+def has_audio_track(video_path: Path) -> bool:
+    """Whether the video has an audio track at all (ffprobe)."""
+
+    cmd = [
+        'ffprobe',
+        '-v', 'error',
+        '-select_streams', 'a',
+        '-show_entries', 'stream=index',
+        '-of', 'csv=p=0',
+        str(video_path)
+    ]
+
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise TranscriptionError("The video could not be read: ffprobe gave no answer in 2 minutes") from None
+    except OSError as error:
+        raise TranscriptionError(f"The video could not be read: ffprobe did not run ({error})") from error
+
+    if result.returncode != 0:
+        raise TranscriptionError(f"The video could not be read: ffprobe: {_last_lines(result.stderr)}")
+    return bool(result.stdout.strip())
+
+
+def extract_audio(video_path: Path) -> Path:
+    """Extract audio from video using ffmpeg. Raises TranscriptionError if it cannot."""
 
     logger.info("Extracting audio with ffmpeg...")
 
@@ -44,50 +78,46 @@ def extract_audio(video_path: Path) -> Optional[Path]:
     temp_audio_path = Path(temp_audio.name)
     temp_audio.close()
 
-    try:
-        cmd = [
-            'ffmpeg',
-            '-i', str(video_path),
-            '-vn',                  # No video
-            '-acodec', 'libmp3lame',
-            '-ab', '128k',          # Bitrate
-            '-ar', '44100',         # Sample rate
-            '-ac', '1',             # Mono
-            '-y',                   # Overwrite
-            str(temp_audio_path)
-        ]
+    cmd = [
+        'ffmpeg',
+        '-i', str(video_path),
+        '-vn',                  # No video
+        '-acodec', 'libmp3lame',
+        '-ab', '128k',          # Bitrate
+        '-ar', '44100',         # Sample rate
+        '-ac', '1',             # Mono
+        '-y',                   # Overwrite
+        str(temp_audio_path)
+    ]
 
+    try:
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=600  # 10 minutes
         )
-
-        if result.returncode == 0:
-            audio_size_mb = temp_audio_path.stat().st_size / (1024 * 1024)
-            logger.success(f"Audio extracted: {audio_size_mb:.2f} MB")
-            return temp_audio_path
-        else:
-            logger.error(f"ffmpeg failed: {result.stderr.decode('utf-8', errors='ignore')[:500]}")
-            temp_audio_path.unlink(missing_ok=True)
-            return None
-
     except subprocess.TimeoutExpired:
-        logger.error("ffmpeg timeout (video too long)")
         temp_audio_path.unlink(missing_ok=True)
-        return None
-    except Exception as e:
-        logger.error(f"Error extracting audio: {e}")
+        raise TranscriptionError("The audio could not be extracted: ffmpeg did not finish in 10 minutes") from None
+    except OSError as error:
         temp_audio_path.unlink(missing_ok=True)
-        return None
+        raise TranscriptionError(f"The audio could not be extracted: ffmpeg did not run ({error})") from error
+
+    if result.returncode != 0:
+        temp_audio_path.unlink(missing_ok=True)
+        raise TranscriptionError(f"The audio could not be extracted: ffmpeg: {_last_lines(result.stderr)}")
+
+    audio_size_mb = temp_audio_path.stat().st_size / (1024 * 1024)
+    logger.success(f"Audio extracted: {audio_size_mb:.2f} MB")
+    return temp_audio_path
 
 
 # =============================================================================
 # ELEVENLABS TRANSCRIPTION
 # =============================================================================
 
-def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dict]]:
+def transcribe_elevenlabs(audio_path: Path) -> Tuple[str, dict]:
     """
     Transcribe audio using ElevenLabs API with diarization enabled.
 
@@ -98,15 +128,22 @@ def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dic
 
     Returns:
         Tuple of (text, full_response_dict)
-        - text: Plain text transcription
+        - text: Plain text transcription, empty when nobody speaks
         - full_response: Complete API response with words, timestamps, speakers
+
+    Raises:
+        TranscriptionError: ElevenLabs did not transcribe the audio
     """
+
+    if not ELEVENLABS_API_KEY:
+        raise TranscriptionError("ElevenLabs could not transcribe the audio: ELEVENLABS_API_KEY is not set in .env")
 
     audio_size_mb = audio_path.stat().st_size / (1024 * 1024)
 
     if audio_size_mb > 3000:  # Scribe v2 supports up to 3GB
-        logger.error(f"Audio file too large for ElevenLabs: {audio_size_mb:.2f} MB (max 3GB)")
-        return None, None
+        raise TranscriptionError(
+            f"ElevenLabs could not transcribe the audio: it is {audio_size_mb:.0f} MB and the limit is 3 GB"
+        )
 
     headers = {
         'xi-api-key': ELEVENLABS_API_KEY
@@ -153,34 +190,38 @@ def transcribe_elevenlabs(audio_path: Path) -> Tuple[Optional[str], Optional[dic
                 timeout=900  # 15 minutes
             )
 
-        if response.status_code == 200:
-            result = response.json()
-            text = result.get('text', '')
-            word_count = len(result.get('words', []))
-            logger.success(f"Transcription complete: {len(text)} chars, {word_count} words with timestamps")
-            return text, result
-        else:
-            logger.error(f"API Error {response.status_code}: {response.text[:500]}")
-            return None, None
-
     except requests.exceptions.Timeout:
-        logger.error("ElevenLabs API timeout")
-        return None, None
-    except Exception as e:
-        logger.error(f"ElevenLabs API failed: {e}")
-        return None, None
+        raise TranscriptionError("ElevenLabs could not transcribe the audio: no answer in 15 minutes") from None
+    except requests.exceptions.RequestException as error:
+        raise TranscriptionError(f"ElevenLabs could not transcribe the audio: {error}") from error
+
+    if response.status_code != 200:
+        raise TranscriptionError(
+            f"ElevenLabs could not transcribe the audio: HTTP {response.status_code}: {response.text[:300]}"
+        )
+
+    result = response.json()
+    text = result.get('text') or ''
+    word_count = len(result.get('words', []))
+    logger.success(f"Transcription complete: {len(text)} chars, {word_count} words with timestamps")
+    return text, result
 
 
 # =============================================================================
 # LOCAL WHISPER TRANSCRIPTION
 # =============================================================================
 
-def transcribe_whisper_local(audio_path: Path) -> Optional[str]:
-    """Transcribe audio using local Whisper model (GPU)"""
+def transcribe_whisper_local(audio_path: Path) -> str:
+    """Transcribe audio using local Whisper model (GPU). Raises TranscriptionError if it cannot."""
 
     try:
         import whisper
+    except ImportError as error:
+        raise TranscriptionError(
+            "Whisper could not transcribe the audio: it is not installed (pip install openai-whisper)"
+        ) from error
 
+    try:
         logger.info(f"Loading Whisper model: {WHISPER_MODEL}")
         model = whisper.load_model(WHISPER_MODEL)
 
@@ -191,56 +232,72 @@ def transcribe_whisper_local(audio_path: Path) -> Optional[str]:
             language=TRANSCRIPTION_LANGUAGE,
             verbose=False
         )
+    except Exception as error:
+        raise TranscriptionError(f"Whisper could not transcribe the audio: {error}") from error
 
-        text = result.get('text', '')
-        logger.success(f"Transcription complete: {len(text)} characters")
+    text = result.get('text') or ''
+    logger.success(f"Transcription complete: {len(text)} characters")
 
-        return text
-
-    except ImportError:
-        logger.error("Whisper not installed. Install with: pip install openai-whisper")
-        return None
-    except Exception as e:
-        logger.error(f"Whisper transcription failed: {e}")
-        return None
+    return text
 
 
 # =============================================================================
 # MAIN TRANSCRIPTION FUNCTION
 # =============================================================================
 
-def transcribe_video(video_path: Path, output: VideoOutput) -> Optional[str]:
+def read_transcription(output: VideoOutput) -> Optional[str]:
     """
-    Transcribe a video file.
+    The saved transcription of a video, without the header of its file.
+
+    Returns:
+        The text (empty for a video without speech), or None when the video
+        has no transcription saved
+    """
+
+    if not output.transcription_file.exists():
+        return None
+
+    lines = output.transcription_file.read_text(encoding='utf-8').split('\n')
+    for i, line in enumerate(lines):
+        # The header ends with a line of '='
+        if line.startswith('='):
+            return '\n'.join(lines[i + 1:]).strip()
+    return '\n'.join(lines).strip()
+
+
+def transcribe_video(video_path: Path, output: VideoOutput) -> str:
+    """
+    Transcribe a video file, or read the transcription it already has.
+
+    A video without an audio track, or where nobody speaks, has an empty
+    transcription. That is a result like any other and is saved, so the video
+    is not sent (and paid for) again.
 
     Args:
         video_path: Path to the video file
         output: VideoOutput instance for saving results
 
     Returns:
-        Transcription text or None if failed
+        Transcription text, empty when the video has no speech
+
+    Raises:
+        TranscriptionError: the audio could not be extracted or transcribed
     """
 
     logger.info(f"Transcribing: {video_path.name}")
 
     # Check if already transcribed
-    if output.transcription_file.exists():
+    saved = read_transcription(output)
+    if saved is not None:
         logger.info("Loading cached transcription...")
-        with open(output.transcription_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-            # Skip header lines
-            lines = content.split('\n')
-            text_start = 0
-            for i, line in enumerate(lines):
-                if line.startswith('='):
-                    text_start = i + 2
-                    break
-            return '\n'.join(lines[text_start:]).strip()
+        return saved
 
-    # Extract audio
+    if not has_audio_track(video_path):
+        logger.info("The video has no audio track: its transcription is empty")
+        save_transcription('', output, video_path)
+        return ''
+
     audio_path = extract_audio(video_path)
-    if not audio_path:
-        return None
 
     try:
         # Transcribe
@@ -250,8 +307,9 @@ def transcribe_video(video_path: Path, output: VideoOutput) -> Optional[str]:
         else:
             text, full_response = transcribe_elevenlabs(audio_path)
 
+        text = text.strip()
         if not text:
-            return None
+            logger.info("Nobody speaks in the video: its transcription is empty")
 
         # Save transcription (text file and JSON with timestamps if available)
         save_transcription(text, output, video_path, full_response)
@@ -260,7 +318,7 @@ def transcribe_video(video_path: Path, output: VideoOutput) -> Optional[str]:
 
     finally:
         # Clean up temp audio
-        if audio_path and audio_path.exists():
+        if audio_path.exists():
             audio_path.unlink()
 
 
@@ -316,11 +374,17 @@ def save_transcription(
 # TRANSCRIPTION SUMMARY FOR PROMPTS
 # =============================================================================
 
-def get_transcription_summary(text: str, max_length: int = 2000) -> str:
-    """
-    Get a summary of the transcription suitable for prompt generation.
+# How much of a transcription the AI reads to write ideas, titles and
+# descriptions: about half an hour of speech. Ideas used to read 3,000, the
+# first three minutes of the video.
+TRANSCRIPT_CHARS_FOR_AI = 30000
 
-    Returns the first portion of the transcription, trying to end at a sentence.
+
+def get_transcription_summary(text: str, max_length: int = TRANSCRIPT_CHARS_FOR_AI) -> str:
+    """
+    The part of the transcription sent to the AI that writes the thumbnail ideas.
+
+    Returns the first max_length characters, trying to end at a sentence.
     """
 
     if not text:

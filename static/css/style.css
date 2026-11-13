@@ -4425,6 +4425,18 @@ textarea.attention {
     font-size: 0.82rem;
 }
 
+/* Why the last generation failed: it stays until another one starts */
+.generation-failure {
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    border: 1px solid rgba(240, 97, 109, 0.35);
+    border-radius: var(--radius);
+    background-color: var(--danger-soft);
+    color: var(--text);
+    font-size: 0.83rem;
+    overflow-wrap: anywhere;
+}
+
 .results-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

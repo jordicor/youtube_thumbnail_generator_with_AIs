@@ -271,6 +271,30 @@
     text-decoration: underline;
 }
 
+/* Why tasks cannot run (Redis or the worker is not there), under the header */
+.queue-banner {
+    /* Above the "analyzing video" layer: it says why that analysis does not move */
+    position: relative;
+    z-index: 1001;
+    border-bottom: 1px solid rgba(245, 181, 68, 0.35);
+    background-color: var(--warning-soft);
+    color: var(--text);
+    font-size: 0.86rem;
+}
+
+.queue-banner-inner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-top: 9px;
+    padding-bottom: 9px;
+}
+
+.queue-banner .icon {
+    flex-shrink: 0;
+    color: var(--warning);
+}
+
 /* Responsive */
 @media (max-width: 480px) {
     .task-queue-modal {

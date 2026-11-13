@@ -3,11 +3,17 @@
  * ==================
  * Global component for viewing and managing running tasks.
  * Connects to SSE endpoint for real-time updates.
+ *
+ * It is the one that tells, on every page, how each task ended (a toast) and
+ * whether tasks can run at all (the banner under the header). Pages only
+ * refresh what they show.
  */
 
 class TaskQueueManager {
     constructor() {
         this.tasks = new Map();
+        // 'ok', 'redis_down' or 'worker_down'; null until the server says
+        this.queueStatus = null;
         this.eventSource = null;
         this.modalVisible = false;
         this.reconnectAttempts = 0;
@@ -201,6 +207,16 @@ class TaskQueueManager {
                 console.error('TaskQueue: Error parsing task_error', err);
             }
         });
+
+        // Whether queued tasks can run: Redis answers and a worker is alive
+        this.eventSource.addEventListener('queue_status', (e) => {
+            try {
+                this.queueStatus = JSON.parse(e.data).status;
+                this.renderQueueBanner();
+            } catch (err) {
+                console.error('TaskQueue: Error parsing queue_status', err);
+            }
+        });
     }
 
     /**
@@ -230,10 +246,36 @@ class TaskQueueManager {
     }
 
     /**
-     * Handle initial tasks snapshot.
+     * Whether a task is still waiting for the worker to take it.
+     */
+    isQueued(task) {
+        return task.status === 'pending' || (task.type === 'analysis' && task.status === 'analyzing');
+    }
+
+    /**
+     * Whether a task was cancelled and its worker has not stopped yet.
+     */
+    isStopping(task) {
+        return task.status === 'stopping';
+    }
+
+    /**
+     * What a task is doing right now, in words.
+     */
+    stepLabel(task) {
+        if (this.isQueued(task)) {
+            return t('task_queue.waiting');
+        }
+        const step = this.isStopping(task) ? `stopping_${task.type}` : task.status;
+        return t(`task_queue.steps.${step}`);
+    }
+
+    /**
+     * Handle the snapshot the stream sends on every (re)connection.
      */
     handleTasksSnapshot(data) {
-        this.tasks.clear();
+        const previous = this.tasks;
+        this.tasks = new Map();
 
         if (data.tasks && Array.isArray(data.tasks)) {
             for (const task of data.tasks) {
@@ -244,6 +286,42 @@ class TaskQueueManager {
 
         this.render();
         this._notifyListeners('tasks_snapshot', data);
+
+        // Tasks that ended while the stream was cut: nobody said how
+        for (const [key, task] of previous) {
+            if (!this.tasks.has(key)) {
+                this.reportEndedTask(task);
+            }
+        }
+    }
+
+    /**
+     * Ask how a task ended and tell it as the stream would have.
+     */
+    async reportEndedTask(task) {
+        let outcome;
+        try {
+            const response = await fetch(`/api/tasks/${task.type}/${task.id}/outcome`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            outcome = await response.json();
+        } catch (error) {
+            console.error('TaskQueue: could not read how a task ended', error);
+            return;
+        }
+
+        // The video got a new task meanwhile: the stream tells that one
+        if (this.tasks.has(this.getTaskKey(task))) return;
+
+        const ended = { ...task, ...outcome };
+        if (outcome.status === 'completed') {
+            this.handleTaskCompleted(ended);
+        } else if (outcome.status === 'error') {
+            this.handleTaskError(ended);
+        } else {
+            this.handleTaskCancelled(ended);
+        }
     }
 
     /**
@@ -275,25 +353,20 @@ class TaskQueueManager {
         this.render();
         this._notifyListeners('task_completed', task);
 
-        // Show toast notification (only for generation, analysis handled by index.html)
-        if (window.showToast && task.type === 'generation') {
-            const message = t('task_queue.generation_complete', { name: ThumbnailApp.formatVideoName(task.video_name) });
-            showToast(message, 'success');
-        }
+        const name = ThumbnailApp.formatVideoName(task.video_name);
+        const message = task.type === 'analysis' ? 'task_queue.analysis_complete' : 'task_queue.generation_complete';
+        ThumbnailApp.showToast(t(message, { name }), 'success');
     }
 
     /**
-     * Handle task cancelled event.
+     * Handle task cancelled event: the task was cancelled and has stopped, or
+     * never got queued. Whoever cancelled it was told when they did.
      */
     handleTaskCancelled(task) {
         const key = this.getTaskKey(task);
         this.tasks.delete(key);
         this.render();
         this._notifyListeners('task_cancelled', task);
-
-        if (window.showToast) {
-            showToast(t('task_queue.cancelled'), 'info');
-        }
     }
 
     /**
@@ -305,11 +378,8 @@ class TaskQueueManager {
         this.render();
         this._notifyListeners('task_error', task);
 
-        // Show toast notification (only for generation, analysis handled by index.html)
-        if (window.showToast && task.type === 'generation') {
-            const message = task.error_message || t('errors.generic');
-            showToast(message, 'error');
-        }
+        const name = ThumbnailApp.formatVideoName(task.video_name);
+        ThumbnailApp.showToast(`${name}: ${task.error_message || t('errors.generic')}`, 'error');
     }
 
     /**
@@ -318,7 +388,7 @@ class TaskQueueManager {
     async confirmCancelTask(taskType, taskId) {
         const confirmed = await showModal({
             title: t('task_queue.cancel_title'),
-            message: t('task_queue.cancel_confirm'),
+            message: t(taskType === 'generation' ? 'task_queue.cancel_confirm_generation' : 'task_queue.cancel_confirm'),
             type: 'warning',
             confirmText: t('common.cancel'),
             cancelText: t('common.close'),
@@ -331,7 +401,9 @@ class TaskQueueManager {
     }
 
     /**
-     * Cancel a task via API.
+     * Cancel a task via API and say whether it could. A running task shows as
+     * stopping until its worker lets go; the stream then removes it.
+     * @returns {Promise<boolean>} Whether the task was cancelled
      */
     async cancelTask(taskType, taskId) {
         try {
@@ -344,15 +416,27 @@ class TaskQueueManager {
 
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
-                throw new Error(error.detail || 'Failed to cancel task');
+                throw new Error(error.detail || `HTTP ${response.status}`);
             }
 
-            // SSE will notify us of the cancellation
+            ThumbnailApp.showToast(t('task_queue.cancelled'), 'info');
+            return true;
         } catch (error) {
             console.error('TaskQueue: Cancel error', error);
-            if (window.showToast) {
-                showToast(error.message, 'error');
-            }
+            ThumbnailApp.showToast(error.message, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * Show under the header why tasks cannot run, while they cannot.
+     */
+    renderQueueBanner() {
+        const banner = document.getElementById('queueBanner');
+        const down = this.queueStatus === 'redis_down' || this.queueStatus === 'worker_down';
+        banner.classList.toggle('hidden', !down);
+        if (down) {
+            document.getElementById('queueBannerText').textContent = t(`task_queue.${this.queueStatus}`);
         }
     }
 
@@ -430,7 +514,7 @@ class TaskQueueManager {
         const pendingTasks = [];
 
         for (const task of this.tasks.values()) {
-            if (task.status === 'pending') {
+            if (this.isQueued(task)) {
                 pendingTasks.push(task);
             } else {
                 activeTasks.push(task);
@@ -474,7 +558,16 @@ class TaskQueueManager {
     renderTaskItem(task, isActive) {
         const icon = this.getTaskIcon(task);
         const typeLabel = this.getTaskTypeLabel(task);
-        const progressHtml = isActive ? this.renderProgress(task) : this.renderPendingStatus();
+        const stopping = this.isStopping(task);
+        const progressHtml = isActive && !stopping ? this.renderProgress(task) : this.renderStepOnly(task);
+        // A task that is already stopping cannot be cancelled again
+        const cancelHtml = stopping ? '' : `
+                    <button class="task-item-cancel"
+                            data-task-type="${task.type}"
+                            data-task-id="${task.id}"
+                            title="${t('task_queue.cancel')}">
+                        ${t('task_queue.cancel')}
+                    </button>`;
 
         return `
             <div class="task-item ${isActive ? 'active' : ''}">
@@ -485,13 +578,7 @@ class TaskQueueManager {
                             <a href="/video/${task.video_id}" class="task-item-link" onclick="window.TaskQueue.hideModal()" title="${escapeHtml(ThumbnailApp.formatVideoName(task.video_name))}">${escapeHtml(ThumbnailApp.formatVideoName(task.video_name))}</a>
                             <div class="task-item-type">${typeLabel}</div>
                         </div>
-                    </div>
-                    <button class="task-item-cancel"
-                            data-task-type="${task.type}"
-                            data-task-id="${task.id}"
-                            title="${t('task_queue.cancel')}">
-                        ${t('task_queue.cancel')}
-                    </button>
+                    </div>${cancelHtml}
                 </div>
                 ${progressHtml}
             </div>
@@ -502,7 +589,7 @@ class TaskQueueManager {
      * Get icon for task type.
      */
     getTaskIcon(task) {
-        if (task.status === 'pending') {
+        if (this.isQueued(task)) {
             return '⏳';
         }
         return task.type === 'analysis' ? '🔍' : '🎨';
@@ -522,16 +609,15 @@ class TaskQueueManager {
      */
     renderProgress(task) {
         const progress = task.progress || 0;
-        const step = task.current_step || '';
 
         let progressText = '';
-        if (task.type === 'generation' && task.total_thumbnails) {
+        if (task.type === 'generation' && task.status === 'generating' && task.total_thumbnails) {
             progressText = t('task_queue.thumbnails_progress', {
                 done: task.thumbnails_generated || 0,
                 total: task.total_thumbnails
             });
         } else {
-            progressText = step;
+            progressText = this.stepLabel(task);
         }
 
         return `
@@ -548,13 +634,13 @@ class TaskQueueManager {
     }
 
     /**
-     * Render pending status indicator.
+     * Render what a task without a progress bar is doing: queued, or stopping.
      */
-    renderPendingStatus() {
+    renderStepOnly(task) {
         return `
             <div class="task-item-progress">
                 <div class="task-progress-text">
-                    <span>${t('task_queue.waiting')}</span>
+                    <span>${this.stepLabel(task)}</span>
                 </div>
             </div>
         `;

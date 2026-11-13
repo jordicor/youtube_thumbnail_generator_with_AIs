@@ -395,7 +395,11 @@ async def move_frames(video_id: int, person_id: int, request: MoveFramesRequest)
 async def get_person_face(video_id: int, person_id: int):
     """Square crop of the person's face in its representative frame."""
     async with get_db() as db:
-        image = await PersonService(db).render_avatar(video_id, person_id)
+        try:
+            image = await PersonService(db).render_avatar(video_id, person_id)
+        except ReferenceImageError as error:
+            # The image of its primary photo is not on disk
+            raise HTTPException(status_code=404, detail=str(error)) from error
     if image is None:
         raise HTTPException(status_code=404, detail=t('api.errors.image_not_found'))
     # Callers add the representative frame ID to the URL, so a new face gets a new URL

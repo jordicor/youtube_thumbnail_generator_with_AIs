@@ -102,11 +102,26 @@ class TestAnalysisCancellationFlow:
             assert row[0] == 'cancelled'
             assert row[1] == 'Cancelled by user'
 
-    async def test_cancel_all_analysis_states(self, test_db):
-        """Should be able to cancel from any analysis state."""
+    async def test_cancel_queued_analysis_gives_the_video_back(self, test_db):
+        """A queued analysis has done nothing: its video returns to what it was."""
+        from services.analysis_service import AnalysisService
+
+        service = TaskService(test_db)
+        video_id = await insert_video(test_db, "queued.mp4", "completed")
+        assert await AnalysisService(test_db).claim_analysis(video_id)
+
+        assert await service.cancel_task('analysis', video_id) is True
+
+        async with test_db.execute(
+            "SELECT status, analysis_run FROM videos WHERE id = ?", (video_id,)
+        ) as cursor:
+            assert await cursor.fetchone() == ('completed', None)
+
+    async def test_cancel_all_running_analysis_states(self, test_db):
+        """Should be able to cancel from any state of a running analysis."""
         service = TaskService(test_db)
 
-        states = ['analyzing', 'analyzing_scenes', 'analyzing_faces', 'clustering', 'transcribing']
+        states = ['analyzing_scenes', 'analyzing_faces', 'clustering', 'transcribing']
 
         for status in states:
             video_id = await insert_video(test_db, f"{status}.mp4", status)

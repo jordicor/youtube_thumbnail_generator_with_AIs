@@ -1,26 +1,26 @@
 """
 Server-Sent Events (SSE) Routes
 
-Real-time progress updates for analysis and generation operations.
+Real-time updates of a generation job and of every task.
 """
 
 import asyncio
-import json
 import orjson
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from database.db import get_db
-from services.analysis_service import AnalysisService
 from services.generation_service import GenerationService
 from services.task_service import TaskService
+from services import queue_health
 from i18n.i18n import translate as t
-# CHANNEL_TASKS is available for future pub/sub optimization if needed
-# Currently the endpoint uses polling for consistency with other SSE endpoints
 
 
 router = APIRouter()
+
+# How often the generation and task streams look at the database
+POLL_SECONDS = 1
 
 
 # =============================================================================
@@ -33,148 +33,6 @@ async def create_sse_message(data: dict, event: str = "message") -> str:
     return f"event: {event}\ndata: {json_data}\n\n"
 
 
-async def create_keepalive() -> str:
-    """Create a keepalive comment to prevent timeout."""
-    return ": keepalive\n\n"
-
-
-# =============================================================================
-# ANALYSIS EVENTS
-# =============================================================================
-
-@router.get("/analysis/{video_id}")
-async def stream_analysis_status(video_id: int, request: Request):
-    """
-    Stream analysis progress updates via SSE.
-
-    Events:
-    - progress: Status update with progress percentage
-    - complete: Analysis finished successfully
-    - error: Analysis failed
-
-    Example client usage:
-        const eventSource = new EventSource('/api/events/analysis/1');
-        eventSource.addEventListener('progress', (e) => {
-            const data = JSON.parse(e.data);
-            console.log(`Progress: ${data.progress}%`);
-        });
-    """
-    async def event_generator() -> AsyncGenerator[str, None]:
-        last_status = None
-        error_count = 0
-        max_errors = 5
-        keepalive_interval = 15  # seconds
-
-        try:
-            while True:
-                # Check if client disconnected
-                if await request.is_disconnected():
-                    break
-
-                try:
-                    async with get_db() as db:
-                        service = AnalysisService(db)
-                        status = await service.get_analysis_status(video_id)
-
-                    if not status:
-                        yield await create_sse_message(
-                            {"error": t('api.errors.video_not_found')},
-                            event="error"
-                        )
-                        break
-
-                    # Only send if status changed
-                    current_state = (status['status'], status.get('progress', 0))
-
-                    if current_state != last_status:
-                        last_status = current_state
-
-                        # Determine event type
-                        if status['status'] == 'error':
-                            yield await create_sse_message(
-                                {
-                                    "video_id": video_id,
-                                    "status": status['status'],
-                                    "progress": 0,
-                                    "error_message": status.get('error_message', t('errors.generic'))
-                                },
-                                event="error"
-                            )
-                            break
-
-                        elif status['status'] in ('analyzed', 'completed'):
-                            yield await create_sse_message(
-                                {
-                                    "video_id": video_id,
-                                    "status": status['status'],
-                                    "progress": 100,
-                                    "clusters": status.get('clusters', 0),
-                                    "message": t('api.messages.analysis_completed')
-                                },
-                                event="complete"
-                            )
-                            break
-
-                        else:
-                            # Progress update
-                            progress_map = {
-                                'pending': 0,
-                                'analyzing': 10,
-                                'analyzing_scenes': 15,
-                                'analyzing_faces': 40,
-                                'clustering': 65,
-                                'transcribing': 85,
-                            }
-                            progress = progress_map.get(status['status'], status.get('progress', 0))
-
-                            step_map = {
-                                'pending': t('api.steps.waiting'),
-                                'analyzing': t('api.steps.analyzing_video'),
-                                'analyzing_scenes': t('api.steps.detecting_scenes'),
-                                'analyzing_faces': t('api.steps.analyzing_faces'),
-                                'clustering': t('api.steps.clustering_faces'),
-                                'transcribing': t('api.steps.transcribing_audio'),
-                            }
-                            current_step = step_map.get(status['status'], status['status'])
-
-                            yield await create_sse_message(
-                                {
-                                    "video_id": video_id,
-                                    "status": status['status'],
-                                    "progress": progress,
-                                    "current_step": current_step
-                                },
-                                event="progress"
-                            )
-
-                    error_count = 0  # Reset on success
-
-                except Exception as e:
-                    error_count += 1
-                    if error_count >= max_errors:
-                        yield await create_sse_message(
-                            {"error": t('api.errors.too_many_errors', error=str(e))},
-                            event="error"
-                        )
-                        break
-
-                # Wait before next check
-                await asyncio.sleep(1)
-
-        except asyncio.CancelledError:
-            pass
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
-        }
-    )
-
-
 # =============================================================================
 # GENERATION EVENTS
 # =============================================================================
@@ -185,10 +43,13 @@ async def stream_generation_status(job_id: int, request: Request):
     Stream generation progress updates via SSE.
 
     Events:
-    - progress: Status update with progress percentage
+    - progress: Status update with progress percentage. Status 'stopping': the
+      job was cancelled and its worker is finishing the thumbnail it was making
     - thumbnail: New thumbnail generated
     - complete: Generation finished successfully
-    - error: Generation failed
+    - cancelled: Generation cancelled, once its worker has stopped
+    - failed: Generation failed. Not 'error': EventSource fires that name on
+      every connection drop too, and a drop is not a failed generation
 
     Example client usage:
         const eventSource = new EventSource('/api/events/generation/1');
@@ -217,7 +78,7 @@ async def stream_generation_status(job_id: int, request: Request):
                     if not status:
                         yield await create_sse_message(
                             {"error": t('api.errors.job_not_found')},
-                            event="error"
+                            event="failed"
                         )
                         break
 
@@ -248,6 +109,7 @@ async def stream_generation_status(job_id: int, request: Request):
                     # Send status update if changed
                     current_state = (
                         status['status'],
+                        status['stopping'],
                         status.get('progress', 0),
                         current_thumbnail_count
                     )
@@ -261,9 +123,9 @@ async def stream_generation_status(job_id: int, request: Request):
                                     "job_id": job_id,
                                     "status": status['status'],
                                     "progress": 0,
-                                    "error_message": status.get('error_message', t('errors.generic'))
+                                    "error_message": status.get('error_message') or t('errors.generic')
                                 },
-                                event="error"
+                                event="failed"
                             )
                             break
 
@@ -281,7 +143,7 @@ async def stream_generation_status(job_id: int, request: Request):
                             )
                             break
 
-                        elif status['status'] == 'cancelled':
+                        elif status['status'] == 'cancelled' and not status['stopping']:
                             yield await create_sse_message(
                                 {
                                     "job_id": job_id,
@@ -293,21 +155,23 @@ async def stream_generation_status(job_id: int, request: Request):
                             break
 
                         else:
-                            # Progress update
+                            # Progress update. A cancelled job still here is
+                            # stopping: its worker may save one more thumbnail
+                            step = TaskService.STOPPING if status['stopping'] else status['status']
                             step_map = {
                                 'pending': t('api.steps.starting'),
                                 'transcribing': t('api.steps.transcribing_audio'),
                                 'prompting': t('api.steps.generating_prompts'),
                                 'generating': t('api.steps.creating_thumbnails'),
+                                TaskService.STOPPING: t('api.steps.stopping_generation'),
                             }
-                            current_step = step_map.get(status['status'], status['status'])
 
                             yield await create_sse_message(
                                 {
                                     "job_id": job_id,
-                                    "status": status['status'],
+                                    "status": step,
                                     "progress": status.get('progress', 0),
-                                    "current_step": current_step,
+                                    "current_step": step_map.get(step, step),
                                     "thumbnails_generated": current_thumbnail_count,
                                     "total_thumbnails": status.get('total_thumbnails', 0)
                                 },
@@ -321,82 +185,12 @@ async def stream_generation_status(job_id: int, request: Request):
                     if error_count >= max_errors:
                         yield await create_sse_message(
                             {"error": t('api.errors.too_many_errors', error=str(e))},
-                            event="error"
+                            event="failed"
                         )
                         break
 
                 # Wait before next check
-                await asyncio.sleep(1)
-
-        except asyncio.CancelledError:
-            pass
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        }
-    )
-
-
-# =============================================================================
-# MULTI-VIDEO EVENTS (for batch processing)
-# =============================================================================
-
-@router.get("/videos/status")
-async def stream_all_videos_status(request: Request):
-    """
-    Stream status updates for all videos.
-
-    Useful for the main video list to show real-time status.
-
-    Events:
-    - update: Video status changed
-    """
-    async def event_generator() -> AsyncGenerator[str, None]:
-        last_statuses = {}
-        error_count = 0
-
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-
-                try:
-                    async with get_db() as db:
-                        # Get all videos
-                        async with db.execute(
-                            "SELECT id, filename, status FROM videos ORDER BY updated_at DESC LIMIT 50"
-                        ) as cursor:
-                            rows = await cursor.fetchall()
-
-                    for row in rows:
-                        video_id = row[0]
-                        current_status = row[2]
-
-                        if last_statuses.get(video_id) != current_status:
-                            last_statuses[video_id] = current_status
-                            yield await create_sse_message(
-                                {
-                                    "video_id": video_id,
-                                    "filename": row[1],
-                                    "status": current_status
-                                },
-                                event="update"
-                            )
-
-                    error_count = 0
-
-                except Exception:
-                    error_count += 1
-                    if error_count >= 5:
-                        yield f"event: error\ndata: {json.dumps({'error': 'Too many errors, closing stream'})}\n\n"
-                        break
-
-                await asyncio.sleep(2)
+                await asyncio.sleep(POLL_SECONDS)
 
         except asyncio.CancelledError:
             pass
@@ -428,10 +222,16 @@ async def stream_all_tasks_status(request: Request):
     Events:
     - tasks_snapshot: Initial state of all active tasks (sent on connect)
     - task_started: New task started
-    - task_progress: Task progress update
+    - task_progress: Task progress update. Status 'stopping': the task was
+      cancelled and its worker has not stopped yet
     - task_completed: Task finished successfully
-    - task_cancelled: Task was cancelled
-    - task_error: Task failed with error
+    - task_cancelled: Task was cancelled and has stopped, or never got queued
+    - task_error: Task failed, with its reason in error_message
+    - queue_status: Whether queued tasks can run ('ok', 'redis_down' or
+      'worker_down'), on connect and whenever it changes
+
+    A task that leaves the lists has ended: how it ended is read from the
+    database (TaskService.get_task_outcome), never assumed.
 
     Example client usage:
         const eventSource = new EventSource('/api/events/tasks');
@@ -448,6 +248,7 @@ async def stream_all_tasks_status(request: Request):
         error_count = 0
         max_errors = 5
         last_task_states = {}
+        last_queue_status = None
 
         try:
             # Send initial snapshot of all active tasks
@@ -478,12 +279,16 @@ async def stream_all_tasks_status(request: Request):
                     event="error"
                 )
 
-            # Poll for updates (consistent with other SSE endpoints)
-            # Redis pub/sub could be used here for lower latency,
-            # but polling ensures consistency with DB state
+            # Poll the database: it is where tasks write what they do
             while True:
                 if await request.is_disconnected():
                     break
+
+                # Whether the queue can run tasks: never waits for Redis
+                current_queue_status = queue_health.status()
+                if current_queue_status is not None and current_queue_status != last_queue_status:
+                    last_queue_status = current_queue_status
+                    yield await create_sse_message({"status": current_queue_status}, event="queue_status")
 
                 try:
                     async with get_db() as db:
@@ -510,26 +315,19 @@ async def stream_all_tasks_status(request: Request):
                             prev_task.get('progress') != task.get('progress') or
                             prev_task.get('thumbnails_generated') != task.get('thumbnails_generated')
                         ):
-                            # Task state changed
-                            if task.get('status') == 'completed':
-                                yield await create_sse_message(task, event="task_completed")
-                            elif task.get('status') == 'cancelled':
-                                yield await create_sse_message(task, event="task_cancelled")
-                            elif task.get('status') == 'error':
-                                yield await create_sse_message(task, event="task_error")
-                            else:
-                                yield await create_sse_message(task, event="task_progress")
+                            yield await create_sse_message(task, event="task_progress")
                             last_task_states[key] = task
 
-                    # Check for tasks that disappeared (completed/removed)
-                    removed_keys = set(last_task_states.keys()) - current_task_keys
-                    for key in removed_keys:
-                        removed_task = last_task_states.pop(key)
-                        # Task finished and is no longer in active/pending lists
-                        if removed_task.get('status') not in ('completed', 'cancelled', 'error'):
-                            # Assume completed if it just disappeared
-                            removed_task['status'] = 'completed'
-                            yield await create_sse_message(removed_task, event="task_completed")
+                    # A task that left the lists has ended: say how
+                    for key in set(last_task_states) - current_task_keys:
+                        ended_task = last_task_states[key]
+                        async with get_db() as db:
+                            outcome = await TaskService(db).get_task_outcome(ended_task['type'], ended_task['id'])
+                        del last_task_states[key]
+                        yield await create_sse_message(
+                            {**ended_task, **outcome},
+                            event=f"task_{outcome['status']}"
+                        )
 
                     error_count = 0
 
@@ -538,7 +336,7 @@ async def stream_all_tasks_status(request: Request):
                     if error_count >= max_errors:
                         break
 
-                await asyncio.sleep(1)
+                await asyncio.sleep(POLL_SECONDS)
 
         except asyncio.CancelledError:
             pass

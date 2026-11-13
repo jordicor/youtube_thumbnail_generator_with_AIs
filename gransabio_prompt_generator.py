@@ -1217,41 +1217,40 @@ def get_prompt_history_for_video(video_id: int, limit: int = 50) -> List[str]:
 
     Returns:
         List of previous concept summaries
+
+    Raises:
+        sqlite3.Error: the history could not be read. It is not answered as an
+            empty history: "avoid repeats" would stop applying without a word.
     """
+    import sqlite3
+    from config import DATABASE_PATH
+
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
     try:
-        import sqlite3
-        from config import DATABASE_PATH
+        cursor = conn.cursor()
 
-        conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
-        try:
-            cursor = conn.cursor()
+        # Get previous prompts from thumbnails table
+        cursor.execute("""
+            SELECT DISTINCT t.prompt_text, t.suggested_title, t.text_overlay
+            FROM thumbnails t
+            JOIN generation_jobs gj ON t.job_id = gj.id
+            WHERE gj.video_id = ?
+            ORDER BY t.id DESC
+            LIMIT ?
+        """, [video_id, limit])
 
-            # Get previous prompts from thumbnails table
-            cursor.execute("""
-                SELECT DISTINCT t.prompt_text, t.suggested_title, t.text_overlay
-                FROM thumbnails t
-                JOIN generation_jobs gj ON t.job_id = gj.id
-                WHERE gj.video_id = ?
-                ORDER BY t.id DESC
-                LIMIT ?
-            """, [video_id, limit])
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
 
-            rows = cursor.fetchall()
-        finally:
-            conn.close()
+    history = []
+    for row in rows:
+        prompt_text, title, overlay = row
+        if prompt_text:
+            summary = f"Title: {title or 'N/A'}\nOverlay: {overlay or 'N/A'}\nPrompt: {prompt_text[:500]}"
+            history.append(summary)
 
-        history = []
-        for row in rows:
-            prompt_text, title, overlay = row
-            if prompt_text:
-                summary = f"Title: {title or 'N/A'}\nOverlay: {overlay or 'N/A'}\nPrompt: {prompt_text[:500]}"
-                history.append(summary)
-
-        return history
-
-    except Exception as e:
-        logger.warning(f"Could not load prompt history: {e}")
-        return []
+    return history
 
 
 # =============================================================================

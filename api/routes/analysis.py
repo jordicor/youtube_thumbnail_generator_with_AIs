@@ -9,6 +9,7 @@ from fastapi.responses import ORJSONResponse
 from typing import Optional, List
 from pydantic import BaseModel, Field, model_validator
 
+from api.dependencies import video_taken_error
 from database.db import get_db
 from services.analysis_service import AnalysisService
 from services.directory_service import DirectoryService
@@ -79,19 +80,16 @@ async def start_analysis(
         # The analysis reads the video file: its directory must answer here
         await DirectoryService(db).switch_video_directory(video_id)
 
-        # Atomic status update to prevent TOCTOU race
-        async with db.execute(
-            """UPDATE videos SET status = 'analyzing', error_message = NULL
-               WHERE id = ? AND status NOT IN ('analyzing', 'analyzing_scenes', 'analyzing_faces', 'clustering', 'transcribing')""",
-            [video_id]
-        ) as cursor:
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code=400, detail=t('api.errors.analysis_in_progress'))
-        await db.commit()
+        # One analysis owns the video; one that is running, generating or
+        # still stopping after a cancellation keeps it
+        analysis_run = await service.claim_analysis(video_id)
+        if analysis_run is None:
+            raise video_taken_error((await service.get_video(video_id))['status'])
 
     # Enqueue analysis job to Redis
     job_id = await enqueue_analysis(
         video_id=video_id,
+        analysis_run=analysis_run,
         force_scenes=request.force_scenes,
         force_faces=request.force_faces,
         force_clustering=request.force_clustering,
@@ -103,10 +101,9 @@ async def start_analysis(
     )
 
     if not job_id:
-        # Failed to enqueue - revert status
+        # Nothing was queued: the video goes back as it was
         async with get_db() as db:
-            service = AnalysisService(db)
-            await service.update_video_status(video_id, 'pending', t('api.errors.failed_enqueue_analysis'))
+            await AnalysisService(db).unclaim_analysis(video_id, analysis_run)
         raise HTTPException(status_code=500, detail=t('api.errors.failed_enqueue_analysis'))
 
     return {
@@ -206,19 +203,16 @@ async def merge_clusters(video_id: int, request: MergeClustersRequest):
                 detail=t('api.errors.min_clusters_required')
             )
 
-        # Merge the clusters
-        result = await service.merge_clusters(
-            video_id,
-            request.cluster_indices,
-            request.target_index,
-            view_mode=request.view_mode
-        )
-
-        if not result:
-            raise HTTPException(
-                status_code=400,
-                detail=t('api.errors.failed_merge_clusters')
+        # Merge the clusters; a merge that cannot be done says why
+        try:
+            await service.merge_clusters(
+                video_id,
+                request.cluster_indices,
+                request.target_index,
+                view_mode=request.view_mode
             )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
         # Get updated clusters for the same view_mode
         clusters = await service.get_clusters(video_id, view_mode=request.view_mode)

@@ -1,6 +1,6 @@
 # Local image generation with ComfyUI
 
-ComfyUI is an image provider in this application. It uses the native HTTP API; no bridge, custom node, plugin, or copied Python file is required on the ComfyUI server. The bundled profile runs **Qwen Image 2.1 with visual references**. Other local models can use explicitly configured API workflow profiles.
+ComfyUI is an image provider in this application. It uses the native HTTP API; no bridge, custom node, plugin, or copied Python file is required on the ComfyUI server. Bundled profiles support **Qwen Image 2.1** and **MiniMax H3 Image**, both with visual references. Other local models can use explicitly configured API workflow profiles. The selector lists application profiles, not every model installed on the server.
 
 This changes image generation only. Thumbnail ideas, titles, and descriptions still use their separately configured AI through Gran Sabio. ComfyUI never falls back to a paid image provider, even when the server is unavailable.
 
@@ -30,14 +30,28 @@ Restart the web application and generation worker after updating. Startup adds t
 
 In **Settings → Thumbnails → Drawing**, select **ComfyUI (local)**, then:
 
-1. Select **Qwen Image 2.1 (references)** in the model/workflow selector.
+1. Select **Qwen Image 2.1 (references)** or **MiniMax H3 Image (references)** in the model/workflow selector.
 2. Enter the ComfyUI URL, such as `http://127.0.0.1:8188`.
 3. Click **Check server and models**. The app checks native nodes and shows the installed model filenames. Replace an unavailable filename with the appropriate installed weight.
 4. Set the timeout per image, including time waiting in ComfyUI's queue, and save.
 
-Select visual references in the normal reference editor. Their order and roles (face, body, style, environment) remain intact. The app uploads them once per generation batch and uses Qwen's `<image1>`, `<image2>`, etc. bindings. It does not combine different people's references into a batch tensor or silently drop extra images.
+Select visual references in the normal reference editor. Their order and roles (face, body, style, environment) remain intact. The app uploads them once per generation batch and uses the model's reference labels. It does not combine different people's references into a batch tensor or silently drop extra images.
 
-The bundled native node exposes up to **16 reference slots**. GPU memory and model behavior still depend on reference count and size. The profile uses a 1024-pixel reference budget inside Qwen's native encoder, a **1536 × 864** canvas, and 25 sampling steps. Local source photos and uploads are not resized first. Final thumbnails are fitted to 1280 × 720; a workflow with another aspect ratio is center-cropped. Originals are retained when `KEEP_RAW_THUMBNAILS=true`.
+Both profiles expose up to **16 reference slots**. GPU memory and model behavior still depend on reference count and size. Qwen uses `<image1>` labels, a 1024-pixel reference budget inside its native encoder, a **1536 × 864** canvas, and 25 sampling steps. Local source photos and uploads are not resized first. Final thumbnails are fitted to 1280 × 720; a workflow with another aspect ratio is center-cropped. Originals are retained when `KEEP_RAW_THUMBNAILS=true`.
+
+## MiniMax H3 Image
+
+Requires **ComfyUI 0.45.0 or newer**, including the native `MiniMaxH3ImageConditioning` node. Follow the [official ComfyUI guide](https://docs.comfy.org/tutorials/image/minimax/minimax-h3-image) and install:
+
+| File | ComfyUI folder |
+| --- | --- |
+| `minimax_h3_image_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
+| `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | `models/text_encoders/` |
+| `minimax_h3_image_vae_fp16.safetensors` | `models/vae/` |
+
+The [bundled MiniMax profile](workflows/comfyui/minimax-h3-image.json) uses **2752 × 1536** (about 4.2 MP), **6 steps**, Euler/simple, CFG 1, and denoise 1. MiniMax works best at higher resolutions than typical thumbnails; generating directly at 1280 × 720 is not the intended starting point. Width and height are editable in Settings and must be multiples of 32. The 4.2 MP default is near 16:9 and is slightly center-cropped when fitted to the final thumbnail. Higher resolutions and additional references need more memory and time; the quantized models still require RAM offloading on a 24 GB GPU.
+
+References are connected to both the text encoder and the image VAE through the conditioning node. The prompt uses `<Picture 1>`, `<Picture 2>`, etc., preserves the existing role mapping and clothing changes, and renders the scene as prose with the exact requested lettering. The existing idea generator already supplies detailed scenes, so this profile does not load another prompt-expansion model. For best results, request English visual descriptions in the idea instructions while keeping visible lettering in the video's language. Image generation remains local; the separately selected idea model may be a cloud service.
 
 ## Configurable workflows
 
@@ -50,7 +64,7 @@ A profile contains:
 - `seed`: node/input bindings receiving a fresh random seed for each thumbnail.
 - `references`: ordered bindings to image inputs. Leave those inputs unconnected in the stored graph; the app inserts native `LoadImage` nodes. Remove old example-image nodes and any unused branches.
 - `output_node`: one output node that returns exactly one image through native history and `/view`. Keep batch size at 1; the application runs one job per thumbnail.
-- `prompt_format`: `qwen` for numbered Qwen reference instructions plus the scene contract, or `json` for the existing structured scene contract.
+- `prompt_format`: `qwen` for numbered Qwen reference instructions plus the scene contract, `minimax` for prose with numbered picture labels, or `json` for the existing structured scene contract.
 - `parameters`: optional named bindings with a `label`, `node`, and `input`. They become editable Settings fields; enum values come from the server's node metadata. The built-in profile exposes the three weight selectors. Other profiles can expose numeric sampling or canvas inputs too.
 
 The native Qwen profile uses `UNETLoader`, `CLIPLoader`, `VAELoader`, `TextEncodeQwenImage21`, `EmptyLatentImage`, `KSampler`, `VAEDecode`, `LoadImage`, and `SaveImage`. It needs no extra installation files in this project. Imported workflows must use available compatible nodes; missing nodes fail validation. ComfyUI nodes marked as paid/API nodes are rejected. Only import workflows and custom server nodes you trust; this client is not a sandbox for arbitrary third-party node code.

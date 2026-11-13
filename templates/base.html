@@ -46,6 +46,13 @@
         </div>
     </header>
 
+    <!-- Why analyses and generations cannot run, while they cannot (task-queue.js) -->
+    <div class="queue-banner hidden" id="queueBanner" role="alert">
+        <div class="container queue-banner-inner">
+            {{ icon('alert') }}<span id="queueBannerText"></span>
+        </div>
+    </div>
+
     <main class="main">
         <div class="container">
             {% block breadcrumbs %}{% endblock %}

@@ -41,11 +41,12 @@ async def test_settings_say_what_face_swap_misses(client, monkeypatch):
     assert body["settings"]["generation"]["face_swap"] is True
 
 
-async def test_saved_settings_are_read_back(client):
+@pytest.mark.parametrize("model", ["gpt-image-2.5-sunburst", "gpt-image-2.6-sunburst", "gpt-image-2.6-flare"])
+async def test_saved_settings_are_read_back(client, model):
     data = _settings(
         thumbnail_ideas={"model": "claude-fable-5", "thinking_enabled": True, "thinking_level": "high"},
         texts={"provider": "openai", "model": "gpt-5.2"},
-        image={"provider": "openai", "model": "gpt-image-2.5-sunburst"},
+        image={"provider": "openai", "model": model},
         generation={"num_images": 8, "expression": "smiling", "face_swap": False, "face_photos": 16},
     )
     response = await client.put("/api/settings", json=data)

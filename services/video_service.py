@@ -115,61 +115,6 @@ class VideoService:
         await self.db.commit()
         return cursor.rowcount
 
-    async def reanalyze_video(self, video_id: int) -> bool:
-        """
-        Delete all analysis data for a video and reset to pending.
-        Deletes: clusters, cluster_frames, generation_jobs, thumbnails (DB and files).
-        Keeps: video record, preview image.
-        """
-        video = await self.get_video(video_id)
-        if not video:
-            return False
-
-        import sys
-        import shutil
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from config import OUTPUT_DIR
-        from utils import sanitize_filename
-
-        video_name = Path(video['filepath']).stem
-        safe_name = sanitize_filename(video_name)
-        output_dir = Path(OUTPUT_DIR) / safe_name
-
-        # Delete from database (cascade handles cluster_frames and thumbnails)
-        # Delete clusters (cascade deletes cluster_frames)
-        await self.db.execute(
-            "DELETE FROM clusters WHERE video_id = ?",
-            [video_id]
-        )
-
-        # Delete generation_jobs (cascade deletes thumbnails)
-        await self.db.execute(
-            "DELETE FROM generation_jobs WHERE video_id = ?",
-            [video_id]
-        )
-
-        # Delete video_frames so stale frame data does not persist
-        await self.db.execute(
-            "DELETE FROM video_frames WHERE video_id = ?",
-            [video_id]
-        )
-
-        # Reset video status to pending
-        await self.db.execute(
-            "UPDATE videos SET status = 'pending', error_message = NULL WHERE id = ?",
-            [video_id]
-        )
-        await self.db.commit()
-
-        # Delete files from disk (keep preview.jpg)
-        dirs_to_delete = ['clusters', 'frames', 'thumbnails']
-        for dir_name in dirs_to_delete:
-            dir_path = output_dir / dir_name
-            if dir_path.exists():
-                shutil.rmtree(dir_path)
-
-        return True
-
     async def get_video_thumbnail(self, video_id: int) -> Optional[str]:
         """
         Get a thumbnail preview for a video.

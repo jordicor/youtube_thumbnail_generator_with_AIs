@@ -51,6 +51,7 @@ aiohttp>=3.9.0             # Async HTTP client (required for Gran Sabio LLM clie
 
 # Database
 aiosqlite>=0.19.0          # Async SQLite
+psutil>=5.9.0             # Identify live job executors across worker and CLI processes
 
 # Job Queue (Redis)
 redis>=5.0.0               # Redis client (async support included)

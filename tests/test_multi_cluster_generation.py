@@ -1,10 +1,12 @@
 """Multi-cluster jobs and face swap under the generation ownership rules."""
 
 import argparse
+import asyncio
 import importlib
 import logging
 import re
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +17,7 @@ from pydantic import ValidationError
 import pytest
 
 from services.face_swap_service import FaceSwapResult
-from services.generation_service import GenerationCancelledError, GenerationService
+from services.generation_service import GenerationCancelledError, GenerationNotReadyError, GenerationService
 from utils import to_output_relative
 
 
@@ -98,7 +100,11 @@ async def test_legacy_job_cluster_migration_keeps_jobs_and_thumbnails(test_db, m
     await _run_migrations(test_db)
 
     async with test_db.execute("PRAGMA table_info(generation_jobs)") as cursor:
-        assert 'cluster_id' not in [row[1] for row in await cursor.fetchall()]
+        columns = {row[1] for row in await cursor.fetchall()}
+        assert 'cluster_id' not in columns
+        assert {'executor_host', 'executor_pid', 'executor_started_at'} <= columns
+    # Startup on the migrated database must keep the new executor fields intact.
+    await _run_migrations(test_db)
     assert await GenerationService(test_db).get_job_clusters(41) == [
         {'cluster_id': 7, 'person_id': 'person_01', 'cluster_order': 0}
     ]
@@ -357,7 +363,7 @@ async def test_disabled_face_swap_is_skipped(generation_db, stub_pipeline, monke
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_face_swap_is_cleaned_before_release(generation_db, stub_pipeline, monkeypatch):
+async def test_cancellation_during_face_swap_keeps_the_thumbnails_and_releases(generation_db, stub_pipeline, monkeypatch):
     from services import face_swap_pipeline
     from workers import tasks
 
@@ -390,8 +396,6 @@ async def test_cancellation_during_face_swap_is_cleaned_before_release(generatio
 
     monkeypatch.setattr(face_swap_pipeline, 'apply_face_swap_to_thumbnail', swap_then_cancel)
     inject_database(monkeypatch, tasks, generation_db)
-    for name in ('publish_progress', 'publish_event', 'publish_task_event'):
-        monkeypatch.setattr(tasks, name, AsyncMock())
     monkeypatch.setattr(tasks, 'create_sync_cancellation_check', lambda job_id: lambda: cancelled)
 
     await tasks.run_generation({}, job['id'], apply_face_swap=True)
@@ -399,8 +403,11 @@ async def test_cancellation_during_face_swap_is_cleaned_before_release(generatio
     assert swapped == ['a.png']
     assert (await service.get_job(job['id']))['status'] == 'cancelled'
     assert await video_status(generation_db) == 'analyzed'
-    assert await count_rows(generation_db, 'thumbnails') == 0
-    assert list(thumbnails_dir.rglob('*.png')) == []
+    # What the job had made stays: both thumbnails and the original of the swapped one
+    assert await count_rows(generation_db, 'thumbnails') == 2
+    assert sorted(path.relative_to(thumbnails_dir).as_posix() for path in thumbnails_dir.rglob('*.png')) == [
+        'a.png', 'b.png', 'raw_swap/a.png',
+    ]
 
 
 @pytest.mark.asyncio
@@ -424,7 +431,8 @@ async def test_job_face_swap_stops_before_next_thumbnail_when_cancelled(generati
 
 
 @pytest.mark.asyncio
-async def test_fix_face_refuses_thumbnail_of_running_job(generation_db, monkeypatch):
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_fix_face_refuses_thumbnail_of_running_job(generation_db, monkeypatch, cancelled):
     import config
     from api.routes import thumbnails
 
@@ -442,6 +450,8 @@ async def test_fix_face_refuses_thumbnail_of_running_job(generation_db, monkeypa
         [job['id'], 'fixture/thumbnails/a.png', 'fixture/thumbnails/raw_swap/a.png'],
     )
     await generation_db.commit()
+    if cancelled:
+        assert await service.cancel_job(job['id'])
 
     with pytest.raises(HTTPException) as error:
         await thumbnails.fix_thumbnail_face(cursor.lastrowid)
@@ -498,6 +508,46 @@ async def test_cli_generate_releases_video_after_cancelled_pipeline(cli, generat
     assert await cli.cmd_generate(generate_args('0')) == 1
     assert (await GenerationService(generation_db).get_job(1))['status'] == 'cancelled'
     assert await video_status(generation_db) == 'analyzed'
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+async def test_worker_start_preserves_a_live_cli_generation(cli, generation_db, stub_pipeline, monkeypatch, cancelled):
+    from database import db as database_module
+    from services import generation_service
+    from workers import main as worker
+
+    monkeypatch.setattr(database_module, 'init_db', AsyncMock())
+    cancel_signal = threading.Event()
+    monkeypatch.setattr(generation_service, 'create_sync_cancellation_check', lambda job_id: cancel_signal.is_set)
+    started = asyncio.Event()
+    allow_finish = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def draw(**kwargs):
+        loop.call_soon_threadsafe(started.set)
+        assert allow_finish.wait(5), 'The synthetic image provider was not released'
+        return [stub_pipeline / 'fixture' / 'thumbnails' / 'a.png']
+
+    monkeypatch.setattr(sys.modules['image_generation'], 'generate_thumbnails_from_images', draw)
+    running = asyncio.create_task(cli.cmd_generate(generate_args('0')))
+    service = GenerationService(generation_db)
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        if cancelled:
+            assert await service.cancel_job(1)
+            cancel_signal.set()
+        await worker.startup({})
+        assert not running.done()
+        assert (await service.get_job(1))['status'] == ('cancelled' if cancelled else 'generating')
+        assert await video_status(generation_db) == 'generating'
+        with pytest.raises(GenerationNotReadyError):
+            await service.create_generation_job(1, [1])
+    finally:
+        allow_finish.set()
+        result = await asyncio.wait_for(running, 2)
+
+    assert result == (1 if cancelled else 0)
+    assert await video_status(generation_db) == ('analyzed' if cancelled else 'completed')
 
 
 @pytest.mark.asyncio
@@ -596,7 +646,14 @@ async def test_mapping_matches_actual_image_attachments(generation_db, stub_pipe
     Image.new('RGB', (75, 45), 'blue').save(style, format='PNG')
     image = SimpleNamespace(reference_mapping=None)
     prompts = Mock(return_value=[image])
-    images = Mock(return_value=[stub_pipeline / 'result.png'])
+    attached = []
+
+    def generate(**kwargs):
+        # The copies only exist while the job runs
+        attached.extend(path.read_bytes() for path in kwargs['best_frames'])
+        return [stub_pipeline / 'result.png']
+
+    images = Mock(side_effect=generate)
     monkeypatch.setattr(sys.modules['prompt_generation'], 'generate_thumbnail_images', prompts)
     monkeypatch.setattr(sys.modules['image_generation'], 'generate_thumbnails_from_images', images)
     service = GenerationService(generation_db)
@@ -617,10 +674,11 @@ async def test_mapping_matches_actual_image_attachments(generation_db, stub_pipe
     assert [(entry['image_index'], entry['person_id']) for entry in mapping if entry['person_id']] == [
         (offset, 'person_01'), (offset + 1, 'person_02'),
     ]
-    attached = [path.read_bytes() for path in paths]
     analyzed = [base64.b64decode(value) for value in prompts.call_args.kwargs['reference_images_base64']]
     assert attached == analyzed
     assert prompt_mapping == mapping
+    # A finished job leaves no copies of its reference images behind
+    assert not (stub_pipeline / 'fixture' / 'temp_refs' / f"job_{job['id']}").exists()
 
 
 def test_restoration_requires_the_swap():
@@ -644,8 +702,6 @@ async def test_restoration_choice_reaches_the_worker_and_swap(generation_db, stu
     assert enqueue.await_args.kwargs['restore_faces'] is True
     job_id = enqueue.await_args.args[1]
     inject_database(monkeypatch, tasks, generation_db)
-    for name in ('publish_progress', 'publish_event', 'publish_task_event'):
-        monkeypatch.setattr(tasks, name, AsyncMock())
     monkeypatch.setattr(tasks, 'create_sync_cancellation_check', lambda job_id: lambda: False)
     swap = AsyncMock(return_value={'processed': 1, 'swapped': 1, 'skipped': 0, 'errors': 0})
     monkeypatch.setattr(face_swap_pipeline, 'apply_face_swap_to_job', swap)
@@ -720,9 +776,19 @@ async def test_body_and_environment_reach_both_providers_without_losing_identity
         VisualReference(role="environment", source_type="frame", source="person_1.png").model_dump(),
     ])
     await generation_db.commit()
+    from PIL import Image
     image = SimpleNamespace(reference_mapping=None)
     prompts = Mock(return_value=[image])
-    images = Mock(return_value=[stub_pipeline / 'result.png'])
+    sizes = []
+
+    def generate(**kwargs):
+        # The copies only exist while the job runs
+        for path in kwargs['best_frames']:
+            with Image.open(path) as attached:
+                sizes.append(attached.size)
+        return [stub_pipeline / 'result.png']
+
+    images = Mock(side_effect=generate)
     monkeypatch.setattr(sys.modules['prompt_generation'], 'generate_thumbnail_images', prompts)
     monkeypatch.setattr(sys.modules['image_generation'], 'generate_thumbnails_from_images', images)
     service = GenerationService(generation_db)
@@ -740,7 +806,4 @@ async def test_body_and_environment_reach_both_providers_without_losing_identity
     assert [entry['person_id'] for entry in mapping] == ['person_01', 'person_01', None]
     assert [entry['image_index'] for entry in mapping] == [1, 2, 3]
     assert prompts.call_args.kwargs['reference_mapping'] == mapping
-    from PIL import Image
-    paths = images.call_args.kwargs['best_frames']
-    assert Image.open(paths[1]).size == (500, 360)
-    assert Image.open(paths[2]).size == (640, 360)
+    assert sizes[1:] == [(500, 360), (640, 360)]

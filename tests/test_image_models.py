@@ -245,9 +245,14 @@ def _capture_provider(monkeypatch, provider):
     return image_generation.generate_with_gemini, call, None
 
 
-@pytest.mark.parametrize('provider', ['openai', 'gemini'])
+@pytest.mark.parametrize(('provider', 'model'), [
+    ('openai', 'gpt-image-2.5-sunburst'),
+    ('openai', 'gpt-image-2.6-sunburst'),
+    ('openai', 'gpt-image-2.6-flare'),
+    ('gemini', 'gemini-3-pro-image'),
+])
 @pytest.mark.parametrize('file_format', ['PNG', 'JPEG'])
-def test_prompt_and_image_providers_receive_the_same_native_pixels(monkeypatch, tmp_path, provider, file_format):
+def test_prompt_and_image_providers_receive_the_same_native_pixels(monkeypatch, tmp_path, provider, model, file_format):
     import base64
     import io
     import numpy as np
@@ -264,9 +269,10 @@ def test_prompt_and_image_providers_receive_the_same_native_pixels(monkeypatch, 
 
     # The stand-in answers without an image
     with pytest.raises(ImageProviderError, match='no image in the answer'):
-        generate('prompt', reference_images=[path], image=SimpleNamespace(has_v2_fields=lambda: True))
+        generate('prompt', reference_images=[path], model=model, image=SimpleNamespace(has_v2_fields=lambda: True))
 
     call.assert_called_once()
+    assert call.call_args.kwargs['model'] == model
     if provider == 'openai':
         filename, payload, mime = call.call_args.kwargs['image']
         assert filename.endswith('.png') and mime == 'image/png'

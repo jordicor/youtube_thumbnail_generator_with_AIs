@@ -22,7 +22,9 @@
     const IMAGE_MODEL_LABELS = {
         'gemini-3-pro-image': ['Nano Banana Pro', 'best_quality'],
         'gemini-nano-banana-2.1': ['Nano Banana 2.1', 'fast'],
-        'gpt-image-2.5-sunburst': ['GPT Image 2.5 Sunburst', 'best'],
+        'gpt-image-2.6-sunburst': ['GPT Image 2.6 Sunburst', 'best'],
+        'gpt-image-2.6-flare': ['GPT Image 2.6 Flare', 'fast'],
+        'gpt-image-2.5-sunburst': ['GPT Image 2.5 Sunburst', null],
         'gpt-image-2.5-flare': ['GPT Image 2.5 Flare', 'fast'],
         'gpt-image-2': ['GPT Image 2', null],
         'nano-banana-pro': ['Nano Banana Pro', null],
@@ -174,7 +176,8 @@
                 input: price.input_per_million, output: price.output_per_million,
             })}`;
         }
-        return model.description ? `${model.name} - ${model.description}` : model.name;
+        // The catalog's description is a technical note about its metadata, not about the model
+        return model.name;
     }
 
     function renderThinking(engine) {

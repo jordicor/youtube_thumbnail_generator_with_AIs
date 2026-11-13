@@ -177,7 +177,7 @@ def process_single_video(
         # Deferred imports: heavy pipeline modules (insightface, cv2, onnx).
         from scene_detection import process_video_scenes
         from face_extraction import process_faces
-        from transcription import transcribe_video
+        from transcription import read_transcription, transcribe_video
         from prompt_generation import generate_thumbnail_images
         from image_generation import generate_thumbnails_from_images
         from gransabio_prompt_generator import PromptGenerationConfig
@@ -236,16 +236,12 @@ def process_single_video(
             transcription = transcribe_video(video_path, output)
 
             if not transcription:
-                logger.warning("Transcription failed, will use video title for prompt")
-                transcription = video_path.stem  # Use filename as fallback
+                logger.warning("Nobody speaks in the video: the prompt will use its title")
+                transcription = video_path.stem
         else:
             logger.info("\n[Step 3/5] Transcription... SKIPPED")
-            # Try to load existing transcription
-            if output.transcription_file.exists():
-                with open(output.transcription_file, 'r', encoding='utf-8') as f:
-                    transcription = f.read()
-            else:
-                transcription = video_path.stem
+            # Use the transcription the video already has, if any
+            transcription = read_transcription(output) or video_path.stem
 
         # Use config defaults or override
         n_images = num_images if num_images else NUM_PROMPT_VARIATIONS
@@ -856,11 +852,11 @@ async def cmd_generate(args) -> int:
             )
             raise
         finally:
-            # A cancelled pipeline keeps the video claimed until its partial
-            # output is removed, then the video becomes retryable.
+            # A cancelled pipeline keeps the video claimed until its steps have
+            # stopped; then the video can generate again. Its finished
+            # thumbnails stay.
             current = await service.get_job(job['id'])
             if current and current['status'] == 'cancelled':
-                await service.cleanup_partial_generation(job['id'])
                 await service.update_job_status(job['id'], 'cancelled')
 
         # Fetch generated thumbnails for output

@@ -416,12 +416,15 @@ class DirectoryService:
         if not directory:
             raise ValueError(f"Directory not found: {directory_id}")
 
+        # Walking the folders and probing each new video (ffprobe, up to 30 s
+        # each, often on a network share) run in a thread: on the event loop
+        # they would leave every other page and stream without an answer
         dir_path = Path(directory['path'])
-        if not dir_path.exists():
+        if not await asyncio.to_thread(dir_path.exists):
             raise ValueError(f"Directory path no longer exists: {directory['path']}")
 
         # Find all video files
-        videos = find_videos(dir_path, VIDEO_EXTENSIONS, EXCLUDE_FOLDERS)
+        videos = await asyncio.to_thread(find_videos, dir_path, VIDEO_EXTENSIONS, EXCLUDE_FOLDERS)
 
         new_count = 0
         existing_count = 0
@@ -443,7 +446,7 @@ class DirectoryService:
                 continue
 
             # Get video info
-            info = get_video_info(video_path)
+            info = await asyncio.to_thread(get_video_info, video_path)
 
             # Insert new video with directory_id
             insert_query = """

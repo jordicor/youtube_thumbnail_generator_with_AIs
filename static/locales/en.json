@@ -324,7 +324,7 @@
     "best_prompt": "Follows instructions best",
     "combine_refs": "Combine refs",
     "text_logos": "Text/logos",
-    "refs_info": "{model} takes up to {max} images per thumbnail: face photos, face sheets and the style image.",
+    "refs_info": "{model} takes up to {max} images per thumbnail: face photos, collages and the style image.",
     "change": "Change",
     "with_thinking": "with reasoning",
     "summary_generate": "Ideas: {text} · Drawing: {image}",
@@ -400,13 +400,12 @@
     "start": "Analyze",
     "analyzing": "Analyzing...",
     "transcribing": "Transcribing audio...",
-    "complete": "Analysis complete",
     "queued": "Queued...",
     "queue_position": "Position: {position}",
     "added_to_queue": "Video added to analysis queue",
     "started_for_count": "Analysis started for {count} video(s)",
     "reanalyze_title": "Re-analyze Video",
-    "reanalyze_message": "Do you want to re-analyze this video?<br><br><strong>Will be deleted:</strong> detected clusters, extracted frames, generation jobs and thumbnails.<br><br><strong>Will NOT be deleted:</strong> the original video file.",
+    "reanalyze_message": "The video will be analyzed again from scratch.<br><br><strong>Will be deleted:</strong> its detected people, with their names, notes and chosen photos, and its generated thumbnails: <strong>{thumbnails}</strong>.<br><br><strong>Kept:</strong> the video, its titles and its descriptions.<br><br><small>If the video file is no longer in its place, nothing is deleted.</small>",
     "reanalyze_started": "Re-analysis started"
   },
   "directory": {
@@ -450,10 +449,13 @@
   "video_analyze": {
     "title": "Analyze Videos",
     "message": "Do you want to analyze <strong>{count}</strong> video(s)?<br><br>This process may take several minutes.",
-    "already_analyzed_title": "Already analyzed videos",
-    "already_analyzed_message": "<strong>{count}</strong> selected video(s) have already been analyzed.<br><br>Do you want to re-analyze them?<br><br><small>Previous analysis data will be deleted.</small>",
-    "reanalyze_all": "Yes, re-analyze all",
-    "no_videos_in_selection": "No videos to analyze in selection"
+    "analyzed_kept": "The other <strong>{count}</strong> selected are already analyzed and stay as they are.",
+    "no_videos_in_selection": "No videos without analysis in the selection",
+    "reanalyze_title": "Re-analyze videos",
+    "reanalyze_message": "<strong>{count}</strong> video(s) will be analyzed again from scratch.<br><br><strong>Will be deleted:</strong> their detected people, with their names, notes and chosen photos, and their generated thumbnails: <strong>{thumbnails}</strong>.<br><br><strong>Kept:</strong> the videos, their titles and their descriptions.<br><br><small>Videos whose file is no longer in its place are left untouched.</small>",
+    "reanalyze_confirm": "Delete and re-analyze",
+    "reanalyze_none": "No analyzed videos in the selection",
+    "reanalyze_refused": "{count} video(s) stay as they are: {reason}"
   },
   "selection": {
     "selected_count": "{count} selected",
@@ -595,6 +597,7 @@
     "instructions_placeholder_with_ref": "E.g.: Use the same background as the reference image. Keep the colors but change the composition. Similar style but more dynamic...",
     "progress_starting": "Starting...",
     "results_generating": "Generating Thumbnails...",
+    "last_failed": "The last generation failed: {error}",
     "face_swap_label": "Put the real face on at the end (face swap)",
     "face_swap_missing": "Not available. Missing: {missing}",
     "step_people": "Who should be in the thumbnail?",
@@ -665,6 +668,8 @@
     "summary_unavailable": "Not available",
     "summary_on": "On",
     "summary_off": "Off",
+    "fallback_tries_others": "tries the others",
+    "fallback_stops": "it stops",
     "summary_face_photos_one": "Up to {count}",
     "summary_face_photos_other": "Up to {count}",
     "results_view_all_count_one": "View the thumbnail",
@@ -783,9 +788,10 @@
       "thumbnail_not_available": "Thumbnail not available",
       "directory_not_found": "Directory not found",
       "analysis_in_progress": "Analysis already in progress",
+      "analysis_stopping": "The cancelled analysis is still stopping. Try again in a few seconds.",
+      "video_file_missing": "The video file was not found, so it cannot be analyzed again. Nothing was deleted.",
       "failed_enqueue_analysis": "Failed to enqueue analysis job",
       "failed_enqueue_generation": "Failed to enqueue generation job",
-      "failed_merge_clusters": "Failed to merge clusters. Verify cluster indices exist.",
       "min_clusters_required": "At least 2 clusters are required for merging",
       "min_one_frame_required": "At least one frame is required",
       "invalid_file_path": "Invalid file path",
@@ -848,7 +854,8 @@
       "transcribing_audio": "Transcribing audio...",
       "starting": "Starting...",
       "generating_prompts": "Planning the thumbnails...",
-      "creating_thumbnails": "Drawing the thumbnails..."
+      "creating_thumbnails": "Drawing the thumbnails...",
+      "stopping_generation": "Stopping: finishing the thumbnail in progress..."
     }
   },
   "time_service": {
@@ -870,14 +877,28 @@
     "empty": "No tasks in queue",
     "cancel": "Cancel",
     "cancel_title": "Cancel Task",
-    "cancel_confirm": "Are you sure you want to cancel this task?",
+    "cancel_confirm": "Stop the analysis? What is already done is kept.",
+    "cancel_confirm_generation": "Stop the generation? The thumbnails already made are kept.",
     "cancelled": "Task cancelled",
+    "cancelled_generation": "Generation stopped. The thumbnails made are kept.",
     "analysis": "Analyzing video",
     "generation": "Generating thumbnails",
     "analysis_complete": "{name}: Analysis completed",
     "generation_complete": "{name}: Thumbnails generated",
     "thumbnails_progress": "{done}/{total} thumbnails",
-    "waiting": "Waiting...",
+    "waiting": "Queued...",
+    "steps": {
+      "analyzing_scenes": "Detecting scenes...",
+      "analyzing_faces": "Analyzing faces...",
+      "clustering": "Grouping faces...",
+      "transcribing": "Transcribing audio...",
+      "prompting": "Thinking up the thumbnails...",
+      "generating": "Drawing the thumbnails...",
+      "stopping_analysis": "Stopping: finishing the step in progress...",
+      "stopping_generation": "Stopping: finishing the thumbnail in progress..."
+    },
+    "redis_down": "Redis is not answering: nothing can be analyzed or generated until it starts.",
+    "worker_down": "The worker is not running: analyses and generations stay queued until it starts.",
     "button": "Tasks"
   },
   "ai_providers": {
@@ -897,18 +918,10 @@
   "analysis_overlay": {
     "title": "Analyzing Video",
     "starting": "Starting analysis...",
-    "cancel": "Cancel Analysis",
-    "detecting_scenes": "Detecting scenes...",
-    "analyzing_faces": "Analyzing faces...",
-    "clustering_faces": "Clustering faces...",
-    "transcribing": "Transcribing audio...",
-    "finalizing": "Finalizing..."
+    "cancel": "Cancel Analysis"
   },
   "queue_indicator": {
     "generating_thumbnails": "Generating: {done} of {total}",
-    "running_and_queued": "{running} running, {queued} queued",
-    "tasks_running": "{count} task(s) running",
-    "tasks_queued": "{count} task(s) queued",
     "view": "View"
   },
   "video_status": {

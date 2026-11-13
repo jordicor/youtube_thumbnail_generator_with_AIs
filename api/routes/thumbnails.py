@@ -9,10 +9,11 @@ import io
 import shutil
 import zipfile
 import orjson
-from fastapi import APIRouter, HTTPException, Query
+import re
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple
+from typing import Annotated, List, Literal, Optional, Tuple
 from datetime import datetime
 from urllib.parse import quote
 
@@ -20,15 +21,33 @@ from database.db import get_db
 from i18n.i18n import translate as t
 from config import FACE_MATCH_BAD_THRESHOLD, OUTPUT_DIR
 from services.face_match import face_match_fields
+from services.generation_service import STOPPING_JOB_SQL
 from utils import resolve_output_path, resolve_row_paths
 
 
 router = APIRouter()
 
 
-def _zip_title(title: Optional[str], image_idx: int) -> str:
-    """Part of a thumbnail's name in a ZIP that comes from its title."""
-    return (title or f"thumbnail_{image_idx}").replace('/', '_').replace('\\', '_')[:50]
+# What Windows does not allow in a file name, and control characters
+_ZIP_FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _zip_title(title: Optional[str], image_index: int) -> str:
+    """Part of a thumbnail's name in a ZIP that comes from its title.
+
+    A valid file name on Windows too: titles carry '?', ':' and quotes, and a
+    name cannot end with a dot or a space there.
+    """
+    name = _ZIP_FORBIDDEN.sub('_', title or '')[:50].rstrip('. ')
+    return name or f"thumbnail_{image_index}"
+
+
+def _provider_raw_path(thumbnail: Path) -> Path:
+    """Where the image as the provider gave it is kept when KEEP_RAW_THUMBNAILS is on:
+    thumbnails/raw/, with "_raw_" after the first part of its name (image_generation.py)."""
+    prefix, separator, rest = thumbnail.stem.partition("_")
+    name = f"{prefix}_raw_{rest}" if separator else f"raw_{thumbnail.stem}"
+    return thumbnail.parent / "raw" / f"{name}{thumbnail.suffix}"
 
 
 def _attachment(download_name: str) -> str:
@@ -56,10 +75,32 @@ def _zip_thumbnails(files: List[Tuple[str, str]]) -> bytes:
     return zip_buffer.getvalue()
 
 
+def _small_copy(image_path: Path, width: int) -> bytes:
+    """The image as a JPEG of that width, for the places that show it small."""
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        image = image.convert("RGB")
+        if image.width > width:
+            image = image.resize((width, round(image.height * width / image.width)), Image.LANCZOS)
+        data = io.BytesIO()
+        image.save(data, "JPEG", quality=85)
+    return data.getvalue()
+
+
 @router.get("/{thumbnail_id}")
-async def get_thumbnail(thumbnail_id: int):
+async def get_thumbnail(
+    thumbnail_id: int,
+    width: Annotated[Optional[int], Query(ge=64, le=1280)] = None,
+    if_none_match: Annotated[Optional[str], Header()] = None,
+):
     """
     Get a specific thumbnail image.
+
+    With `width`, a JPEG copy of that width instead of the file: the gallery
+    shows a dozen cards at a time and the files are PNGs of 1-3 MB each. The
+    copy is made on each request and the browser keeps it while the file does
+    not change (a face swap rewrites it): it revalidates with its ETag.
     """
     async with get_db() as db:
         query = "SELECT filepath FROM thumbnails WHERE id = ?"
@@ -79,7 +120,16 @@ async def get_thumbnail(thumbnail_id: int):
     if not filepath_resolved.exists():
         raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_file_not_found'))
 
-    return FileResponse(str(filepath_resolved), media_type="image/png")
+    if width is not None:
+        stat = filepath_resolved.stat()
+        headers = {"ETag": f'"{stat.st_mtime_ns:x}-{stat.st_size:x}-{width}"', "Cache-Control": "no-cache"}
+        if if_none_match == headers["ETag"]:
+            return Response(status_code=304, headers=headers)
+        copy = await asyncio.to_thread(_small_copy, filepath_resolved, width)
+        return Response(copy, media_type="image/jpeg", headers=headers)
+
+    # The type comes from the file's extension: not every thumbnail is a PNG
+    return FileResponse(str(filepath_resolved))
 
 
 @router.get("/{thumbnail_id}/raw")
@@ -108,7 +158,7 @@ async def get_thumbnail_raw(thumbnail_id: int):
     if not raw_resolved.exists():
         raise HTTPException(status_code=404, detail="Raw thumbnail file missing on disk")
 
-    return FileResponse(str(raw_resolved), media_type="image/png")
+    return FileResponse(str(raw_resolved))
 
 
 @router.post("/{thumbnail_id}/face_swap")
@@ -127,7 +177,12 @@ async def fix_thumbnail_face(thumbnail_id: int, restore_faces: bool = False):
     async with get_db() as db:
         # Load thumbnail + its job
         async with db.execute(
-            "SELECT id, job_id, filepath, raw_path FROM thumbnails WHERE id = ?",
+            f"""
+                SELECT t.id, t.job_id, t.filepath, t.raw_path,
+                       gj.status AS job_status, {STOPPING_JOB_SQL} AS stopping
+                FROM thumbnails t JOIN generation_jobs gj ON gj.id = t.job_id
+                WHERE t.id = ?
+            """,
             [thumbnail_id]
         ) as cursor:
             row = await cursor.fetchone()
@@ -141,11 +196,8 @@ async def fix_thumbnail_face(thumbnail_id: int, restore_faces: bool = False):
         if not filepath.resolve().is_relative_to(output_dir_resolved):
             raise HTTPException(status_code=403, detail=t('api.errors.invalid_file_path'))
 
-        # An active job still owns its thumbnails: its face-swap pass or a
-        # cancellation cleanup may be writing or deleting this same file.
-        service = GenerationService(db)
-        job = await service.get_job(thumb['job_id'])
-        if job and job['status'] not in ('completed', 'cancelled', 'error'):
+        # Cancellation keeps ownership until the worker finishes its last write.
+        if thumb['stopping'] or thumb['job_status'] not in ('completed', 'cancelled', 'error'):
             raise HTTPException(
                 status_code=409,
                 detail="Generation job is still running; retry when it finishes"
@@ -166,6 +218,7 @@ async def fix_thumbnail_face(thumbnail_id: int, restore_faces: bool = False):
             raise HTTPException(status_code=404, detail=t('api.errors.thumbnail_file_not_found'))
 
         # Get the cluster mapping from the originating job
+        service = GenerationService(db)
         job_clusters = await service.get_job_clusters(thumb['job_id'])
         if not job_clusters:
             raise HTTPException(
@@ -210,11 +263,20 @@ async def get_thumbnail_info(thumbnail_id: int):
 @router.delete("/{thumbnail_id}")
 async def delete_thumbnail(thumbnail_id: int):
     """
-    Delete a specific thumbnail.
+    Delete a specific thumbnail, with the copies kept of it: the image from
+    before the face swap, the one the provider gave and ComfyUI's workflow.
+
+    Refused (409) while its generation job is running or stopping: the job
+    may still be writing those same files.
     """
+    output_dir = Path(OUTPUT_DIR).resolve()
+
     async with get_db() as db:
-        # Get filepath first
-        query = "SELECT filepath FROM thumbnails WHERE id = ?"
+        query = f"""
+            SELECT t.filepath, t.raw_path, gj.status, {STOPPING_JOB_SQL} AS stopping
+            FROM thumbnails t JOIN generation_jobs gj ON gj.id = t.job_id
+            WHERE t.id = ?
+        """
         async with db.execute(query, [thumbnail_id]) as cursor:
             row = await cursor.fetchone()
 
@@ -224,16 +286,23 @@ async def delete_thumbnail(thumbnail_id: int):
         filepath = resolve_output_path(row[0])
 
         # Security: validate path is within OUTPUT_DIR
-        if not filepath.resolve().is_relative_to(Path(OUTPUT_DIR).resolve()):
+        if not filepath.resolve().is_relative_to(output_dir):
             raise HTTPException(status_code=403, detail="Invalid filepath")
+
+        if row[3] or row[2] not in ('completed', 'cancelled', 'error'):
+            raise HTTPException(status_code=409, detail=t('api.errors.generation_in_progress'))
+
+        files = [filepath, _provider_raw_path(filepath), filepath.with_suffix(".comfyui.json")]
+        if row[1]:
+            files.append(resolve_output_path(row[1]))
 
         # Delete from database
         await db.execute("DELETE FROM thumbnails WHERE id = ?", [thumbnail_id])
         await db.commit()
 
-        # Delete file if exists
-        if filepath.exists():
-            filepath.unlink()
+        for file in files:
+            if file.resolve().is_relative_to(output_dir) and file.is_file():
+                file.unlink()
 
     return {"deleted": True, "thumbnail_id": thumbnail_id}
 
@@ -332,8 +401,8 @@ async def download_all_thumbnails(job_id: int):
         raise HTTPException(status_code=404, detail=t('api.errors.no_thumbnails_job'))
 
     zip_content = await asyncio.to_thread(_zip_thumbnails, [
-        (filepath, f"{image_idx + 1:02d}_{_zip_title(title, image_idx)}")
-        for filepath, title, image_idx in rows
+        (filepath, f"{image_index:02d}_{_zip_title(title, image_index)}")
+        for filepath, title, image_index in rows
     ])
 
     # Create download filename
@@ -381,8 +450,8 @@ async def download_all_video_thumbnails(video_id: int):
         raise HTTPException(status_code=404, detail=t('api.errors.no_thumbnails_video'))
 
     zip_content = await asyncio.to_thread(_zip_thumbnails, [
-        (filepath, f"job{job_id}/{image_idx + 1:02d}_{_zip_title(title, image_idx)}")
-        for filepath, title, image_idx, job_id in rows
+        (filepath, f"job{job_id}/{image_index:02d}_{_zip_title(title, image_index)}")
+        for filepath, title, image_index, job_id in rows
     ])
 
     # Create download filename

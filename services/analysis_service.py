@@ -13,6 +13,8 @@ import orjson
 import shutil
 import re
 import logging
+import uuid
+from contextvars import copy_context
 
 from config import OUTPUT_DIR
 from i18n import t
@@ -42,6 +44,16 @@ logger = logging.getLogger(__name__)
 class AnalysisCancelledError(Exception):
     """Raised when analysis is cancelled by user."""
     pass
+
+
+# A queued analysis keeps its video in ANALYSIS_QUEUED until the worker starts
+# it; from then on the video moves through ANALYSIS_RUNNING_STATES.
+ANALYSIS_QUEUED = 'analyzing'
+ANALYSIS_RUNNING_STATES = ('analyzing_scenes', 'analyzing_faces', 'clustering', 'transcribing')
+ANALYSIS_ACTIVE_STATES = (ANALYSIS_QUEUED, *ANALYSIS_RUNNING_STATES)
+
+# error_message of a video whose analysis was running when the worker stopped
+ANALYSIS_INTERRUPTED_MESSAGE = 'Analysis interrupted: the worker stopped. Analyze the video again.'
 
 
 def extract_scene_index_from_path(frame_path: str) -> Optional[int]:
@@ -79,14 +91,152 @@ class AnalysisService:
         status: str,
         error_message: Optional[str] = None
     ):
-        """Update video status."""
-        if error_message:
-            query = "UPDATE videos SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            await self.db.execute(query, [status, error_message, video_id])
-        else:
-            query = "UPDATE videos SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            await self.db.execute(query, [status, video_id])
+        """Publish a final analysis state and its outcome in the same write."""
+        outcome = {
+            'analyzed': 'completed', 'completed': 'completed',
+            'cancelled': 'cancelled', 'error': 'error',
+        }.get(status)
+        await self.db.execute(
+            """UPDATE videos SET status = ?, error_message = COALESCE(?, error_message),
+                      analysis_outcome = COALESCE(?, analysis_outcome), updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [status, error_message or None, outcome, video_id]
+        )
         await self.db.commit()
+
+    # =========================================================================
+    # ONE ANALYSIS OWNS A VIDEO
+    # =========================================================================
+    # videos.analysis_run names the analysis that owns the video from the
+    # request until its worker job ends. A cancelled analysis keeps it until
+    # the worker stops, so a new one cannot start over the same files.
+    # Its final status and analysis_outcome are written together
+    # ('completed', 'cancelled' or 'error'): the status alone cannot, because
+    # an analysis that never started leaves the video as it was.
+
+    async def claim_analysis(self, video_id: int) -> Optional[str]:
+        """Queue an analysis as the only owner of the video.
+
+        Returns the run the worker job must present, or None when the video is
+        taken: analyzing, generating, or with a cancelled analysis whose worker
+        has not stopped yet.
+        """
+        run = uuid.uuid4().hex
+        taken = ','.join('?' * len(ANALYSIS_ACTIVE_STATES))
+        cursor = await self.db.execute(
+            f"""
+            UPDATE videos
+            SET analysis_previous_status = status, status = ?, analysis_run = ?, analysis_outcome = NULL
+            WHERE id = ? AND analysis_run IS NULL AND status NOT IN ({taken}, 'generating')
+            """,
+            [ANALYSIS_QUEUED, run, video_id, *ANALYSIS_ACTIVE_STATES]
+        )
+        await self.db.commit()
+        return run if cursor.rowcount == 1 else None
+
+    async def unclaim_analysis(self, video_id: int, run: Optional[str] = None, error: Optional[str] = None) -> bool:
+        """Give the video back as it was, for a queued analysis that will not run.
+
+        Without a run, whichever queued analysis owns the video (a cancellation).
+        With an error, the analysis could not start: the reason stays in the
+        video's error_message. Returns False if no queued analysis (or not that
+        one) owned it.
+        """
+        cursor = await self.db.execute(
+            """
+            UPDATE videos
+            SET status = analysis_previous_status, analysis_run = NULL, analysis_previous_status = NULL,
+                analysis_outcome = ?, error_message = COALESCE(?, error_message)
+            WHERE id = ? AND status = ? AND analysis_run IS NOT NULL AND (? IS NULL OR analysis_run = ?)
+            """,
+            ['error' if error else 'cancelled', error, video_id, ANALYSIS_QUEUED, run, run]
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
+
+    async def start_analysis_run(self, video_id: int, run: str, first_status: str) -> bool:
+        """The worker takes a queued analysis. False: it no longer owns the video."""
+        cursor = await self.db.execute(
+            "UPDATE videos SET status = ?, error_message = NULL WHERE id = ? AND analysis_run = ? AND status = ?",
+            [first_status, video_id, run, ANALYSIS_QUEUED]
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
+
+    async def release_analysis(self, video_id: int, run: str) -> None:
+        """The analysis ended, however it did: the video has no owner."""
+        await self.db.execute(
+            """
+            UPDATE videos
+            SET analysis_run = NULL, analysis_previous_status = NULL,
+                analysis_outcome = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE analysis_outcome END
+            WHERE id = ? AND analysis_run = ?
+            """,
+            [video_id, run]
+        )
+        await self.db.commit()
+
+    async def interrupt_analysis(self, video_id: int, run: str) -> None:
+        """The worker stopped in the middle of the analysis: the video has to be analyzed again."""
+        running = ','.join('?' * len(ANALYSIS_RUNNING_STATES))
+        await self.db.execute(
+            f"""
+            UPDATE videos
+            SET status = 'pending', error_message = ?, analysis_run = NULL, analysis_previous_status = NULL,
+                analysis_outcome = 'error'
+            WHERE id = ? AND analysis_run = ? AND status IN ({running})
+            """,
+            [ANALYSIS_INTERRUPTED_MESSAGE, video_id, run, *ANALYSIS_RUNNING_STATES]
+        )
+        await self.db.commit()
+
+    @staticmethod
+    async def _run_analysis_step(function, *args):
+        """Keep the caller alive until its thread stops, including on timeout or shutdown."""
+        future = asyncio.get_running_loop().run_in_executor(None, copy_context().run, function, *args)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Cancelling an await cannot stop the thread that writes the video's files.
+            # Repeated shutdown signals must not let the worker release the video early.
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                future.result()
+            except Exception:
+                logger.exception("Analysis stage failed while stopping")
+            raise
+
+    async def reset_analysis(self, video_id: int) -> None:
+        """Delete what the analysis and the generations made of a video, to analyze it from scratch.
+
+        Its people (with their names, notes and photos), frames, generation
+        jobs and thumbnails go, from the database and from disk. The video
+        keeps its setting photos, titles and descriptions.
+        """
+        video = await self.get_video(video_id)
+        if video is None:
+            raise ValueError(f"Video {video_id} not found")
+        # Cascades take assignments, people's photos, job clusters and thumbnails
+        await self.db.execute("DELETE FROM clusters WHERE video_id = ?", [video_id])
+        await self.db.execute("DELETE FROM generation_jobs WHERE video_id = ?", [video_id])
+        await self.db.execute("DELETE FROM video_frames WHERE video_id = ?", [video_id])
+        await self.db.commit()
+
+        output_dir = self._get_video_output_dir(video)
+
+        def remove_folders():
+            for name in ('clusters', 'frames', 'thumbnails'):
+                folder = output_dir / name
+                if folder.exists():
+                    shutil.rmtree(folder)
+
+        await self._run_analysis_step(remove_folders)
 
     async def run_full_analysis(
         self,
@@ -134,9 +284,8 @@ class AnalysisService:
                 output.frames_dir.mkdir(exist_ok=True)
 
             try:
-                loop = asyncio.get_event_loop()
-                scene_result, extracted_frames = await loop.run_in_executor(
-                    None, process_video_scenes, video_path, output
+                scene_result, extracted_frames = await self._run_analysis_step(
+                    process_video_scenes, video_path, output
                 )
                 # Frame extraction raises when it cannot write a frame or reads none
                 if not scene_result:
@@ -157,8 +306,8 @@ class AnalysisService:
                 output.faces_file.unlink(missing_ok=True)
 
             try:
-                face_result = await loop.run_in_executor(
-                    None, process_faces, extracted_frames, output
+                face_result = await self._run_analysis_step(
+                    process_faces, extracted_frames, output
                 )
             except Exception as e:
                 await self.update_video_status(video_id, 'error', f'face_extraction_error: {str(e)}')
@@ -171,7 +320,7 @@ class AnalysisService:
             if face_result and face_result.all_faces:
                 from services.portrait_quality import enrich_portraits
                 try:
-                    await asyncio.to_thread(enrich_portraits, output.output_dir, video_path, cancellation_check)
+                    await self._run_analysis_step(enrich_portraits, output.output_dir, video_path, cancellation_check)
                 except InterruptedError as error:
                     raise AnalysisCancelledError(str(error)) from error
 
@@ -179,7 +328,7 @@ class AnalysisService:
             if face_result and face_result.all_faces:
                 from services.body_references import ensure_body_index
                 try:
-                    await asyncio.to_thread(ensure_body_index, output.output_dir, cancellation_check)
+                    await self._run_analysis_step(ensure_body_index, output.output_dir, cancellation_check)
                 except InterruptedError as error:
                     raise AnalysisCancelledError(str(error)) from error
 
@@ -211,16 +360,18 @@ class AnalysisService:
                 json_transcription = output.transcription_file.with_suffix('.json')
                 json_transcription.unlink(missing_ok=True)
 
+            # A video without speech has an empty transcription, which is a
+            # result; only a transcription that could not be made is an error
             try:
-                transcription = await loop.run_in_executor(
-                    None, transcribe_video, video_path, output
+                await self._run_analysis_step(
+                    transcribe_video, video_path, output
                 )
-                if not transcription:
-                    await self.update_video_status(video_id, 'error', 'transcription_error: Failed to transcribe audio')
-                    return
             except Exception as e:
                 await self.update_video_status(video_id, 'error', f'transcription_error: {str(e)}')
                 return
+
+            if cancellation_check and cancellation_check():
+                raise AnalysisCancelledError(f"Video {video_id} cancelled during transcription")
 
             # Mark as analyzed
             await self.update_video_status(video_id, 'analyzed')
@@ -261,15 +412,15 @@ class AnalysisService:
         if expected_reference_revision is not None and revision != expected_reference_revision:
             raise ValueError("References changed after this refresh was queued; no choices were overwritten.")
         await self.update_video_status(video_id, "analyzing_faces")
-        await asyncio.to_thread(process_faces, frames, output)
+        await self._run_analysis_step(process_faces, frames, output)
         try:
-            await asyncio.to_thread(enrich_portraits, output.output_dir, video["filepath"], cancellation_check)
-            body_index = await asyncio.to_thread(ensure_body_index, output.output_dir, cancellation_check)
+            await self._run_analysis_step(enrich_portraits, output.output_dir, video["filepath"], cancellation_check)
+            body_index = await self._run_analysis_step(ensure_body_index, output.output_dir, cancellation_check)
         except InterruptedError as error:
             raise AnalysisCancelledError(str(error)) from error
         if cancellation_check and cancellation_check():
             raise AnalysisCancelledError("Reference refresh cancelled.")
-        index = await asyncio.to_thread(load_face_index, output.faces_file)
+        index = await self._run_analysis_step(load_face_index, output.faces_file)
         refs = ReferenceService(self.db)
         existing = await refs.list(video_id)
         async with self.db.execute("""
@@ -285,20 +436,16 @@ class AnalysisService:
             raise ValueError("Reference refresh requires existing people with indexed frames. Run normal analysis first.")
         automatic_setting = all(ref.get("automatic") for ref in existing if ref["role"] == "environment")
 
-        plan = await asyncio.to_thread(
+        plan = await self._run_analysis_step(
             self._plan_reference_refresh, index, body_index, output.frames_dir, groups, existing,
             automatic_setting)
         if cancellation_check and cancellation_check():
             raise AnalysisCancelledError("Reference refresh cancelled before saving.")
         await self.db.execute("BEGIN IMMEDIATE")
         try:
-            # A video with thumbnails stays completed, as generation leaves it
             cursor = await self.db.execute("""
                 UPDATE videos SET reference_revision=reference_revision+1,error_message=NULL,
-                                  updated_at=CURRENT_TIMESTAMP,
-                                  status=CASE WHEN EXISTS (SELECT 1 FROM generation_jobs done
-                                      WHERE done.video_id=videos.id AND done.status='completed')
-                                    THEN 'completed' ELSE 'analyzed' END
+                                  updated_at=CURRENT_TIMESTAMP
                 WHERE id=? AND reference_revision=? AND status!='cancelled'
             """, [video_id, revision])
             if cursor.rowcount != 1:
@@ -327,6 +474,18 @@ class AnalysisService:
             (output.output_dir / "clusters").mkdir(parents=True, exist_ok=True)
             await self._update_clusters_json(output.output_dir, clusters)
             await self._update_clustering_result_json(output.output_dir, clusters)
+
+        # Publish completion only after the database and its file caches are finished.
+        cursor = await self.db.execute("""
+            UPDATE videos SET analysis_outcome='completed', updated_at=CURRENT_TIMESTAMP,
+                status=CASE WHEN EXISTS (SELECT 1 FROM generation_jobs done
+                    WHERE done.video_id=videos.id AND done.status='completed')
+                    THEN 'completed' ELSE 'analyzed' END
+            WHERE id=? AND status!='cancelled'
+        """, [video_id])
+        await self.db.commit()
+        if cursor.rowcount != 1:
+            raise AnalysisCancelledError("Reference refresh cancelled before completion.")
 
     @staticmethod
     def _plan_reference_refresh(index, body_index, frames_dir, groups, existing, automatic_setting):
@@ -495,14 +654,14 @@ class AnalysisService:
 
         # Face photos of each person and scene, picked before the write
         # transaction because it opens images
-        index = await asyncio.to_thread(load_face_index, output.faces_file)
-        references = await asyncio.to_thread(
+        index = await self._run_analysis_step(load_face_index, output.faces_file)
+        references = await self._run_analysis_step(
             self._initial_references, index, output.frames_dir, result.get('clusters', [])
         )
-        environment_frame = await asyncio.to_thread(setting_frame, output.frames_dir)
+        environment_frame = await self._run_analysis_step(setting_frame, output.frames_dir)
 
         from services.body_references import load_body_index
-        body_index = await asyncio.to_thread(load_body_index, output.output_dir)
+        body_index = await self._run_analysis_step(load_body_index, output.output_dir)
 
         # V2: Delete existing data and insert new data in a single transaction
         await self.db.execute("BEGIN IMMEDIATE")
@@ -751,7 +910,7 @@ class AnalysisService:
         """, [cluster_id])).get(cluster_id, [])
 
         # Parsing a large faces.json takes a moment the first time
-        index = await asyncio.to_thread(load_face_index, output_dir / 'faces.json')
+        index = await self._run_analysis_step(load_face_index, output_dir / 'faces.json')
         if seed is None and blob is not None:
             seed = centroid_from_blob(blob)
         claimed = set() if seed is not None else await self.view_claimed_faces(index, video_id, view_mode, cluster_id)
@@ -971,10 +1130,14 @@ class AnalysisService:
             view_mode: 'person' or 'person_scene'
 
         Returns:
-            The merged cluster info, or None if failed.
+            The merged cluster info.
+
+        Raises:
+            ValueError: nothing was merged; the message says why (people that no
+                longer exist, for instance when another tab changed them).
         """
         if len(cluster_indices) < 2:
-            return {'success': False, 'error': t('api.errors.min_clusters_required')}
+            raise ValueError(t('api.errors.min_clusters_required'))
 
         if target_index not in cluster_indices:
             target_index = cluster_indices[0]
@@ -982,7 +1145,7 @@ class AnalysisService:
         # Get video info for output_dir
         video = await self.get_video(video_id)
         if not video:
-            return {'success': False, 'error': t('api.errors.video_not_found')}
+            raise ValueError(t('api.errors.video_not_found'))
 
         output_dir = self._get_video_output_dir(video)
         clusters_dir = output_dir / "clusters"
@@ -990,23 +1153,21 @@ class AnalysisService:
         # Get target cluster
         target = await self._get_cluster_by_index_v2(video_id, target_index, view_mode)
         if not target:
-            return {'success': False, 'error': t('api.errors.cluster_not_found')}
+            raise ValueError(t('api.errors.cluster_not_found'))
 
         target_id = target['id']
         source_indices = [i for i in cluster_indices if i != target_index]
 
         if not source_indices:
-            return {'success': False, 'error': t('api.errors.no_source_clusters')}
+            raise ValueError(t('api.errors.no_source_clusters'))
 
-        # Get source cluster IDs
+        # Get source cluster IDs: all of them, or nothing is merged
         source_ids = []
         for idx in source_indices:
             source = await self._get_cluster_by_index_v2(video_id, idx, view_mode)
-            if source:
-                source_ids.append(source['id'])
-
-        if not source_ids:
-            return {'success': False, 'error': t('api.errors.source_clusters_not_found')}
+            if not source:
+                raise ValueError(t('api.errors.source_clusters_not_found'))
+            source_ids.append(source['id'])
 
         # The merged person is the largest one's face (the others join them)
         merged_ids = [target_id] + source_ids
@@ -1067,6 +1228,15 @@ class AnalysisService:
         )
         await reference_service.insert(video_id, kept)
         await self.db.execute("UPDATE videos SET reference_revision=reference_revision+1 WHERE id=?", [video_id])
+
+        # The thumbnails made with the merged people were made with this
+        # person: their jobs go on saying who is in them (fix face and the
+        # face match read it). A job that already had this person keeps that
+        # row, and the other one goes with its cluster below.
+        await self.db.execute(f"""
+            UPDATE OR IGNORE generation_job_clusters SET cluster_id = ?
+            WHERE cluster_id IN ({placeholders})
+        """, [target_id] + source_ids)
 
         # Delete source clusters (assignments cascade)
         await self.db.execute(f"""
@@ -1359,14 +1529,3 @@ class AnalysisService:
         await self.db.execute("UPDATE videos SET reference_revision=reference_revision+1 WHERE id=?", [video_id])
         await self.db.commit()
         return True
-
-    async def cleanup_partial_analysis(self, video_id: int) -> dict:
-        """Keep completed artifacts on cancellation.
-
-        A cancelled status does not identify who created a file or whether it
-        is incomplete. Stage writers own their temporary files and transactions;
-        cancellation must never erase prior transcripts, people, or references.
-        """
-        video = await self.get_video(video_id)
-        return {"cleaned_files": [], "cleaned_db_records": 0,
-                "status_was": video.get("status") if video else None}

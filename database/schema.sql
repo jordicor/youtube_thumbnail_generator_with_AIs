@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS videos (
     -- Background of its thumbnails (Generate step 2): 'photos' (its setting photos)
     -- or 'ai' (the AI chooses); NULL until the user picks one
     environment_source TEXT CHECK(environment_source IN ('photos', 'ai')),
+    -- The analysis that owns the video, queued or running (NULL: none), and the
+    -- status the video returns to if that analysis never starts
+    analysis_run TEXT,
+    analysis_previous_status TEXT,
+    -- How its last analysis ended: 'completed', 'cancelled' or 'error' (the reason
+    -- is error_message). NULL while one is queued or running, or if none ended yet
+    analysis_outcome TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (directory_id) REFERENCES directories(id) ON DELETE SET NULL
@@ -126,6 +133,10 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     --   error        - An error occurred
     progress INTEGER DEFAULT 0,      -- 0-100 percentage
     error_message TEXT,
+    -- The process executing this job (worker or CLI). Creation time prevents PID reuse.
+    executor_host TEXT,
+    executor_pid INTEGER,
+    executor_started_at REAL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP,
     FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE

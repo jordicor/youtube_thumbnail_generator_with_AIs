@@ -20,32 +20,6 @@ from services.generation_service import (
 from services.task_service import TaskService
 
 
-@pytest.mark.parametrize('name,raw_name', [('model_timestamp_c0_v1.png', 'model_raw_timestamp_c0_v1.png'),
-                                         ('thumbnail.png', 'raw_thumbnail.png')])
-async def test_cancel_cleanup_removes_original_raw_thumbnail(test_db, generating_job, name, raw_name):
-    import config
-
-    job_id = generating_job['id']
-    await test_db.execute("UPDATE videos SET status='generating' WHERE id=?", [generating_job['video_id']])
-    relative = f'analyzed_video/thumbnails/{name}'
-    image = config.OUTPUT_DIR / relative
-    raw = image.parent / 'raw' / raw_name
-    raw.parent.mkdir(parents=True)
-    image.write_bytes(b'synthetic resized image')
-    raw.write_bytes(b'synthetic original image')
-    unrelated = raw.parent / 'other_raw_image.png'
-    unrelated.write_bytes(b'another job')
-    await test_db.execute('INSERT INTO thumbnails (job_id, image_index, filepath) VALUES (?, 1, ?)',
-                          [job_id, relative])
-    await test_db.commit()
-
-    result = await GenerationService(test_db).cleanup_partial_generation(job_id)
-
-    assert result['cleaned_db_records'] == 1
-    assert not image.exists() and not raw.exists()
-    assert unrelated.read_bytes() == b'another job'
-
-
 @pytest.fixture
 async def generation_db(test_db):
     await test_db.execute(
@@ -282,8 +256,6 @@ async def test_worker_failure_releases_video(generation_db, monkeypatch, failure
     service = GenerationService(generation_db)
     job = await service.create_generation_job(1, [1])
     inject_database(monkeypatch, tasks, generation_db)
-    for name in ('publish_progress', 'publish_event', 'publish_task_event'):
-        monkeypatch.setattr(tasks, name, AsyncMock())
     monkeypatch.setattr(tasks, 'create_sync_cancellation_check', lambda job_id: lambda: False)
     monkeypatch.setattr(GenerationService, 'run_generation_pipeline', AsyncMock(side_effect=failure))
     with pytest.raises(type(failure)):
@@ -300,8 +272,6 @@ async def test_worker_cancellation_waits_for_executor_before_releasing(generatio
     service = GenerationService(generation_db)
     job = await service.create_generation_job(1, [1])
     inject_database(monkeypatch, tasks, generation_db)
-    for name in ('publish_progress', 'publish_event', 'publish_task_event'):
-        monkeypatch.setattr(tasks, name, AsyncMock())
     monkeypatch.setattr(tasks, 'create_sync_cancellation_check', lambda job_id: lambda: False)
     started = asyncio.Event()
     allow_finish = threading.Event()
@@ -338,14 +308,69 @@ async def test_worker_cancellation_waits_for_executor_before_releasing(generatio
     assert await video_status(generation_db) == 'analyzed'
 
 
-@pytest.mark.parametrize('status', ['generating', 'cancelled'])
-def test_callback_closes_connection_and_respects_cancellation(tmp_path, monkeypatch, status):
+@pytest.mark.asyncio
+async def test_cancelled_generation_keeps_its_finished_thumbnails(generation_db, monkeypatch):
+    import config
+    from workers import tasks
+
+    service = GenerationService(generation_db)
+    job = await service.create_generation_job(1, [1])
+    image = config.OUTPUT_DIR / 'fixture' / 'thumbnails' / 'done.png'
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b'finished thumbnail')
+
+    async def pipeline(self, job_id, **kwargs):
+        await self.update_job_status(job_id, 'generating', 50)
+        await self.db.execute(
+            'INSERT INTO thumbnails (job_id, image_index, filepath) VALUES (?, 1, ?)',
+            [job_id, 'fixture/thumbnails/done.png'],
+        )
+        await self.db.commit()
+        # The user cancels while the next image is being made
+        assert await self.cancel_job(job_id)
+
+    inject_database(monkeypatch, tasks, generation_db)
+    monkeypatch.setattr(tasks, 'create_sync_cancellation_check', lambda job_id: lambda: False)
+    monkeypatch.setattr(GenerationService, 'run_generation_pipeline', pipeline)
+
+    result = await tasks.run_generation({}, job['id'])
+
+    assert result == {'status': 'cancelled', 'job_id': job['id']}
+    assert (await service.get_job(job['id']))['status'] == 'cancelled'
+    assert await video_status(generation_db) == 'analyzed'
+    async with generation_db.execute('SELECT filepath FROM thumbnails WHERE job_id = ?', [job['id']]) as cursor:
+        assert await cursor.fetchall() == [('fixture/thumbnails/done.png',)]
+    assert image.read_bytes() == b'finished thumbnail'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['transcribing', 'generating', 'cancelled', 'error', 'completed'])
+async def test_only_a_pending_job_runs(generation_db, monkeypatch, status):
+    """A job the queue delivers again, after it was interrupted or finished, does nothing."""
+    import services.reference_service as references
+
+    service = GenerationService(generation_db)
+    job = await service.create_generation_job(1, [1])
+    await generation_db.execute('UPDATE generation_jobs SET status = ? WHERE id = ?', [status, job['id']])
+    await generation_db.commit()
+    prepare = AsyncMock()
+    monkeypatch.setattr(references.ReferenceService, 'prepare', prepare)
+
+    await service.run_generation_pipeline(job['id'])
+
+    prepare.assert_not_called()
+    assert (await service.get_job(job['id']))['status'] == status
+
+
+@pytest.mark.parametrize('status', ['generating', 'cancelled', 'missing'])
+def test_callback_closes_connection_and_keeps_the_finished_image(tmp_path, monkeypatch, status):
     import services.generation_service as module
 
     database_path = tmp_path / 'callback.sqlite'
     with sqlite3.connect(database_path) as db:
         db.execute('CREATE TABLE generation_jobs (id INTEGER, progress INTEGER, status TEXT)')
-        db.execute('INSERT INTO generation_jobs VALUES (1, 0, ?)', [status])
+        if status != 'missing':
+            db.execute('INSERT INTO generation_jobs VALUES (1, 0, ?)', [status])
         db.execute('CREATE TABLE thumbnails (job_id, image_index, filepath, prompt_text, suggested_title, text_overlay)')
     db.close()
     original_connect = sqlite3.connect
@@ -360,21 +385,62 @@ def test_callback_closes_connection_and_respects_cancellation(tmp_path, monkeypa
     import config
 
     info = {'path': Path(config.OUTPUT_DIR) / 'fixture' / 'thumbnails' / 'thumbnail.png', 'image_index': 1}
-    if status == 'cancelled':
+    if status == 'generating':
+        GenerationService.save_generation_progress(database_path, 1, 70, info)
+    else:
         with pytest.raises(GenerationCancelledError):
             GenerationService.save_generation_progress(database_path, 1, 70, info)
-    else:
-        GenerationService.save_generation_progress(database_path, 1, 70, info)
     with pytest.raises(sqlite3.ProgrammingError):
         opened[0].execute('SELECT 1')
     with original_connect(database_path) as check:
         stored = [row[0] for row in check.execute('SELECT filepath FROM thumbnails')]
+        progress = [row[0] for row in check.execute('SELECT progress FROM generation_jobs')]
     check.close()
-    # Thumbnails are stored relative to OUTPUT_DIR
-    assert stored == (['fixture/thumbnails/thumbnail.png'] if status == 'generating' else [])
+    # The image that was being made when the job was cancelled is done and paid for: it
+    # stays (stored relative to OUTPUT_DIR). A job that no longer exists gets nothing.
+    assert stored == ([] if status == 'missing' else ['fixture/thumbnails/thumbnail.png'])
+    assert progress == {'generating': [70], 'cancelled': [0], 'missing': []}[status]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('owner, cancelled', [('dead', False), ('reused', False), ('dead', True)])
+async def test_recovery_releases_only_the_dead_generation_executor(generation_db, owner, cancelled):
+    import subprocess
+    import sys
+    import psutil
+    from services.task_service import release_interrupted_tasks
+
+    service = GenerationService(generation_db)
+    job = await service.create_generation_job(1, [1])
+    assert await service.start_job(job['id'])
+    if cancelled:
+        assert await service.cancel_job(job['id'])
+
+    if owner == 'dead':
+        # A real child process exits; recovery must not require that PID to remain in use.
+        with subprocess.Popen(
+            [sys.executable, '-B', '-c', 'import sys; sys.stdin.read()'],
+            stdin=subprocess.PIPE, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        ) as child:
+            started_at = psutil.Process(child.pid).create_time()
+            await generation_db.execute(
+                'UPDATE generation_jobs SET executor_pid = ?, executor_started_at = ? WHERE id = ?',
+                [child.pid, started_at, job['id']],
+            )
+            child.communicate(timeout=5)
+    else:
+        # The PID exists, but belongs to a different incarnation of the recorded executor.
+        await generation_db.execute(
+            'UPDATE generation_jobs SET executor_started_at = executor_started_at - 1 WHERE id = ?',
+            [job['id']],
+        )
+    await generation_db.commit()
+
+    assert await release_interrupted_tasks(generation_db) == {'analyses': 0, 'generations': 0 if cancelled else 1}
+    assert (await service.get_job(job['id']))['status'] == ('cancelled' if cancelled else 'error')
+    assert await video_status(generation_db) == 'analyzed'
+
+
 async def test_scoped_database_connections_rollback_and_close(tmp_path, monkeypatch):
     from database import db as database_module
 

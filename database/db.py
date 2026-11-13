@@ -88,77 +88,7 @@ async def init_db() -> None:
     # Run migrations for existing databases
     await _run_migrations(_db_connection)
 
-    # Reset any videos stuck in analysis states from previous server session
-    await _reset_orphaned_analysis_states(_db_connection)
-
     print(f"Database initialized: {db_path}")
-
-
-async def _reset_orphaned_analysis_states(db: aiosqlite.Connection) -> None:
-    """
-    Reset videos stuck in analysis states after server restart.
-
-    When the server is stopped during video analysis, videos remain in
-    intermediate states (analyzing, analyzing_scenes, etc.) even though
-    no analysis process is running. This function resets them to 'pending'
-    so they can be re-analyzed.
-    """
-    # States that indicate an analysis was in progress -> reset to 'pending'
-    analysis_orphaned_states = (
-        'analyzing',
-        'analyzing_scenes',
-        'analyzing_faces',
-        'clustering',
-        'transcribing',
-        'cancelled',
-    )
-
-    # Videos stuck in 'generating' already completed analysis -> reset to 'analyzed'
-    generation_orphaned_states = ('generating',)
-
-    # Reset analysis-orphaned videos to 'pending'
-    placeholders = ','.join('?' * len(analysis_orphaned_states))
-    async with db.execute(
-        f"SELECT COUNT(*) FROM videos WHERE status IN ({placeholders})",
-        analysis_orphaned_states
-    ) as cursor:
-        row = await cursor.fetchone()
-        analysis_count = row[0] if row else 0
-
-    if analysis_count > 0:
-        await db.execute(
-            f"""
-            UPDATE videos
-            SET status = 'pending',
-                error_message = 'Analysis interrupted by server restart. Please re-analyze.'
-            WHERE status IN ({placeholders})
-            """,
-            analysis_orphaned_states
-        )
-        await db.commit()
-        print(f"Startup cleanup: Reset {analysis_count} video(s) from interrupted analysis states to 'pending'")
-
-    # Reset generation-orphaned videos to 'analyzed'
-    placeholders = ','.join('?' * len(generation_orphaned_states))
-    async with db.execute(
-        f"SELECT COUNT(*) FROM videos WHERE status IN ({placeholders})",
-        generation_orphaned_states
-    ) as cursor:
-        row = await cursor.fetchone()
-        generation_count = row[0] if row else 0
-
-    if generation_count > 0:
-        await db.execute(
-            f"""
-            UPDATE videos
-            SET status = 'analyzed',
-                error_message = 'Generation interrupted by server restart.'
-            WHERE status IN ({placeholders})
-            """,
-            generation_orphaned_states
-        )
-        await db.commit()
-        print(f"Startup cleanup: Reset {generation_count} video(s) from interrupted generation state to 'analyzed'")
 
 
 async def _run_migrations(db: aiosqlite.Connection) -> None:
@@ -717,6 +647,34 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
         WHERE json_type(data, '$.comfyui') IS NULL
     """, (Connection().model_dump_json(),))
     await db.commit()
+
+    # Migration 24: The analysis that owns each video (see AnalysisService.claim_analysis)
+    async with db.execute("PRAGMA table_info(videos)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'analysis_run' not in column_names:
+        print("Migration: Adding analysis_run and analysis_previous_status columns to videos...")
+        await db.execute("ALTER TABLE videos ADD COLUMN analysis_run TEXT")
+        await db.execute("ALTER TABLE videos ADD COLUMN analysis_previous_status TEXT")
+        await db.commit()
+        print("Migration: analysis ownership columns added successfully")
+
+    # Migration 25: How each video's last analysis ended (see AnalysisService.release_analysis)
+    async with db.execute("PRAGMA table_info(videos)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'analysis_outcome' not in column_names:
+        print("Migration: Adding analysis_outcome column to videos...")
+        await db.execute("ALTER TABLE videos ADD COLUMN analysis_outcome TEXT")
+        await db.commit()
+        print("Migration: analysis_outcome column added successfully")
+
+    # Migration 26: Identify a generation's executor so worker recovery preserves live CLI jobs.
+    async with db.execute("PRAGMA table_info(generation_jobs)") as cursor:
+        column_names = [col[1] for col in await cursor.fetchall()]
+    if 'executor_pid' not in column_names:
+        await db.execute("ALTER TABLE generation_jobs ADD COLUMN executor_host TEXT")
+        await db.execute("ALTER TABLE generation_jobs ADD COLUMN executor_pid INTEGER")
+        await db.execute("ALTER TABLE generation_jobs ADD COLUMN executor_started_at REAL")
+        await db.commit()
 
     from database.reference_migration import migrate_visual_references
     await migrate_visual_references(db)

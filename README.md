@@ -103,7 +103,7 @@ Each job has its own engine, chosen in **Settings**:
 | Job | Cloud | Local |
 |-----|-------|-------|
 | Thumbnail ideas (needs a model that sees images) | Claude, GPT, Gemini, Grok, OpenRouter | Ollama, llama.cpp, any OpenAI-compatible server |
-| Drawing the thumbnail | Gemini (Nano Banana Pro, Nano Banana 2.1), OpenAI GPT Image, Poe (FLUX, Nano Banana, Ideogram...), Replicate | ComfyUI with Qwen Image 2.1, or your own workflow |
+| Drawing the thumbnail | Gemini (Nano Banana Pro, Nano Banana 2.1), OpenAI GPT Image, Poe (FLUX, Nano Banana, Ideogram...), Replicate | ComfyUI with Qwen Image 2.1, MiniMax H3 Image, or your own workflow |
 | Titles and descriptions | Claude, GPT, Gemini, Grok, OpenRouter | Ollama, llama.cpp, any OpenAI-compatible server |
 | Transcription | ElevenLabs (tells the speakers apart) | Whisper |
 

@@ -47,6 +47,8 @@ async def close_arq_pool() -> None:
 
 async def enqueue_analysis(
     video_id: int,
+    analysis_run: str,
+    reset: bool = False,
     force_scenes: bool = False,
     force_faces: bool = False,
     force_clustering: bool = False,
@@ -61,6 +63,9 @@ async def enqueue_analysis(
 
     Args:
         video_id: ID of the video to analyze
+        analysis_run: The claim on the video (AnalysisService.claim_analysis)
+        reset: Reanalysis: the worker deletes the previous analysis, with its
+            people and thumbnails, and runs every step again
         force_*: Flags to force re-processing of specific steps
         clustering_eps: DBSCAN epsilon parameter
         clustering_min_samples: DBSCAN min_samples parameter
@@ -74,6 +79,8 @@ async def enqueue_analysis(
         job = await pool.enqueue_job(
             "analyze_video",
             video_id,
+            analysis_run=analysis_run,
+            reset=reset,
             force_scenes=force_scenes,
             force_faces=force_faces,
             force_clustering=force_clustering,

@@ -65,6 +65,29 @@ async def get_video_task(video_id: int):
         raise HTTPException(status_code=503, detail=t('errors.server'))
 
 
+@router.get("/{task_type}/{task_id}/outcome")
+async def get_task_outcome(
+    task_type: Literal["analysis", "generation"],
+    task_id: int
+):
+    """
+    How a task that is no longer running or queued ended.
+
+    For a page whose task stream was cut while the task ended: the stream only
+    tells the endings it sees.
+
+    Returns:
+        status: 'completed', 'cancelled' or 'error'
+        error_message: the reason of an error
+    """
+    try:
+        async with get_db() as db:
+            return await TaskService(db).get_task_outcome(task_type, task_id)
+    except Exception as e:
+        logger.error(f"Error fetching the outcome of task {task_type}:{task_id}: {e}")
+        raise HTTPException(status_code=503, detail=t('errors.server'))
+
+
 @router.post("/{task_type}/{task_id}/cancel")
 async def cancel_task(
     task_type: Literal["analysis", "generation"],

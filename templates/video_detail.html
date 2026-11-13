@@ -363,6 +363,8 @@
                     </div>
                     <p id="progressText">{{ t('generate_form.progress_starting') }}</p>
                 </div>
+                <!-- Why the last generation failed, until another one starts -->
+                <p class="generation-failure hidden" id="generationFailure" role="alert"></p>
                 <div class="results-grid" id="thumbnailsGrid"></div>
                 <div class="results-grid" id="recentThumbnailsGrid"></div>
                 <div class="results-empty hidden" id="resultsEmpty">

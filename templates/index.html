@@ -81,6 +81,7 @@
     <button type="button" class="btn btn-ghost btn-small hidden" id="bulkSelectAll"></button>
     <span class="bulk-divider"></span>
     <button type="button" class="btn btn-primary btn-small" id="bulkAnalyze">{{ icon('play') }}<span>{{ t('index.bulk.analyze') }}</span></button>
+    <button type="button" class="btn btn-danger btn-small" id="bulkReanalyze">{{ icon('rotate') }}<span>{{ t('index.card.reanalyze') }}</span></button>
     <button type="button" class="btn btn-secondary btn-small" id="bulkHide">{{ icon('eye-off') }}<span>{{ t('index.bulk.hide') }}</span></button>
     <button type="button" class="icon-btn" id="bulkClear" title="{{ t('index.bulk.clear') }}" aria-label="{{ t('index.bulk.clear') }}">{{ icon('x') }}</button>
 </div>
@@ -134,6 +135,7 @@
     let currentSearch = '';
     let currentPage = 1;
     let totalFilteredVideos = 0;
+    let filterCounts = null;            // Videos of each library filter, with the search applied
     let pageVideos = new Map();         // id -> video on the current page
     let selectedIds = new Set();        // selected videos of the current page
     let allMatchingSelected = false;    // Gmail-style: every video of the filter, across pages
@@ -654,6 +656,7 @@
             if (directoryId !== currentDirectoryId) return;
 
             totalFilteredVideos = data.total;
+            filterCounts = data.counts;
             updateDirectorySubtitle(data.directory);
             renderFilterChips(data.counts);
             resultsSummary.textContent = t(data.total === 1 ? 'index.results_one' : 'index.results_other', {count: data.total});
@@ -899,7 +902,8 @@
         } else {
             items.push({ label: t('index.card.hide'), icon: 'eye-off', onSelect: () => hideVideo(video.id) });
         }
-        if (view.kind === 'ready') {
+        // A video that is generating thumbnails cannot be analyzed again until it ends
+        if (view.kind === 'ready' && video.status !== 'generating') {
             items.push({ label: t('index.card.reanalyze'), icon: 'rotate', danger: true, onSelect: () => reanalyzeVideo(video.id) });
         }
         return items;
@@ -1126,16 +1130,22 @@
 
         for (const task of window.TaskQueue.tasks.values()) {
             if (task.type === 'analysis') {
-                updateVideoCardOverlay(task.video_id, 'analyzing', task.current_step || '', task.progress || 0);
+                showAnalysisTask(task);
             }
         }
     }
 
+    // Show on a card what its analysis is doing: in the queue, a step, or stopping
+    function showAnalysisTask(task) {
+        updateVideoCardOverlay(task.video_id, 'analyzing', window.TaskQueue.stepLabel(task), task.progress || 0);
+    }
+
+    // The task queue tells how each task ended (a toast); here the cards follow
     function handleTaskQueueEvent(eventType, data) {
         if (eventType === 'tasks_snapshot') {
             for (const task of data.tasks || []) {
                 if (task.type === 'analysis') {
-                    updateVideoCardOverlay(task.video_id, 'analyzing', task.current_step || '', task.progress || 0);
+                    showAnalysisTask(task);
                 }
             }
             return;
@@ -1146,19 +1156,11 @@
         switch (eventType) {
             case 'task_started':
             case 'task_progress':
-                updateVideoCardOverlay(data.video_id, 'analyzing', data.current_step || '', data.progress || 0);
+                showAnalysisTask(data);
                 break;
 
             case 'task_completed':
-                ThumbnailApp.showToast(t('analysis.complete'), 'success');
-                loadVideos();
-                break;
-
             case 'task_error':
-                ThumbnailApp.showToast(t('video_status.error') + ': ' + (data.error_message || t('errors.generic')), 'error');
-                loadVideos();
-                break;
-
             case 'task_cancelled':
                 loadVideos();
                 break;
@@ -1209,12 +1211,19 @@
         renderDirectoryList();
     }
 
+    // "55 miniaturas", as the card writes it
+    function thumbnailsLabel(count) {
+        return t(count === 1 ? 'index.card.thumbnails_one' : 'index.card.thumbnails_other', {count});
+    }
+
     async function reanalyzeVideo(videoId) {
         const confirmed = await ThumbnailApp.showModal({
             title: t('analysis.reanalyze_title'),
-            htmlMessage: t('analysis.reanalyze_message'),
+            htmlMessage: t('analysis.reanalyze_message', {
+                thumbnails: thumbnailsLabel(pageVideos.get(videoId).thumbnail_count)
+            }),
             type: 'danger',
-            confirmText: t('index.card.reanalyze'),
+            confirmText: t('video_analyze.reanalyze_confirm'),
             cancelText: t('common.cancel')
         });
 
@@ -1229,7 +1238,9 @@
         loadVideos();
     }
 
-    // The reanalyze endpoint resets the video and queues the analysis itself
+    // The reanalysis deletes the video's people and thumbnails when it starts.
+    // The server refuses, deleting nothing, a video it cannot analyze again:
+    // its file is gone or it has a task running.
     async function requestReanalysis(videoId) {
         const response = await fetch(`/api/videos/${videoId}/reanalyze`, { method: 'POST' });
         if (!response.ok) {
@@ -1267,6 +1278,7 @@
         });
 
         document.getElementById('bulkAnalyze').addEventListener('click', analyzeSelected);
+        document.getElementById('bulkReanalyze').addEventListener('click', reanalyzeSelected);
         document.getElementById('bulkHide').addEventListener('click', hideSelected);
     }
 
@@ -1309,6 +1321,11 @@
         // Hidden videos can only be shown again, one by one
         document.getElementById('bulkHide').classList.toggle('hidden', currentFilter === 'hidden');
 
+        // Analyzing is for videos without analysis; analyzing again is another, destructive action
+        const kinds = count > 0 ? selectionKinds() : { pending: false, analyzed: false };
+        document.getElementById('bulkAnalyze').classList.toggle('hidden', !kinds.pending);
+        document.getElementById('bulkReanalyze').classList.toggle('hidden', !kinds.analyzed);
+
         selectPageCheckbox.checked = pageFullySelected;
         selectPageCheckbox.indeterminate = selectedIds.size > 0 && !pageFullySelected;
     }
@@ -1316,6 +1333,33 @@
     function clearSelection() {
         selectedIds.clear();
         allMatchingSelected = false;
+    }
+
+    /**
+     * Whether the selection holds videos without analysis and videos already
+     * analyzed. Across pages only the filter counts tell; the hidden filter has
+     * no counts by status, so both actions show there and say it themselves
+     * when they find nothing to do.
+     * @returns {Object} pending and analyzed, booleans
+     */
+    function selectionKinds() {
+        if (!allMatchingSelected) {
+            const kinds = [...selectedIds].map(id => getStatusView(pageVideos.get(id).status).kind);
+            return { pending: kinds.includes('pending'), analyzed: kinds.includes('ready') };
+        }
+        if (currentFilter === 'hidden') {
+            return { pending: true, analyzed: true };
+        }
+        if (currentFilter === 'all') {
+            return {
+                pending: filterCounts.pending + filterCounts.error > 0,
+                analyzed: filterCounts.analyzed + filterCounts.completed > 0
+            };
+        }
+        return {
+            pending: currentFilter === 'pending' || currentFilter === 'error',
+            analyzed: currentFilter === 'analyzed' || currentFilter === 'completed'
+        };
     }
 
     // Every video of the current filter and search, across pages
@@ -1353,48 +1397,81 @@
             return;
         }
 
+        // Only the videos without analysis: the analyzed ones keep theirs
         const toAnalyze = videos.filter(v => getStatusView(v.status).kind === 'pending').map(v => v.id);
-        const toReanalyze = videos.filter(v => getStatusView(v.status).kind === 'ready').map(v => v.id);
+        const analyzed = videos.filter(v => getStatusView(v.status).kind === 'ready').length;
 
-        if (toAnalyze.length === 0 && toReanalyze.length === 0) {
+        if (toAnalyze.length === 0) {
             ThumbnailApp.showToast(t('video_analyze.no_videos_in_selection'), 'info');
             return;
         }
 
-        const confirmed = toReanalyze.length > 0
-            ? await ThumbnailApp.showModal({
-                title: t('video_analyze.already_analyzed_title'),
-                htmlMessage: t('video_analyze.already_analyzed_message', {count: toReanalyze.length}),
-                type: 'danger',
-                confirmText: t('video_analyze.reanalyze_all'),
-                cancelText: t('common.cancel')
-            })
-            : await ThumbnailApp.showModal({
-                title: t('video_analyze.title'),
-                htmlMessage: t('video_analyze.message', {count: toAnalyze.length}),
-                type: 'info',
-                confirmText: t('analysis.start'),
-                cancelText: t('common.cancel')
-            });
+        const kept = analyzed > 0 ? '<br><br>' + t('video_analyze.analyzed_kept', {count: analyzed}) : '';
+        const confirmed = await ThumbnailApp.showModal({
+            title: t('video_analyze.title'),
+            htmlMessage: t('video_analyze.message', {count: toAnalyze.length}) + kept,
+            type: 'info',
+            confirmText: t('analysis.start'),
+            cancelText: t('common.cancel')
+        });
 
         if (!confirmed) return;
 
-        const failures = [];
-        for (const videoId of toReanalyze) {
-            try {
-                await requestReanalysis(videoId);
-            } catch (error) {
-                failures.push(error.message);
-            }
-        }
         for (const videoId of toAnalyze) {
             await startAnalysis(videoId);
         }
+        ThumbnailApp.showToast(t('analysis.started_for_count', {count: toAnalyze.length}), 'success');
 
-        if (failures.length > 0) {
-            ThumbnailApp.showToast(t('errors.analysis_failed') + ': ' + failures[0], 'error');
+        clearSelection();
+        loadVideos();
+    }
+
+    // Analyze again the analyzed videos of the selection: it deletes what they have
+    async function reanalyzeSelected() {
+        let videos;
+        try {
+            videos = await getSelectedVideos();
+        } catch (error) {
+            ThumbnailApp.showToast(t('errors.load_videos') + ': ' + error.message, 'error');
+            return;
         }
-        ThumbnailApp.showToast(t('analysis.started_for_count', {count: toAnalyze.length + toReanalyze.length - failures.length}), 'success');
+
+        const analyzed = videos.filter(v => getStatusView(v.status).kind === 'ready' && v.status !== 'generating');
+        if (analyzed.length === 0) {
+            ThumbnailApp.showToast(t('video_analyze.reanalyze_none'), 'info');
+            return;
+        }
+
+        const thumbnails = analyzed.reduce((total, video) => total + video.thumbnail_count, 0);
+        const confirmed = await ThumbnailApp.showModal({
+            title: t('video_analyze.reanalyze_title'),
+            htmlMessage: t('video_analyze.reanalyze_message', {
+                count: analyzed.length,
+                thumbnails: thumbnailsLabel(thumbnails)
+            }),
+            type: 'danger',
+            confirmText: t('video_analyze.reanalyze_confirm'),
+            cancelText: t('common.cancel')
+        });
+
+        if (!confirmed) return;
+
+        // Refused videos keep everything: their file is gone or they have a task running
+        const refused = [];
+        for (const video of analyzed) {
+            try {
+                await requestReanalysis(video.id);
+            } catch (error) {
+                refused.push(error.message);
+            }
+        }
+
+        if (refused.length > 0) {
+            ThumbnailApp.showToast(t('video_analyze.reanalyze_refused', {count: refused.length, reason: refused[0]}), 'error');
+        }
+        if (analyzed.length > refused.length) {
+            ThumbnailApp.showToast(t('analysis.started_for_count', {count: analyzed.length - refused.length}), 'success');
+        }
 
         clearSelection();
         loadVideos();

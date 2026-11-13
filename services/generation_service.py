@@ -11,9 +11,12 @@ import aiosqlite
 import sqlite3
 import shutil
 import logging
+import socket
 from contextlib import closing
 
-from utils import ReferenceImageError, resolve_output_path, resolve_row_paths, to_output_relative
+import psutil
+
+from utils import ReferenceImageError, resolve_row_paths, to_output_relative
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,16 @@ class ImageGenerationError(Exception):
 
 class GenerationNotReadyError(Exception):
     """Raised when a video cannot be claimed for a new generation job."""
+
+
+# A job cancelled while it was running keeps its video in 'generating' until
+# the worker has stopped (GenerationService._stop_job): meanwhile it is
+# stopping. For queries whose generation_jobs alias is gj.
+STOPPING_JOB_SQL = """(
+    gj.status = 'cancelled'
+    AND gj.id = (SELECT MAX(id) FROM generation_jobs WHERE video_id = gj.video_id)
+    AND EXISTS (SELECT 1 FROM videos held WHERE held.id = gj.video_id AND held.status = 'generating')
+)"""
 
 
 def create_sync_cancellation_check(job_id: int):
@@ -141,7 +154,7 @@ class GenerationService:
         try:
             async with self.db.execute(
                 "UPDATE videos SET status = 'generating' "
-                "WHERE id = ? AND status IN ('analyzed', 'completed')",
+                "WHERE id = ? AND status IN ('analyzed', 'completed') AND analysis_run IS NULL",
                 [video_id],
             ) as claim:
                 if claim.rowcount != 1:
@@ -199,6 +212,19 @@ class GenerationService:
             rows = await cursor.fetchall()
             columns = [description[0] for description in cursor.description]
             return [dict(zip(columns, row)) for row in rows]
+
+    async def start_job(self, job_id: int) -> bool:
+        """Claim a pending job for this process before preparing or writing any output."""
+        process = psutil.Process()
+        cursor = await self.db.execute(
+            """UPDATE generation_jobs
+               SET status = 'transcribing', progress = 10,
+                   executor_host = ?, executor_pid = ?, executor_started_at = ?
+               WHERE id = ? AND status = 'pending'""",
+            [socket.gethostname(), process.pid, process.create_time(), job_id]
+        )
+        await self.db.commit()
+        return cursor.rowcount == 1
 
     async def update_job_status(
         self,
@@ -269,16 +295,20 @@ class GenerationService:
 
     @staticmethod
     def save_generation_progress(database_path, job_id, progress, thumbnail_info=None):
-        """Persist progress atomically and always close the callback connection."""
+        """Persist progress atomically and always close the callback connection.
+
+        A finished image is saved even when its job stopped meanwhile (it was
+        cancelled while the image was being made): the image is done and paid
+        for. Then GenerationCancelledError tells the caller to stop.
+        """
         with closing(sqlite3.connect(str(database_path), timeout=30)) as conn:
             with conn:
-                cursor = conn.execute(
-                    "UPDATE generation_jobs SET progress = ? "
-                    "WHERE id = ? AND status = 'generating'",
-                    [progress, job_id],
-                )
-                if cursor.rowcount != 1:
-                    raise GenerationCancelledError(f"Job {job_id} is no longer generating")
+                row = conn.execute("SELECT status FROM generation_jobs WHERE id = ?", [job_id]).fetchone()
+                if row is None:
+                    raise GenerationCancelledError(f"Job {job_id} no longer exists")
+                generating = row[0] == 'generating'
+                if generating:
+                    conn.execute("UPDATE generation_jobs SET progress = ? WHERE id = ?", [progress, job_id])
                 if thumbnail_info and thumbnail_info.get('path'):
                     img = thumbnail_info.get('image')
                     conn.execute("""
@@ -291,6 +321,8 @@ class GenerationService:
                         img.suggested_title if img else None,
                         img.text_overlay if img else None,
                     ])
+        if not generating:
+            raise GenerationCancelledError(f"Job {job_id} is no longer generating")
 
     async def run_generation_pipeline(
         self,
@@ -362,10 +394,17 @@ class GenerationService:
         from prompt_generation import generate_thumbnail_images
         from image_generation import generate_thumbnails_from_images
 
+        # The reference images of this job, written for the image providers
+        temp_references = None
         try:
             # Get job info
             job = await self.get_job(job_id)
             if not job:
+                return
+            # Only a job that never started runs: one that was interrupted,
+            # cancelled or finished stays as it ended if the queue delivers it again
+            if not await self.start_job(job_id):
+                logger.warning(f"Job {job_id} is no longer pending: it does not run again")
                 return
 
             if image_provider == "comfyui":
@@ -455,7 +494,7 @@ class GenerationService:
                 include_environment=include_scene_reference,
                 style_base64=reference_image_base64 if reference_image_include_in_refs else None,
             )
-            directory = output.output_dir / "temp_refs" / f"job_{job_id}"
+            directory = temp_references = output.output_dir / "temp_refs" / f"job_{job_id}"
             directory.mkdir(parents=True, exist_ok=True)
             best_frames = []
             reference_mapping = []
@@ -477,7 +516,6 @@ class GenerationService:
             # is part of the concepts_hash, so changing it just regenerates
             # the concept stage while preserving the identity skeleton.
             if force_prompts:
-                import shutil
                 prompts_dir = output.output_dir / "prompts"
                 shutil.rmtree(prompts_dir, ignore_errors=True)
 
@@ -491,6 +529,7 @@ class GenerationService:
                 job_id, transcribe_video, video_path, output
             )
 
+            # Nobody speaks in the video: the ideas come from its title
             if not transcription:
                 transcription = video_path.stem
 
@@ -512,7 +551,9 @@ class GenerationService:
                 selected_titles=selected_titles,
                 reference_images_base64=ref_images_for_prompts if ref_images_for_prompts else None,
                 has_style_reference=has_external_style_ref_for_prompts,
-                reference_mapping=reference_mapping if reference_mapping else None
+                reference_mapping=reference_mapping if reference_mapping else None,
+                # Asked before each LLM call: a cancelled job stops paying for ideas
+                cancellation_check=cancellation_check
             )
             thumbnail_images = await self._run_generation_step(job_id, _gen_prompts_fn)
 
@@ -532,12 +573,11 @@ class GenerationService:
             from config import DATABASE_PATH
 
             def progress_callback(current: int, total: int, thumbnail_info: dict = None):
-                """Update progress and insert thumbnails in DB synchronously during image generation."""
-                # Check for cancellation before continuing
-                # This allows aborting between image generations
-                if cancellation_check and cancellation_check():
-                    raise GenerationCancelledError(f"Job {job_id} cancelled during image generation")
+                """Save each finished thumbnail and the progress; raises once the job is cancelled.
 
+                The image that was being made when the job was cancelled is
+                saved first: the generation stops between images.
+                """
                 # Calculate progress: 50% to 95% during image generation
                 if total > 0:
                     image_progress = int((current / total) * 45)  # 0-45%
@@ -567,6 +607,10 @@ class GenerationService:
                 allow_provider_fallback=allow_provider_fallback
             )
             thumbnail_paths = await self._run_generation_step(job_id, _gen_thumbs_fn)
+
+            # The image loop stops without raising when it finds the job cancelled
+            if cancellation_check and cancellation_check():
+                raise GenerationCancelledError(f"Job {job_id} cancelled during image generation")
 
             if not thumbnail_paths:
                 error_msg = 'Thumbnail generation failed'
@@ -630,6 +674,15 @@ class GenerationService:
             await self.update_job_status(job_id, 'error', 0, str(e))
             raise
 
+        finally:
+            # However the job ended, its steps have stopped (see _run_generation_step)
+            # and nothing reads its reference copies any more
+            if temp_references is not None and temp_references.exists():
+                try:
+                    shutil.rmtree(temp_references)
+                except OSError as e:
+                    logger.warning(f"Job {job_id}: could not delete {temp_references}: {e}")
+
     async def get_job(self, job_id: int) -> Optional[dict]:
         """Get a generation job by ID."""
         query = "SELECT * FROM generation_jobs WHERE id = ?"
@@ -641,7 +694,11 @@ class GenerationService:
             return None
 
     async def get_job_status(self, job_id: int) -> Optional[dict]:
-        """Get detailed job status."""
+        """Get detailed job status.
+
+        'stopping' is True for a cancelled job whose worker has not stopped yet:
+        it may still save the thumbnail it was making, and it keeps its video.
+        """
         job = await self.get_job(job_id)
         if not job:
             return None
@@ -654,12 +711,18 @@ class GenerationService:
             row = await cursor.fetchone()
             thumbnails_count = row[0] if row else 0
 
+        async with self.db.execute(
+            f"SELECT {STOPPING_JOB_SQL} FROM generation_jobs gj WHERE gj.id = ?", [job_id]
+        ) as cursor:
+            stopping = bool((await cursor.fetchone())[0])
+
         total_thumbnails = job['num_images']
 
         return {
             'job_id': job_id,
             'video_id': job['video_id'],
             'status': job['status'],
+            'stopping': stopping,
             'progress': job['progress'],
             'current_step': job['status'],
             'thumbnails_generated': thumbnails_count,
@@ -716,10 +779,10 @@ class GenerationService:
     async def get_video_jobs(self, video_id: int) -> List[dict]:
         """Get all generation jobs for a video, enriched with their cluster list."""
         query = """
-            SELECT id, num_images, status, progress, created_at, completed_at
+            SELECT id, num_images, status, progress, error_message, created_at, completed_at
             FROM generation_jobs
             WHERE video_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
         """
 
         async with self.db.execute(query, [video_id]) as cursor:
@@ -734,144 +797,3 @@ class GenerationService:
             job['person_mapping'] = {jc['person_id']: jc['cluster_id'] for jc in job_clusters}
 
         return jobs
-
-    async def cleanup_partial_generation(self, job_id: int) -> dict:
-        """
-        Clean up partial resources after generation cancellation.
-
-        This method removes incomplete files and database records that were
-        created during an interrupted generation job. It always cleans:
-        - This job's temp_refs/job_ID/ directory (temporary reference images)
-        - Thumbnail files that were generated for this job, including
-          pre-face-swap copies
-        - Thumbnail database records for this job
-
-        Prompts are NOT deleted as they may be valid and reusable.
-
-        Args:
-            job_id: The generation job ID whose partial resources should be cleaned
-
-        Returns:
-            dict with cleanup details: {
-                'cleaned_files': list of file paths that were deleted,
-                'cleaned_db_records': number of DB records deleted,
-                'job_status_was': the status the job was in when cancelled
-            }
-        """
-        from utils import VideoOutput
-        from config import OUTPUT_DIR
-
-        cleaned_files = []
-        cleaned_db = 0
-
-        # Get job info
-        job = await self.get_job(job_id)
-        if not job:
-            return {"cleaned_files": [], "cleaned_db_records": 0, "job_status_was": None}
-
-        job_status = job.get("status", "")
-        video_id = job.get("video_id")
-
-        # Get video info for output directory
-        video = await self.get_video(video_id)
-        if not video:
-            return {"cleaned_files": [], "cleaned_db_records": 0, "job_status_was": job_status}
-
-        # A stopped worker retains its claim until cleanup finishes. A late
-        # duplicate delivery must never remove artifacts of a newer generation.
-        async with self.db.execute(
-            'SELECT MAX(id) FROM generation_jobs WHERE video_id = ?', [video_id]
-        ) as cursor:
-            latest_job_id = (await cursor.fetchone())[0]
-        if video['status'] != 'generating' or latest_job_id != job_id:
-            return {"cleaned_files": [], "cleaned_db_records": 0, "job_status_was": job_status}
-
-        video_path = Path(video.get("filepath", ""))
-        output = VideoOutput(video_path, Path(OUTPUT_DIR))
-
-        logger.info(f"Cleaning up partial generation for job {job_id} (status was: {job_status})")
-
-        # 1. Never delete temporary references belonging to a newer job.
-        temp_refs_dir = output.output_dir / "temp_refs" / f"job_{job_id}"
-        if temp_refs_dir.exists():
-            try:
-                shutil.rmtree(temp_refs_dir, ignore_errors=True)
-                cleaned_files.append(str(temp_refs_dir))
-                logger.debug(f"Deleted {temp_refs_dir}")
-            except Exception as e:
-                logger.warning(f"Could not delete {temp_refs_dir}: {e}")
-
-        # 2. Get and delete partial thumbnails (files + DB)
-        try:
-            async with self.db.execute(
-                "SELECT filepath, raw_path FROM thumbnails WHERE job_id = ?",
-                [job_id]
-            ) as cursor:
-                thumbnails = await cursor.fetchall()
-
-            for filepath, swap_raw_path in thumbnails:
-                thumb_path = resolve_output_path(filepath)
-
-                # Delete the pre-face-swap copy (thumbnails/raw_swap/)
-                if swap_raw_path:
-                    swap_raw = resolve_output_path(swap_raw_path)
-                    if swap_raw.exists():
-                        try:
-                            swap_raw.unlink()
-                            cleaned_files.append(str(swap_raw))
-                            logger.debug(f"Deleted pre-swap thumbnail {swap_raw}")
-                        except Exception as e:
-                            logger.warning(f"Could not delete {swap_raw}: {e}")
-
-                # Delete the thumbnail file
-                if thumb_path.exists():
-                    try:
-                        thumb_path.unlink()
-                        cleaned_files.append(str(thumb_path))
-                        logger.debug(f"Deleted thumbnail {thumb_path}")
-                    except Exception as e:
-                        logger.warning(f"Could not delete {thumb_path}: {e}")
-
-                # Also check for raw version in thumbnails/raw/
-                if thumb_path.parent.name == "thumbnails":
-                    raw_dir = thumb_path.parent / "raw"
-                    # Match the filename used by image_generation and ComfyUI.
-                    parts = thumb_path.stem.split("_", 1)
-                    raw_stem = f"{parts[0]}_raw_{parts[1]}" if len(parts) == 2 else f"raw_{parts[0]}"
-                    raw_filename = raw_stem + thumb_path.suffix
-                    raw_path = raw_dir / raw_filename
-                    if raw_path.exists():
-                        try:
-                            raw_path.unlink()
-                            cleaned_files.append(str(raw_path))
-                            logger.debug(f"Deleted raw thumbnail {raw_path}")
-                        except Exception as e:
-                            logger.warning(f"Could not delete {raw_path}: {e}")
-
-        except Exception as e:
-            logger.warning(f"Error fetching thumbnails for cleanup: {e}")
-
-        # 3. Delete thumbnail DB records
-        try:
-            cursor = await self.db.execute(
-                "DELETE FROM thumbnails WHERE job_id = ?",
-                [job_id]
-            )
-            cleaned_db = cursor.rowcount
-            await self.db.commit()
-            if cleaned_db > 0:
-                logger.debug(f"Deleted {cleaned_db} thumbnail records from DB")
-        except Exception as e:
-            logger.warning(f"Could not delete thumbnail DB records: {e}")
-
-        if cleaned_files or cleaned_db:
-            logger.info(
-                f"Cleanup complete for job {job_id}: "
-                f"{len(cleaned_files)} files, {cleaned_db} DB records"
-            )
-
-        return {
-            "cleaned_files": cleaned_files,
-            "cleaned_db_records": cleaned_db,
-            "job_status_was": job_status
-        }

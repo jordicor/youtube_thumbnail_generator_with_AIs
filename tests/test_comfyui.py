@@ -266,6 +266,70 @@ def test_native_qwen_profile_and_reference_contract():
         comfy.build_prompt(profile, idea(), 1)
 
 
+def test_minimax_profile_preserves_references_scene_and_literal_text():
+    profile = comfy.load_profile("minimax-h3-image")
+    image = idea()
+    image.reference_mapping[1].update(body_coverage="torso", body_posture="seated")
+    image.reference_mapping.append({"image_index": 3, "reference_role": "environment",
+                                    "environment_mode": "same", "environment_instruction": "Preserve the room."})
+    image.characters = {"person_01": {"outfit": "blue jacket"}}
+    image.outfit_changes = [{"person_id": "person_01", "outfit": "red sweater"}]
+    image.text_in_image = 'FIRST DATE: "NO!"'
+    image.suggested_title = "This title must not be drawn"
+    prompt = comfy.build_prompt(profile, image, 3)
+    assert "<Picture 3> is Image 3" in prompt
+    assert "BODY REFERENCE for person_02" in prompt
+    assert "Preserve the room" in prompt
+    assert "person_01 and person_02 at a desk" in prompt
+    assert "person_01 wears red sweater" in prompt
+    assert "blue jacket" not in prompt
+    assert json.dumps(image.text_in_image) in prompt
+    assert image.suggested_title not in prompt
+    graph = profile.graph(prompt, 123, [f"reference_{i}.png" for i in range(16)], {})
+    assert graph["4"]["inputs"]["images.image_16"] == ["app_reference_16", 0]
+    assert graph["4"]["inputs"]["vae"] == ["3", 0]
+    assert graph["6"]["inputs"]["latent_image"] == ["4", 1]
+    assert graph["6"]["inputs"]["steps"] == 6
+    assert graph["6"]["inputs"]["cfg"] == 1
+    image.text_in_image = None
+    assert "contains no lettering" in comfy.build_prompt(profile, image, 3)
+    with pytest.raises(ValueError, match="mapping"):
+        comfy.build_prompt(profile, image, 2)
+
+
+@pytest.mark.parametrize("template", [{"names": ["image_1", "image_2"]},
+                                     {"prefix": "image_", "min": 0, "max": 2}])
+def test_autogrow_image_bindings_validate_names_and_prefixes(server, profile, template):
+    profile.references = [comfy.Binding(node="1", input=f"images.image_{index}") for index in (1, 2)]
+    with comfy.Client(comfy.Connection(url=server.url)) as client:
+        info = client.inspect(profile)
+        schema = info["nodes"]["ReferenceGenerator"]["input"]
+        template = {**template, "input": {"required": {"image": ["IMAGE", {}]}}}
+        schema["optional"] = {"images": ["COMFY_AUTOGROW_V3", {"template": template}]}
+        client.validate(profile, info)
+        for slot in ("image_0", "image_3", "image_01", "wrong_1"):
+            profile.references[1].input = f"images.{slot}"
+            with pytest.raises(comfy.ComfyUIError, match="Unsupported image input"):
+                client.validate(profile, info)
+        profile.references[1].input = "images.image_2"
+        template["input"]["required"]["image"] = ["AUDIO", {}]
+        with pytest.raises(comfy.ComfyUIError, match="Unsupported image input"):
+            client.validate(profile, info)
+    assert server.prompts == server.uploads == []
+
+
+def test_integer_dimensions_reject_values_outside_node_step(server, profile):
+    profile.workflow["1"]["inputs"]["width"] = 2752
+    profile.parameters["width"] = comfy.Parameter(node="1", input="width", label="Width")
+    with comfy.Client(comfy.Connection(url=server.url, parameters={"width": 2753})) as client:
+        info = client.inspect(profile.model_copy(update={"parameters": {}}))
+        info["nodes"]["ReferenceGenerator"]["input"]["required"]["width"] = ["INT", {"min": 0, "max": 16384, "step": 32}]
+        with pytest.raises(comfy.ComfyUIError, match="Invalid numeric step"):
+            client.validate(profile, info)
+        client.connection.parameters["width"] = 2752
+        client.validate(profile, info)
+
+
 async def test_settings_import_check_and_save(client, server, profile):
     assert (await client.post("/api/settings/comfyui/workflows", json=profile.model_dump())).status_code == 201
     assert (await client.post("/api/settings/comfyui/workflows", json=profile.model_dump())).status_code == 400

@@ -239,7 +239,7 @@ OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2.5-sunburst")
 # gpt-image-2 and later accept any WIDTHxHEIGHT in multiples of 16: an exact 16:9
 OPENAI_IMAGE_SIZE = "1536x864"
 OPENAI_IMAGE_FORMAT = "png"         # "png", "jpeg", "webp"
-OPENAI_IMAGE_QUALITY = "high"       # "low", "medium", "high"; gpt-image-2.5 adds "xhigh", "max"
+OPENAI_IMAGE_QUALITY = "high"       # "low", "medium", "high"; gpt-image-2.5/2.6 also support "xhigh", "max"
 
 # Poe API Image settings (FLUX models support reference images)
 # Bot names verified on poe.com 2025-12-28: flux2pro, flux2flex, fluxkontextpro, seedream40, Ideogram-v3.
@@ -258,9 +258,11 @@ GEMINI_MODELS = {
     "gemini-nano-banana-2.1": "Fast, 4K, cheaper (Nano Banana 2.1, 2026-10-06)",
 }
 
-# OpenAI models for image generation (checked against the OpenAI API on 2026-10-24)
+# OpenAI models for image generation (checked against the OpenAI API on 2026-11-06)
 OPENAI_MODELS = {
-    "gpt-image-2.5-sunburst": "Most capable, precise editing (2026-09-08)",
+    "gpt-image-2.6-sunburst": "Detailed compositions and precise editing",
+    "gpt-image-2.6-flare": "Fast generation and editing",
+    "gpt-image-2.5-sunburst": "Precise editing (2026-09-08)",
     "gpt-image-2.5-flare": "Fast, high quality (2026-09-08)",
     "gpt-image-2": "Previous generation (2026-04-21)",
 }
@@ -307,8 +309,10 @@ GEMINI_MODEL_MAX_REFS = {
 
 # Maximum reference images per OPENAI model
 # gpt-image-2: up to 16 images, always processed at high fidelity (input_fidelity param not supported)
-# gpt-image-2.5: OpenAI documents no limit of its own; the GPT Image limit of 16 is assumed
+# The Images edits API accepts up to 16 references for GPT Image models, including 2.5 and 2.6.
 OPENAI_MODEL_MAX_REFS = {
+    "gpt-image-2.6-sunburst": 16,
+    "gpt-image-2.6-flare": 16,
     "gpt-image-2.5-sunburst": 16,
     "gpt-image-2.5-flare": 16,
     "gpt-image-2": 16,
